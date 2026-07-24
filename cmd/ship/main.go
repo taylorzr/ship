@@ -8,34 +8,51 @@ import (
 	"strings"
 	"text/tabwriter"
 
+	"github.com/spf13/cobra"
 	"github.com/zach/ship/internal/config"
 	gh "github.com/zach/ship/internal/github"
 	"github.com/zach/ship/internal/store"
 )
 
-func main() {
-	if len(os.Args) > 1 && os.Args[1] == "--count" {
-		runCount()
-		return
-	}
+var rootCmd = &cobra.Command{
+	Use:   "ship",
+	Short: "Personal dev hub — GitHub, prod, and what's next",
+	RunE:  runDashboard,
+}
 
+var countCmd = &cobra.Command{
+	Use:   "count",
+	Short: "Print cached PR counts (for shell prompts)",
+	Run: func(cmd *cobra.Command, args []string) {
+		runCount()
+	},
+}
+
+func init() {
+	rootCmd.AddCommand(countCmd)
+}
+
+func main() {
+	if err := rootCmd.Execute(); err != nil {
+		os.Exit(1)
+	}
+}
+
+func runDashboard(cmd *cobra.Command, args []string) error {
 	cfg, err := config.Load("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "config: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("config: %w", err)
 	}
 
 	st, err := store.Open("")
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "store: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("store: %w", err)
 	}
 	defer st.Close()
 
 	token, err := ghToken()
 	if err != nil {
-		fmt.Fprintf(os.Stderr, "gh auth: %v\n", err)
-		os.Exit(1)
+		return fmt.Errorf("gh auth: %w", err)
 	}
 
 	client := gh.NewClient(token)
@@ -44,7 +61,6 @@ func main() {
 	user, _ := client.User(ctx)
 	fmt.Printf("ship — logged in as %s\n\n", user)
 
-	// fetch my PRs
 	myPRs, err := client.MyPRs(ctx, cfg.GitHub.Orgs)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "fetch my PRs: %v\n", err)
@@ -56,7 +72,6 @@ func main() {
 		st.SavePRs(cache, "mine")
 	}
 
-	// fetch review-requested PRs
 	reviewPRs, err := client.ReviewRequested(ctx)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "fetch review PRs: %v\n", err)
@@ -68,7 +83,6 @@ func main() {
 		st.SavePRs(cache, "review-direct")
 	}
 
-	// fetch dep PRs
 	starred := cfg.StarredRepos()
 	depPRs, err := client.DepPRs(ctx, starred)
 	if err != nil {
@@ -83,10 +97,10 @@ func main() {
 
 	st.UpdateRefresh("github", "ok")
 
-	// print cached
 	printPRs(st, "mine", "My PRs")
 	printPRs(st, "review-direct", "To Review")
 	printPRs(st, "dep", "Dependencies")
+	return nil
 }
 
 func printPRs(st *store.Store, role, label string) {
