@@ -260,7 +260,16 @@ func runReleases(cmd *cobra.Command, args []string) error {
 		if releasesRepo != "" && !strings.HasSuffix(svc.Repo, releasesRepo) {
 			continue
 		}
-		r := version.Resolve(ctx, k8sClient, ghClient, svc)
+		svcK8s := k8sClient
+		if mockK8sImage == "" {
+			rc, err := k8s.NewRealClient("", svc.Context)
+			if err != nil {
+				fmt.Printf("── %s ──\n  ✗ k8s: %v\n\n", svc.Repo, err)
+				continue
+			}
+			svcK8s = rc
+		}
+		r := version.Resolve(ctx, svcK8s, ghClient, svc)
 		printVersion(r)
 	}
 	return nil
