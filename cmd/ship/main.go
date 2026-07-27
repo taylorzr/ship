@@ -11,7 +11,9 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/zach/ship/internal/config"
 	gh "github.com/zach/ship/internal/github"
+	"github.com/zach/ship/internal/k8s"
 	"github.com/zach/ship/internal/store"
+	"github.com/zach/ship/internal/version"
 )
 
 var rootCmd = &cobra.Command{
@@ -28,8 +30,20 @@ var countCmd = &cobra.Command{
 	},
 }
 
+var releasesCmd = &cobra.Command{
+	Use:   "releases",
+	Short: "Show prod version status for tracked services",
+	RunE:  runReleases,
+}
+
+var mockK8sImage string
+var releasesRepo string
+
 func init() {
 	rootCmd.AddCommand(countCmd)
+	rootCmd.AddCommand(releasesCmd)
+	releasesCmd.Flags().StringVar(&mockK8sImage, "mock-k8s", "", "mock k8s with this image (e.g. repo/app:v10.1.0)")
+	releasesCmd.Flags().StringVar(&releasesRepo, "repo", "", "filter to a specific repo (e.g. taylorzr/kitty-meow)")
 }
 
 func main() {
@@ -209,4 +223,77 @@ func ghToken() (string, error) {
 		return "", fmt.Errorf("run `gh auth login` first: %w", err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func runReleases(cmd *cobra.Command, args []string) error {
+	cfg, err := config.Load("")
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+
+	token, err := ghToken()
+	if err != nil {
+		return fmt.Errorf("gh auth: %w", err)
+	}
+
+	ghClient := gh.NewClient(token)
+	ctx := context.Background()
+
+	var k8sClient k8s.Client
+	if mockK8sImage != "" {
+		k8sClient = k8s.NewMock(mockK8sImage)
+		fmt.Printf("(using mock k8s — image: %s)\n\n", mockK8sImage)
+	}
+
+	if len(cfg.Services) == 0 {
+		fmt.Println("no services configured — add [[service]] to ~/.config/ship/config.toml")
+		return nil
+	}
+
+	for _, svc := range cfg.Services {
+		if releasesRepo != "" && !strings.HasSuffix(svc.Repo, releasesRepo) {
+			continue
+		}
+		if k8sClient == nil {
+			fmt.Fprintf(os.Stderr, "no k8s access — use --mock-k8s to test\n")
+			return nil
+		}
+		r := version.Resolve(ctx, k8sClient, ghClient, svc)
+		printVersion(r)
+	}
+	return nil
+}
+
+func printVersion(r *version.Result) {
+	if r.Error != "" {
+		fmt.Printf("── %s ──\n", r.Service.Repo)
+		fmt.Printf("  ✗ %s\n\n", r.Error)
+		return
+	}
+
+	fmt.Printf("── %s ──\n", r.Service.Repo)
+
+	if r.ProdTag != "" {
+		fmt.Printf("  prod %s", r.ProdTag)
+	} else {
+		fmt.Printf("  prod %s", r.ProdSHA[:7])
+	}
+
+	if len(r.PendingTags) > 0 {
+		names := make([]string, len(r.PendingTags))
+		for i, t := range r.PendingTags {
+			names[i] = t.Name
+		}
+		fmt.Printf(" · pending %s", strings.Join(names, ", "))
+	}
+
+	if r.AheadBy > 0 {
+		fmt.Printf(" · +%d untagged", r.AheadBy)
+	}
+	fmt.Println()
+
+	for _, c := range r.Commits {
+		fmt.Printf("    %s  %s\n", c.SHA, c.Message)
+	}
+	fmt.Println()
 }

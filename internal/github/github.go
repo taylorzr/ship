@@ -2,7 +2,11 @@ package github
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
+	"os/exec"
+	"sort"
+	"strings"
 
 	"github.com/shurcooL/githubv4"
 	"golang.org/x/oauth2"
@@ -223,4 +227,137 @@ func (c *Client) DepPRs(ctx context.Context, repos []string) ([]PR, error) {
 		all = append(all, prs...)
 	}
 	return all, nil
+}
+
+type CompareResult struct {
+	AheadBy  int
+	Commits  []CommitSummary
+}
+
+type CommitSummary struct {
+	SHA     string
+	Message string
+	Author  string
+}
+
+func (c *Client) Compare(ctx context.Context, repo, base, head string) (*CompareResult, error) {
+	out, err := exec.Command("gh", "api", fmt.Sprintf("repos/%s/compare/%s...%s", repo, base, head)).Output()
+	if err != nil {
+		return nil, fmt.Errorf("gh api compare: %w", err)
+	}
+	var resp struct {
+		AheadBy  int `json:"ahead_by"`
+		Commits  []struct {
+			SHA    string `json:"sha"`
+			Commit struct {
+				Message  string `json:"message"`
+				Author   struct {
+					Name string `json:"name"`
+				} `json:"author"`
+			} `json:"commit"`
+		} `json:"commits"`
+	}
+	if err := json.Unmarshal(out, &resp); err != nil {
+		return nil, fmt.Errorf("parse compare: %w", err)
+	}
+	result := &CompareResult{AheadBy: resp.AheadBy}
+	for _, c := range resp.Commits {
+		result.Commits = append(result.Commits, CommitSummary{
+			SHA:     c.SHA[:7],
+			Message: strings.Split(c.Commit.Message, "\n")[0],
+			Author:  c.Commit.Author.Name,
+		})
+	}
+	return result, nil
+}
+
+type TagInfo struct {
+	Name string
+	SHA  string
+}
+
+func (c *Client) ResolveRef(ctx context.Context, repo, ref string) (string, error) {
+	out, err := exec.Command("gh", "api", fmt.Sprintf("repos/%s/git/ref/tags/%s", repo, ref), "--jq", ".object.sha").Output()
+	if err != nil {
+		return "", fmt.Errorf("resolve ref %s: %w", ref, err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
+func (c *Client) ListTags(ctx context.Context, repo string) ([]TagInfo, error) {
+	out, err := exec.Command("gh", "api", fmt.Sprintf("repos/%s/git/refs/tags?per_page=100", repo)).Output()
+	if err != nil {
+		return nil, fmt.Errorf("list tags: %w", err)
+	}
+	var resp []struct {
+		Ref  string `json:"ref"`
+		Object struct {
+			SHA  string `json:"sha"`
+			Type string `json:"type"`
+		} `json:"object"`
+	}
+	if err := json.Unmarshal(out, &resp); err != nil {
+		return nil, fmt.Errorf("parse tags: %w", err)
+	}
+	var tags []TagInfo
+	for _, t := range resp {
+		name := strings.TrimPrefix(t.Ref, "refs/tags/")
+		tags = append(tags, TagInfo{Name: name, SHA: t.Object.SHA})
+	}
+	return tags, nil
+}
+
+func (c *Client) ListTagsReachableFrom(ctx context.Context, repo, branch string) ([]TagInfo, error) {
+	allTags, err := c.ListTags(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
+
+	var result []TagInfo
+	for _, tag := range allTags {
+		// check if tag commit is reachable from branch using merge-base
+		out, err := exec.Command("gh", "api", fmt.Sprintf("repos/%s/compare/%s...%s", repo, tag.SHA, branch),
+			"--jq", ".status").Output()
+		if err != nil {
+			continue
+		}
+		status := strings.TrimSpace(string(out))
+		if status == "identical" || status == "behind" {
+			result = append(result, tag)
+		}
+	}
+	return result, nil
+}
+
+type PendingTag struct {
+	Name string
+	SHA  string
+}
+
+func (c *Client) PendingTags(ctx context.Context, repo, prodSHA, branch string) ([]PendingTag, error) {
+	tags, err := c.ListTags(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
+
+	var pending []PendingTag
+	for _, tag := range tags {
+		// skip the tag that matches prod
+		if tag.SHA == prodSHA {
+			continue
+		}
+		// check if this tag is ahead of prod (i.e. contains commits not in prod)
+		comp, err := c.Compare(ctx, repo, prodSHA, tag.Name)
+		if err != nil {
+			continue
+		}
+		if comp.AheadBy > 0 {
+			pending = append(pending, PendingTag{Name: tag.Name, SHA: tag.SHA[:7]})
+		}
+	}
+
+	sort.Slice(pending, func(i, j int) bool {
+		return pending[i].Name < pending[j].Name
+	})
+	return pending, nil
 }

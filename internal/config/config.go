@@ -38,6 +38,7 @@ type ServiceConfig struct {
 	VersionStrategy string `toml:"version_strategy"`
 	VersionKey      string `toml:"version_key"`
 	DeployURL       string `toml:"deploy_url"`
+	Branch          string `toml:"branch"`
 }
 
 type JiraConfig struct {
