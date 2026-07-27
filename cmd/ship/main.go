@@ -243,6 +243,12 @@ func runReleases(cmd *cobra.Command, args []string) error {
 	if mockK8sImage != "" {
 		k8sClient = k8s.NewMock(mockK8sImage)
 		fmt.Printf("(using mock k8s — image: %s)\n\n", mockK8sImage)
+	} else {
+		rc, err := k8s.NewRealClient("", "")
+		if err != nil {
+			return fmt.Errorf("k8s: %w", err)
+		}
+		k8sClient = rc
 	}
 
 	if len(cfg.Services) == 0 {
@@ -253,10 +259,6 @@ func runReleases(cmd *cobra.Command, args []string) error {
 	for _, svc := range cfg.Services {
 		if releasesRepo != "" && !strings.HasSuffix(svc.Repo, releasesRepo) {
 			continue
-		}
-		if k8sClient == nil {
-			fmt.Fprintf(os.Stderr, "no k8s access — use --mock-k8s to test\n")
-			return nil
 		}
 		r := version.Resolve(ctx, k8sClient, ghClient, svc)
 		printVersion(r)
