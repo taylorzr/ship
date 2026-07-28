@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/charmbracelet/bubbles/key"
@@ -384,35 +385,64 @@ func (m Model) refreshDeps(ctx context.Context) tea.Cmd {
 
 func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
-		var lastErr error
+		type svcResult struct {
+			Repo        string
+			ProdRef     string
+			ProdSHA     string
+			AheadBy     int
+			PendingTags string
+			Error       string
+		}
+
+		var wg sync.WaitGroup
+		results := make(chan svcResult, len(m.cfg.Services))
+
 		for _, svc := range m.cfg.Services {
-			svcCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-			rc, err := k8s.NewRealClient(svcCtx, "", svc.Context)
-			if err != nil {
-				m.store.SaveVersion(store.CachedVersion{Repo: svc.Repo, Error: fmt.Sprintf("k8s: %v", err)})
-				lastErr = err
-				cancel()
-				continue
-			}
-			r := version.Resolve(svcCtx, rc, m.gh, svc)
-			cancel()
-			pending := ""
-			for i, t := range r.PendingTags {
-				if i > 0 {
-					pending += ", "
+			wg.Add(1)
+			go func(svc config.ServiceConfig) {
+				defer wg.Done()
+				svcCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+				defer cancel()
+
+				rc, err := k8s.NewRealClient(svcCtx, "", svc.Context)
+				if err != nil {
+					results <- svcResult{Repo: svc.Repo, Error: fmt.Sprintf("k8s: %v", err)}
+					return
 				}
-				pending += t.Name
-			}
+				r := version.Resolve(svcCtx, rc, m.gh, svc)
+				pending := ""
+				for i, t := range r.PendingTags {
+					if i > 0 {
+						pending += ", "
+					}
+					pending += t.Name
+				}
+				results <- svcResult{
+					Repo:        svc.Repo,
+					ProdRef:     r.ProdRef,
+					ProdSHA:     r.ProdSHA,
+					AheadBy:     r.AheadBy,
+					PendingTags: pending,
+					Error:       r.Error,
+				}
+			}(svc)
+		}
+
+		wg.Wait()
+		close(results)
+
+		var lastErr error
+		for res := range results {
 			m.store.SaveVersion(store.CachedVersion{
-				Repo:        svc.Repo,
-				ProdRef:     r.ProdRef,
-				ProdSHA:     r.ProdSHA,
-				AheadBy:     r.AheadBy,
-				PendingTags: pending,
-				Error:       r.Error,
+				Repo:        res.Repo,
+				ProdRef:     res.ProdRef,
+				ProdSHA:     res.ProdSHA,
+				AheadBy:     res.AheadBy,
+				PendingTags: res.PendingTags,
+				Error:       res.Error,
 			})
-			if r.Error != "" {
-				lastErr = fmt.Errorf("%s: %s", svc.Repo, r.Error)
+			if res.Error != "" {
+				lastErr = fmt.Errorf("%s: %s", res.Repo, res.Error)
 			}
 		}
 		return refreshDoneMsg{source: "Releases", err: lastErr}

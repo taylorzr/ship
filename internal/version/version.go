@@ -30,13 +30,13 @@ func Resolve(ctx context.Context, k8sClient k8s.Client, ghClient *gh.Client, svc
 
 	dep, err := k8sClient.GetDeployment(ctx, svc.Context, svc.Namespace, svc.Workload)
 	if err != nil {
-		r.Error = fmt.Sprintf("k8s: %v", err)
+		r.Error = fmt.Sprintf("%s: k8s: %v", svc.Repo, err)
 		return r
 	}
 
 	_, tag, err := k8s.ParseImageTag(dep.Image)
 	if err != nil {
-		r.Error = fmt.Sprintf("image: %v", err)
+		r.Error = fmt.Sprintf("%s: image: %v", svc.Repo, err)
 		return r
 	}
 	r.ProdRef = tag
@@ -47,7 +47,8 @@ func Resolve(ctx context.Context, k8sClient k8s.Client, ghClient *gh.Client, svc
 		r.ProdTag = tag
 		sha, err := ghClient.ResolveRef(ctx, svc.Repo, tag)
 		if err != nil {
-			r.Error = fmt.Sprintf("resolve %s: %v", tag, err)
+			// tag is not a git ref (e.g. ECR image tag) — show as-is
+			r.ProdSHA = tag
 			return r
 		}
 		r.ProdSHA = sha
@@ -55,7 +56,7 @@ func Resolve(ctx context.Context, k8sClient k8s.Client, ghClient *gh.Client, svc
 
 	compare, err := ghClient.Compare(ctx, svc.Repo, r.ProdSHA, branch)
 	if err != nil {
-		r.Error = fmt.Sprintf("compare: %v", err)
+		r.Error = fmt.Sprintf("%s: compare %s...%s: %v", svc.Repo, r.ProdSHA[:7], branch, err)
 		return r
 	}
 	r.AheadBy = compare.AheadBy

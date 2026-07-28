@@ -280,7 +280,7 @@ type TagInfo struct {
 }
 
 func (c *Client) ResolveRef(ctx context.Context, repo, ref string) (string, error) {
-	out, err := exec.Command("gh", "api", fmt.Sprintf("repos/%s/git/ref/tags/%s", repo, ref), "--jq", ".object.sha").CombinedOutput()
+	out, err := exec.Command("gh", "api", fmt.Sprintf("repos/%s/git/ref/refs/tags/%s", repo, ref), "--jq", ".object.sha").CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("resolve ref %s: %s: %w", ref, strings.TrimSpace(string(out)), err)
 	}
