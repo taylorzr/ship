@@ -69,15 +69,16 @@ var (
 )
 
 type row struct {
-	title  string
-	repo   string
-	num    int
-	url    string
-	ci     string
-	review string
-	draft  bool
-	name   string // display name (releases section)
-	pending string // pending versions (releases section)
+	title     string
+	repo      string
+	num       int
+	url       string
+	ci        string
+	review    string
+	draft     bool
+	name      string // display name (releases section)
+	pending   string // pending versions (releases section)
+	updatedAt string // RFC 3339 timestamp
 }
 
 type section struct {
@@ -228,18 +229,19 @@ func (m *Model) loadFromCache() {
 	s := section{name: "My PRs", scrollOffset: so, hideDrafts: hd}
 	for _, p := range prs {
 		r := row{
-			title:  p.Title,
-			repo:   p.Repo,
-			num:    p.Number,
-			url:    p.URL,
-			ci:     p.CIState,
-			review: p.ReviewDecision,
-			draft:  p.IsDraft,
+				title:  p.Title,
+				repo:   p.Repo,
+				num:    p.Number,
+				url:    p.URL,
+				ci:     p.CIState,
+				review: p.ReviewDecision,
+				draft:  p.IsDraft,
+				updatedAt: p.UpdatedAt,
+			}
+			s.allRows = append(s.allRows, r)
+			s.rows = append(s.rows, r)
 		}
-		s.allRows = append(s.allRows, r)
-		s.rows = append(s.rows, r)
-	}
-	sections = append(sections, s)
+		sections = append(sections, s)
 
 	revs, _ := m.store.CachedPRs("review-direct")
 	so, hd = m.sectionProp("To Review")
@@ -253,6 +255,7 @@ func (m *Model) loadFromCache() {
 			ci:     p.CIState,
 			review: p.ReviewDecision,
 			draft:  p.IsDraft,
+			updatedAt: p.UpdatedAt,
 		}
 		s2.allRows = append(s2.allRows, r)
 		s2.rows = append(s2.rows, r)
@@ -305,6 +308,7 @@ func (m *Model) loadFromCache() {
 			ci:     p.CIState,
 			review: p.ReviewDecision,
 			draft:  p.IsDraft,
+			updatedAt: p.UpdatedAt,
 		}
 		s4.allRows = append(s4.allRows, r)
 		s4.rows = append(s4.rows, r)
@@ -601,8 +605,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, m.fullRefreshCmd()
 		case key.Matches(msg, keys.FilterDraft):
-			m.sections[m.sectionIdx].hideDrafts = !m.sections[m.sectionIdx].hideDrafts
-			m.applyFilters()
+			if len(m.sections) > m.sectionIdx {
+				s := m.sections[m.sectionIdx]
+				if s.name != "Releases" {
+					s.hideDrafts = !s.hideDrafts
+					m.sections[m.sectionIdx] = s
+					m.applyFilters()
+				}
+			}
 			return m, nil
 		case key.Matches(msg, keys.Search):
 			m.searching = true
@@ -707,9 +717,13 @@ func (m Model) View() string {
 			b.WriteString("  ")
 			b.WriteString(helpKey.Render("[no drafts]"))
 		}
-		if m.searchQuery != "" && i == m.sectionIdx {
+		if i == m.sectionIdx && (m.searching || m.searchQuery != "") {
+			q := m.searchQuery
+			if m.searching {
+				q += "█"
+			}
 			b.WriteString("  ")
-			b.WriteString(helpKey.Render("/" + m.searchQuery))
+			b.WriteString(helpKey.Render("/" + q))
 		}
 		if m.loading[s.name] {
 			b.WriteString("  ")
@@ -725,6 +739,7 @@ func (m Model) View() string {
 		// column header for PR sections
 		if len(s.rows) > 0 && s.rows[0].num > 0 {
 			repoWidth := 30
+			ageWidth := 6
 			if m.width > 0 {
 				repoWidth = m.width * 30 / 100
 				if repoWidth < 15 {
@@ -733,7 +748,16 @@ func (m Model) View() string {
 					repoWidth = 50
 				}
 			}
-			header := fmt.Sprintf("CI Rev  %s  #       Title", padWidth("Repo", repoWidth))
+			titleWidth := m.width - repoWidth - 28
+			if titleWidth < 1 {
+				titleWidth = 1
+			}
+			header := fmt.Sprintf("%s%s  %s  %s  %s",
+				padWidth("CI Rev", 8),
+				padWidth("Repo", repoWidth),
+				padWidth("#", 6),
+				padWidth("Title", titleWidth),
+				padWidth("Age", ageWidth))
 			b.WriteString(headerStyle.Render(header))
 			b.WriteString("\n")
 
@@ -807,17 +831,15 @@ func (m Model) View() string {
 	}
 
 	b.WriteString("\n")
-	if m.searching {
-		prompt := "/" + m.searchQuery + "█"
-		b.WriteString(helpKey.Render(prompt))
-		b.WriteString("\n")
-	}
 	b.WriteString(m.viewHelp())
 
 	return b.String()
 }
 
 func truncateWidth(s string, max int) string {
+	if max < 1 {
+		return ""
+	}
 	if lipgloss.Width(s) <= max {
 		return s
 	}
@@ -825,7 +847,7 @@ func truncateWidth(s string, max int) string {
 	var w int
 	for _, r := range s {
 		rw := lipgloss.Width(string(r))
-		if w+rw > max {
+		if w+rw > max-1 {
 			out.WriteString("…")
 			break
 		}
@@ -843,6 +865,26 @@ func padWidth(s string, w int) string {
 	return s + strings.Repeat(" ", w-sw)
 }
 
+func relativeTime(s string) string {
+	t, err := time.Parse("2006-01-02T15:04:05Z", s)
+	if err != nil {
+		return ""
+	}
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return "<1m"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	case d < 7*24*time.Hour:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	default:
+		return t.Format("Jan 2")
+	}
+}
+
 func renderRow(r row, selected bool, repoWidth, maxWidth int) string {
 	icon := ciIcon(r.ci)
 
@@ -855,18 +897,22 @@ func renderRow(r row, selected bool, repoWidth, maxWidth int) string {
 
 	left := icon + " " + rev
 
+	const ageWidth = 6
+
 	var line string
 	if r.num > 0 {
 		title := r.title
 		if r.draft {
 			title = "[DRAFT] " + title
 		}
+		ts := relativeTime(r.updatedAt)
 		repo := truncateWidth(r.repo, repoWidth)
-		line = fmt.Sprintf("%s%s  #%-5d  %s",
-			padWidth(left, 8), padWidth(repo, repoWidth), r.num, title)
-		if maxWidth > 0 {
-			line = truncateWidth(line, maxWidth)
+		titleWidth := maxWidth - repoWidth - 28
+		if titleWidth < 1 {
+			titleWidth = 1
 		}
+		line = fmt.Sprintf("%s%s  #%-5d  %s  %s",
+			padWidth(left, 8), padWidth(repo, repoWidth), r.num, padWidth(truncateWidth(title, titleWidth), titleWidth), padWidth(ts, ageWidth))
 	} else {
 		line = r.title
 		if maxWidth > 0 {
