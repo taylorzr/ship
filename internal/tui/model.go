@@ -78,8 +78,9 @@ type row struct {
 }
 
 type section struct {
-	name    string
-	rows    []row
+	name        string
+	rows        []row
+	scrollOffset int
 }
 
 type keyMap struct {
@@ -161,11 +162,20 @@ func New(cfg *config.Config, st *store.Store, ghClient *gh.Client) Model {
 	return m
 }
 
+func (m *Model) scrollOffsetFor(name string) int {
+	for _, s := range m.sections {
+		if s.name == name {
+			return s.scrollOffset
+		}
+	}
+	return 0
+}
+
 func (m *Model) loadFromCache() {
 	var sections []section
 
 	prs, _ := m.store.CachedPRs("mine")
-	s := section{name: "My PRs"}
+	s := section{name: "My PRs", scrollOffset: m.scrollOffsetFor("My PRs")}
 	for _, p := range prs {
 		s.rows = append(s.rows, row{
 			title:  p.Title,
@@ -180,7 +190,7 @@ func (m *Model) loadFromCache() {
 	sections = append(sections, s)
 
 	revs, _ := m.store.CachedPRs("review-direct")
-	s2 := section{name: "To Review"}
+	s2 := section{name: "To Review", scrollOffset: m.scrollOffsetFor("To Review")}
 	for _, p := range revs {
 		s2.rows = append(s2.rows, row{
 			title:  p.Title,
@@ -214,7 +224,7 @@ func (m *Model) loadFromCache() {
 	sections = append(sections, s3)
 
 	deps, _ := m.store.CachedPRs("dep")
-	s4 := section{name: "Dependencies"}
+	s4 := section{name: "Dependencies", scrollOffset: m.scrollOffsetFor("Dependencies")}
 	for _, p := range deps {
 		s4.rows = append(s4.rows, row{
 			title:  p.Title,
@@ -229,6 +239,12 @@ func (m *Model) loadFromCache() {
 	sections = append(sections, s4)
 
 	m.sections = sections
+	// clamp scroll offsets after row count changes
+	for i := range m.sections {
+		if m.sections[i].scrollOffset >= len(m.sections[i].rows) {
+			m.sections[i].scrollOffset = 0
+		}
+	}
 	m.recalcTotal()
 	if m.sectionIdx >= len(m.sections) {
 		m.sectionIdx = 0
@@ -236,7 +252,10 @@ func (m *Model) loadFromCache() {
 	start := m.sectionOffset(m.sectionIdx)
 	end := m.sectionEnd(m.sectionIdx)
 	if m.cursor < start || m.cursor >= end {
-		m.cursor = start
+		m.cursor = start + m.sections[m.sectionIdx].scrollOffset
+	}
+	if m.cursor >= end {
+		m.cursor = end - 1
 	}
 	m.markRefreshed()
 }
@@ -268,31 +287,36 @@ func (m *Model) sectionEnd(idx int) int {
 }
 
 func (m *Model) nextRow() int {
-	end := m.sectionEnd(m.sectionIdx)
-	if m.cursor < end-1 {
-		return m.cursor + 1
+	s := &m.sections[m.sectionIdx]
+	start := m.sectionOffset(m.sectionIdx)
+	end := start + len(s.rows)
+	if m.cursor >= end-1 {
+		return m.cursor
 	}
-	return m.cursor
+	newCursor := m.cursor + 1
+	// advance scroll offset if cursor leaves the visible window
+	visEnd := start + s.scrollOffset + maxSectionRows
+	if newCursor >= visEnd {
+		s.scrollOffset++
+	}
+	return newCursor
 }
 
 func (m *Model) prevRow() int {
+	s := &m.sections[m.sectionIdx]
 	start := m.sectionOffset(m.sectionIdx)
-	if m.cursor > start {
-		return m.cursor - 1
+	if m.cursor <= start {
+		return m.cursor
 	}
-	return m.cursor
+	newCursor := m.cursor - 1
+	// retreat scroll offset if cursor leaves the visible window
+	if newCursor < start+s.scrollOffset {
+		s.scrollOffset--
+	}
+	return newCursor
 }
 
 func visibleRows(s section) int {
-	if len(s.rows) == 0 {
-		return 0
-	}
-	if s.rows[0].num == 0 {
-		return len(s.rows)
-	}
-	if len(s.rows) > maxSectionRows {
-		return maxSectionRows + 1 // +1 for the overflow line
-	}
 	return len(s.rows)
 }
 
@@ -439,13 +463,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.cursor = m.prevRow()
 		case key.Matches(msg, keys.SectionNext):
 			m.sectionIdx = (m.sectionIdx + 1) % len(m.sections)
-			m.cursor = m.sectionOffset(m.sectionIdx)
+			m.cursor = m.sectionOffset(m.sectionIdx) + m.sections[m.sectionIdx].scrollOffset
 		case key.Matches(msg, keys.SectionPrev):
 			m.sectionIdx--
 			if m.sectionIdx < 0 {
 				m.sectionIdx = len(m.sections) - 1
 			}
-			m.cursor = m.sectionOffset(m.sectionIdx)
+			m.cursor = m.sectionOffset(m.sectionIdx) + m.sections[m.sectionIdx].scrollOffset
 		case key.Matches(msg, keys.Enter):
 			r := m.currentRow()
 			if r != nil && r.url != "" {
@@ -525,14 +549,10 @@ func (m *Model) currentRow() *row {
 	}
 	remaining := m.cursor
 	for _, s := range m.sections {
-		vis := visibleRows(s)
-		if remaining < vis {
-			if s.rows[0].num > 0 && remaining >= maxSectionRows {
-				return nil
-			}
+		if remaining < len(s.rows) {
 			return &s.rows[remaining]
 		}
-		remaining -= vis
+		remaining -= len(s.rows)
 	}
 	return nil
 }
@@ -587,18 +607,45 @@ func (m Model) View() string {
 			b.WriteString(headerStyle.Render(header))
 			b.WriteString("\n")
 
-			for i, r := range s.rows {
-				if i >= maxSectionRows {
-					remaining := len(s.rows) - i
-					b.WriteString(overflowStyle.Render(fmt.Sprintf("… %d more", remaining)))
-					b.WriteString("\n")
-					break
-				}
-				line := renderRow(r, globalIdx == m.cursor, repoWidth, m.width)
+			visStart := s.scrollOffset
+			visEnd := visStart + maxSectionRows
+			if visEnd > len(s.rows) {
+				visEnd = len(s.rows)
+			}
+
+			if visStart > 0 {
+				b.WriteString(overflowStyle.Render(fmt.Sprintf("↑ %d more above", visStart)))
+				b.WriteString("\n")
+			}
+
+			for i := visStart; i < visEnd; i++ {
+				r := s.rows[i]
+				line := renderRow(r, globalIdx+i == m.cursor, repoWidth, m.width)
 				b.WriteString(line)
 				b.WriteString("\n")
-				globalIdx++
 			}
+
+			remaining := len(s.rows) - visEnd
+			if remaining > 0 {
+				b.WriteString(overflowStyle.Render(fmt.Sprintf("↓ %d more below", remaining)))
+				b.WriteString("\n")
+			}
+
+			globalIdx += len(s.rows)
+		} else if len(s.rows) > 0 {
+			for i, r := range s.rows {
+				line := r.title
+				if m.width > 0 {
+					line = truncateWidth(line, m.width)
+				}
+				if globalIdx+i == m.cursor {
+					b.WriteString(selectedStyle.Render(line))
+				} else {
+					b.WriteString(rowStyle.Render(line))
+				}
+				b.WriteString("\n")
+			}
+			globalIdx += len(s.rows)
 		}
 	}
 
