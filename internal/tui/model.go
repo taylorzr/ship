@@ -105,6 +105,7 @@ type section struct {
 	scrollOffset int
 	hideDrafts   bool
 	showStarred  bool
+	showTeam     bool
 	sortNewest   bool
 }
 
@@ -119,8 +120,9 @@ type keyMap struct {
 	DraftToggle key.Binding
 	Refresh     key.Binding
 	Quit        key.Binding
-	FilterDraft key.Binding
+	FilterDraft   key.Binding
 	FilterStarred key.Binding
+	FilterTeam    key.Binding
 	SortToggle    key.Binding
 	Search        key.Binding
 }
@@ -138,6 +140,7 @@ var keys = keyMap{
 	Quit:        key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 	FilterDraft:   key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "toggle drafts")),
 	FilterStarred: key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "toggle starred")),
+	FilterTeam:    key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "toggle team reviews")),
 	SortToggle:    key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "toggle sort")),
 	Search:        key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "search")),
 }
@@ -195,6 +198,7 @@ func New(cfg *config.Config, st *store.Store, ghClient *gh.Client) Model {
 			"To Review":     false,
 			"Releases":      false,
 			"Dependencies":  false,
+			"Team Review":   false,
 		},
 		sectionErrs: map[string]string{},
 	}
@@ -202,13 +206,13 @@ func New(cfg *config.Config, st *store.Store, ghClient *gh.Client) Model {
 	return m
 }
 
-func (m *Model) sectionProp(name string) (offset int, hideDrafts, showStarred, sortNewest bool) {
+func (m *Model) sectionProp(name string) (offset int, hideDrafts, showStarred, showTeam, sortNewest bool) {
 	for _, s := range m.sections {
 		if s.name == name {
-			return s.scrollOffset, s.hideDrafts, s.showStarred, s.sortNewest
+			return s.scrollOffset, s.hideDrafts, s.showStarred, s.showTeam, s.sortNewest
 		}
 	}
-	return 0, false, false, true
+	return 0, false, false, false, true
 }
 
 func (m *Model) applyFilters() {
@@ -267,8 +271,8 @@ func (m *Model) loadFromCache() {
 	var sections []section
 
 	prs, _ := m.store.CachedPRs("mine")
-	so, hd, ss, sn := m.sectionProp("My PRs")
-	s := section{name: "My PRs", scrollOffset: so, hideDrafts: hd, showStarred: ss, sortNewest: sn}
+	so, hd, ss, st, sn := m.sectionProp("My PRs")
+	s := section{name: "My PRs", scrollOffset: so, hideDrafts: hd, showStarred: ss, showTeam: st, sortNewest: sn}
 	for _, p := range prs {
 		r := row{
 				title:  p.Title,
@@ -320,9 +324,13 @@ func (m *Model) loadFromCache() {
 	}
 	sections = append(sections, s3)
 
-	revs, _ := m.store.CachedPRs("review-direct")
-	so, hd, ss, sn = m.sectionProp("To Review")
-	s2 := section{name: "To Review", scrollOffset: so, hideDrafts: hd, showStarred: ss, sortNewest: sn}
+	so, hd, ss, st, sn = m.sectionProp("To Review")
+	role := "review-direct"
+	if st && len(m.cfg.GitHub.ReviewTeams) > 0 {
+		role = "review-team"
+	}
+	revs, _ := m.store.CachedPRs(role)
+	s2 := section{name: "To Review", scrollOffset: so, hideDrafts: hd, showStarred: ss, showTeam: st, sortNewest: sn}
 	for _, p := range revs {
 		r := row{
 			title:  p.Title,
@@ -341,8 +349,8 @@ func (m *Model) loadFromCache() {
 	sections = append(sections, s2)
 
 	deps, _ := m.store.CachedPRs("dep")
-	so, hd, ss, sn = m.sectionProp("Dependencies")
-	s4 := section{name: "Dependencies", scrollOffset: so, hideDrafts: hd, showStarred: ss, sortNewest: sn}
+	so, hd, ss, st, sn = m.sectionProp("Dependencies")
+	s4 := section{name: "Dependencies", scrollOffset: so, hideDrafts: hd, showStarred: ss, showTeam: st, sortNewest: sn}
 	for _, p := range deps {
 		r := row{
 			title:  p.Title,
@@ -436,12 +444,16 @@ func (m Model) Init() tea.Cmd {
 }
 
 func (m Model) sectionCommands(ctx context.Context) []tea.Cmd {
-	return []tea.Cmd{
+	cmds := []tea.Cmd{
 		m.refreshMyPRs(ctx),
 		m.refreshReview(ctx),
 		m.refreshDeps(ctx),
 		m.refreshReleases(ctx),
 	}
+	if len(m.cfg.GitHub.ReviewTeams) > 0 {
+		cmds = append(cmds, m.refreshTeamReview(ctx))
+	}
+	return cmds
 }
 
 func (m Model) refreshMyPRs(ctx context.Context) tea.Cmd {
@@ -469,6 +481,20 @@ func (m Model) refreshReview(ctx context.Context) tea.Cmd {
 			m.store.SavePRs(cache, "review-direct")
 		}
 		return refreshDoneMsg{source: "To Review", err: err}
+	}
+}
+
+func (m Model) refreshTeamReview(ctx context.Context) tea.Cmd {
+	return func() tea.Msg {
+		prs, err := m.gh.TeamReviewRequested(ctx, m.cfg.GitHub.ReviewTeams)
+		if err == nil {
+			cache := make([]store.CachedPR, len(prs))
+			for i, p := range prs {
+				cache[i] = toCached(p, "review-team")
+			}
+			m.store.SavePRs(cache, "review-team")
+		}
+		return refreshDoneMsg{source: "Team Review", err: err}
 	}
 }
 
@@ -668,14 +694,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case key.Matches(msg, keys.Close):
-			if m.sections[m.sectionIdx].name != "To Review" {
+			if m.sections[m.sectionIdx].name == "My PRs" || m.sections[m.sectionIdx].name == "Dependencies" {
 				r := m.currentRow()
 				if r != nil && r.num > 0 {
 					m.confirm = &confirmAction{action: "close", repo: r.repo, num: r.num, title: r.title}
 				}
 			}
 		case key.Matches(msg, keys.DraftToggle):
-			if m.sections[m.sectionIdx].name != "To Review" {
+			if m.sections[m.sectionIdx].name == "My PRs" || m.sections[m.sectionIdx].name == "Dependencies" {
 				r := m.currentRow()
 				if r != nil && r.num > 0 {
 					m.confirm = &confirmAction{action: "draft-toggle", repo: r.repo, num: r.num, title: r.title, draft: r.draft}
@@ -704,6 +730,20 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					s.showStarred = !s.showStarred
 					m.sections[m.sectionIdx] = s
 					m.applyFilters()
+				}
+			}
+			return m, nil
+		case key.Matches(msg, keys.FilterTeam):
+			if len(m.sections) > m.sectionIdx {
+				s := m.sections[m.sectionIdx]
+				if s.name == "To Review" && len(m.cfg.GitHub.ReviewTeams) > 0 {
+					s.showTeam = !s.showTeam
+					m.sections[m.sectionIdx] = s
+					m.loadFromCache()
+					if s.showTeam {
+						m.loading["Team Review"] = true
+						return m, m.refreshTeamReview(context.Background())
+					}
 				}
 			}
 			return m, nil
@@ -854,6 +894,10 @@ func (m Model) View() string {
 			b.WriteString("  ")
 			b.WriteString(helpKey.Render("[starred]"))
 		}
+		if s.showTeam {
+			b.WriteString("  ")
+			b.WriteString(helpKey.Render("[team]"))
+		}
 		if !s.sortNewest {
 			b.WriteString("  ")
 			b.WriteString(helpKey.Render("[oldest]"))
@@ -869,12 +913,20 @@ func (m Model) View() string {
 		if m.loading[s.name] {
 			b.WriteString("  ")
 			b.WriteString(m.spin.View())
+		} else if s.name == "To Review" && m.loading["Team Review"] && m.sections[m.sectionIdx].showTeam {
+			b.WriteString("  ")
+			b.WriteString(m.spin.View())
 		}
 		b.WriteString("\n")
 
 		if errMsg, ok := m.sectionErrs[s.name]; ok {
 			b.WriteString(errorStyle.Render(errMsg))
 			b.WriteString("\n")
+		} else if s.name == "To Review" {
+			if errMsg, ok := m.sectionErrs["Team Review"]; ok {
+				b.WriteString(errorStyle.Render(errMsg))
+				b.WriteString("\n")
+			}
 		}
 
 		// column header for PR sections

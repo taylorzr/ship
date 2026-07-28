@@ -221,6 +221,19 @@ func (c *Client) ReviewRequested(ctx context.Context, owners []string) ([]PR, er
 	return c.search(ctx, fmt.Sprintf("is:open is:pr user-review-requested:%s%s", user, ownerFilter(owners)))
 }
 
+func (c *Client) TeamReviewRequested(ctx context.Context, teams []string) ([]PR, error) {
+	if len(teams) == 0 {
+		return nil, nil
+	}
+	var q strings.Builder
+	q.WriteString("is:open is:pr")
+	for _, t := range teams {
+		q.WriteString(" review-requested:")
+		q.WriteString(t)
+	}
+	return c.search(ctx, q.String())
+}
+
 func (c *Client) AllReviewRequested(ctx context.Context) ([]PR, error) {
 	user, err := c.User(ctx)
 	if err != nil {
