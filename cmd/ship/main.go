@@ -6,20 +6,21 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"text/tabwriter"
 
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
 	"github.com/zach/ship/internal/config"
 	gh "github.com/zach/ship/internal/github"
 	"github.com/zach/ship/internal/k8s"
 	"github.com/zach/ship/internal/store"
+	"github.com/zach/ship/internal/tui"
 	"github.com/zach/ship/internal/version"
 )
 
 var rootCmd = &cobra.Command{
 	Use:   "ship",
 	Short: "Personal dev hub — GitHub, prod, and what's next",
-	RunE:  runDashboard,
+	RunE:  runTUI,
 }
 
 var countCmd = &cobra.Command{
@@ -52,7 +53,7 @@ func main() {
 	}
 }
 
-func runDashboard(cmd *cobra.Command, args []string) error {
+func runTUI(cmd *cobra.Command, args []string) error {
 	cfg, err := config.Load("")
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
@@ -69,94 +70,14 @@ func runDashboard(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("gh auth: %w", err)
 	}
 
-	client := gh.NewClient(token)
-	ctx := context.Background()
+	ghClient := gh.NewClient(token)
 
-	user, _ := client.User(ctx)
-	fmt.Printf("ship — logged in as %s\n\n", user)
-
-	myPRs, err := client.MyPRs(ctx, cfg.GitHub.Orgs)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "fetch my PRs: %v\n", err)
-	} else {
-		cache := make([]store.CachedPR, len(myPRs))
-		for i, p := range myPRs {
-			cache[i] = toCached(p, "mine")
-		}
-		st.SavePRs(cache, "mine")
+	m := tui.New(cfg, st, ghClient)
+	p := tea.NewProgram(m, tea.WithAltScreen())
+	if _, err := p.Run(); err != nil {
+		return fmt.Errorf("tui: %w", err)
 	}
-
-	reviewPRs, err := client.ReviewRequested(ctx)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "fetch review PRs: %v\n", err)
-	} else {
-		cache := make([]store.CachedPR, len(reviewPRs))
-		for i, p := range reviewPRs {
-			cache[i] = toCached(p, "review-direct")
-		}
-		st.SavePRs(cache, "review-direct")
-	}
-
-	starred := cfg.StarredRepos()
-	depPRs, err := client.DepPRs(ctx, starred)
-	if err != nil {
-		fmt.Fprintf(os.Stderr, "fetch dep PRs: %v\n", err)
-	} else {
-		cache := make([]store.CachedPR, len(depPRs))
-		for i, p := range depPRs {
-			cache[i] = toCached(p, "dep")
-		}
-		st.SavePRs(cache, "dep")
-	}
-
-	st.UpdateRefresh("github", "ok")
-
-	printPRs(st, "mine", "My PRs")
-	printPRs(st, "review-direct", "To Review")
-	printPRs(st, "dep", "Dependencies")
 	return nil
-}
-
-func printPRs(st *store.Store, role, label string) {
-	prs, err := st.CachedPRs(role)
-	if err != nil || len(prs) == 0 {
-		return
-	}
-	fmt.Printf("── %s ──\n", label)
-	w := tabwriter.NewWriter(os.Stdout, 0, 0, 2, ' ', 0)
-	for _, p := range prs {
-		ci := ciIcon(p.CIState)
-		dec := reviewIcon(p.ReviewDecision)
-		fmt.Fprintf(w, "  %s %s\t%s\t%s\t%s\n", ci, dec, p.Repo, fmt.Sprintf("#%d", p.Number), p.Title)
-	}
-	w.Flush()
-	fmt.Println()
-}
-
-func ciIcon(state string) string {
-	switch state {
-	case "success":
-		return "✓"
-	case "failure":
-		return "✗"
-	case "pending":
-		return "…"
-	default:
-		return "·"
-	}
-}
-
-func reviewIcon(dec string) string {
-	switch dec {
-	case "APPROVED":
-		return "👍"
-	case "CHANGES_REQUESTED":
-		return "👎"
-	case "REVIEW_REQUIRED":
-		return "⏳"
-	default:
-		return " "
-	}
 }
 
 func toCached(p gh.PR, role string) store.CachedPR {
@@ -239,16 +160,10 @@ func runReleases(cmd *cobra.Command, args []string) error {
 	ghClient := gh.NewClient(token)
 	ctx := context.Background()
 
-	var k8sClient k8s.Client
+	var mockK8s *k8s.MockClient
 	if mockK8sImage != "" {
-		k8sClient = k8s.NewMock(mockK8sImage)
+		mockK8s = k8s.NewMock(mockK8sImage)
 		fmt.Printf("(using mock k8s — image: %s)\n\n", mockK8sImage)
-	} else {
-		rc, err := k8s.NewRealClient("", "")
-		if err != nil {
-			return fmt.Errorf("k8s: %w", err)
-		}
-		k8sClient = rc
 	}
 
 	if len(cfg.Services) == 0 {
@@ -260,8 +175,10 @@ func runReleases(cmd *cobra.Command, args []string) error {
 		if releasesRepo != "" && !strings.HasSuffix(svc.Repo, releasesRepo) {
 			continue
 		}
-		svcK8s := k8sClient
-		if mockK8sImage == "" {
+		var svcK8s k8s.Client
+		if mockK8s != nil {
+			svcK8s = mockK8s
+		} else {
 			rc, err := k8s.NewRealClient("", svc.Context)
 			if err != nil {
 				fmt.Printf("── %s ──\n  ✗ k8s: %v\n\n", svc.Repo, err)

@@ -185,3 +185,38 @@ func (s *Store) RefreshStatus(source string) (lastOk, status string, err error) 
 func (s *Store) Query(query string, args ...any) (*sql.Rows, error) {
 	return s.db.Query(query, args...)
 }
+
+type CachedVersion struct {
+	Repo        string
+	ProdRef     string
+	ProdSHA     string
+	AheadBy     int
+	PendingTags string
+	ResolvedAt  string
+	Error       string
+}
+
+func (s *Store) SaveVersion(v CachedVersion) error {
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO version (repo, prod_ref, prod_sha, ahead_by, pending_tags, resolved_at, error)
+		VALUES (?, ?, ?, ?, ?, datetime('now'), ?)`,
+		v.Repo, v.ProdRef, v.ProdSHA, v.AheadBy, v.PendingTags, v.Error)
+	return err
+}
+
+func (s *Store) CachedVersions() ([]CachedVersion, error) {
+	rows, err := s.db.Query(`SELECT repo, prod_ref, prod_sha, ahead_by, COALESCE(pending_tags, ''), COALESCE(resolved_at, ''), COALESCE(error, '') FROM version ORDER BY repo`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []CachedVersion
+	for rows.Next() {
+		var v CachedVersion
+		if err := rows.Scan(&v.Repo, &v.ProdRef, &v.ProdSHA, &v.AheadBy, &v.PendingTags, &v.ResolvedAt, &v.Error); err != nil {
+			return nil, err
+		}
+		out = append(out, v)
+	}
+	return out, nil
+}
