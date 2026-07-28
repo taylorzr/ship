@@ -64,9 +64,25 @@ var (
 			Width(50)
 	dialogTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
 	dialogHelp  = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-
-	maxSectionRows = 15
 )
+
+func (m *Model) maxVisibleRows() int {
+	if m.height <= 0 {
+		return 15
+	}
+	n := len(m.sections)
+	if n == 0 {
+		return 15
+	}
+	perSection := (m.height - 10) / n
+	if perSection < 1 {
+		return 1
+	}
+	if perSection > 15 {
+		return 15
+	}
+	return perSection
+}
 
 type row struct {
 	title     string
@@ -355,7 +371,7 @@ func (m *Model) nextRow() int {
 	}
 	newCursor := m.cursor + 1
 	// advance scroll offset if cursor leaves the visible window
-	visEnd := start + s.scrollOffset + maxSectionRows
+	visEnd := start + s.scrollOffset + m.maxVisibleRows()
 	if newCursor >= visEnd {
 		s.scrollOffset++
 	}
@@ -762,7 +778,7 @@ func (m Model) View() string {
 			b.WriteString("\n")
 
 			visStart := s.scrollOffset
-			visEnd := visStart + maxSectionRows
+			visEnd := visStart + m.maxVisibleRows()
 			if visEnd > len(s.rows) {
 				visEnd = len(s.rows)
 			}
