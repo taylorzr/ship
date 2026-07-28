@@ -259,25 +259,6 @@ func (m *Model) loadFromCache() {
 		}
 		sections = append(sections, s)
 
-	revs, _ := m.store.CachedPRs("review-direct")
-	so, hd = m.sectionProp("To Review")
-	s2 := section{name: "To Review", scrollOffset: so, hideDrafts: hd}
-	for _, p := range revs {
-		r := row{
-			title:  p.Title,
-			repo:   p.Repo,
-			num:    p.Number,
-			url:    p.URL,
-			ci:     p.CIState,
-			review: p.ReviewDecision,
-			draft:  p.IsDraft,
-			updatedAt: p.UpdatedAt,
-		}
-		s2.allRows = append(s2.allRows, r)
-		s2.rows = append(s2.rows, r)
-	}
-	sections = append(sections, s2)
-
 	versions, _ := m.store.CachedVersions()
 	svcNames := make(map[string]string, len(m.cfg.Services))
 	for _, svc := range m.cfg.Services {
@@ -311,6 +292,25 @@ func (m *Model) loadFromCache() {
 		s3.rows = append(s3.rows, r)
 	}
 	sections = append(sections, s3)
+
+	revs, _ := m.store.CachedPRs("review-direct")
+	so, hd = m.sectionProp("To Review")
+	s2 := section{name: "To Review", scrollOffset: so, hideDrafts: hd}
+	for _, p := range revs {
+		r := row{
+			title:  p.Title,
+			repo:   p.Repo,
+			num:    p.Number,
+			url:    p.URL,
+			ci:     p.CIState,
+			review: p.ReviewDecision,
+			draft:  p.IsDraft,
+			updatedAt: p.UpdatedAt,
+		}
+		s2.allRows = append(s2.allRows, r)
+		s2.rows = append(s2.rows, r)
+	}
+	sections = append(sections, s2)
 
 	deps, _ := m.store.CachedPRs("dep")
 	so, hd = m.sectionProp("Dependencies")
