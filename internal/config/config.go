@@ -18,7 +18,8 @@ type Config struct {
 }
 
 type GitHubConfig struct {
-	Owners []string `toml:"owners"`
+	Owners     []string `toml:"owners"`
+	DepAuthors []string `toml:"dep_authors"`
 }
 
 type AIConfig struct {
@@ -59,6 +60,9 @@ func DefaultPath() string {
 func Load(path string) (*Config, error) {
 	cfg := &Config{
 		RefreshInterval: 300,
+		GitHub: GitHubConfig{
+			DepAuthors: []string{"app/renovate", "app/dependabot"},
+		},
 		AI: AIConfig{
 			ReviewProvider: "claude-cli",
 			ReviewModel:    "opus",

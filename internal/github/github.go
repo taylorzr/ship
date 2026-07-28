@@ -229,13 +229,21 @@ func (c *Client) AllReviewRequested(ctx context.Context) ([]PR, error) {
 	return c.search(ctx, fmt.Sprintf("is:open is:pr review-requested:%s", user))
 }
 
-func (c *Client) DepPRs(ctx context.Context, repos []string) ([]PR, error) {
+func (c *Client) DepPRs(ctx context.Context, repos []string, authors []string) ([]PR, error) {
 	if len(repos) == 0 {
 		return nil, nil
 	}
+	var authorQ strings.Builder
+	for i, a := range authors {
+		if i > 0 {
+			authorQ.WriteString(" ")
+		}
+		authorQ.WriteString("author:")
+		authorQ.WriteString(a)
+	}
 	var all []PR
 	for _, repo := range repos {
-		prs, err := c.search(ctx, fmt.Sprintf("is:open is:pr repo:%s author:app/renovate author:app/dependabot", repo))
+		prs, err := c.search(ctx, fmt.Sprintf("is:open is:pr repo:%s %s", repo, authorQ.String()))
 		if err != nil {
 			return nil, err
 		}

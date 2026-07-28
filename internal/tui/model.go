@@ -475,7 +475,7 @@ func (m Model) refreshReview(ctx context.Context) tea.Cmd {
 func (m Model) refreshDeps(ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
 		starred := m.cfg.StarredRepos()
-		deps, err := m.gh.DepPRs(ctx, starred)
+		deps, err := m.gh.DepPRs(ctx, starred, m.cfg.GitHub.DepAuthors)
 		if err == nil {
 			cache := make([]store.CachedPR, len(deps))
 			for i, p := range deps {
@@ -641,6 +641,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				openBrowser(r.url)
 			}
 		case key.Matches(msg, keys.Merge):
+			if m.sections[m.sectionIdx].name == "To Review" {
+				break
+			}
 			r := m.currentRow()
 			if r != nil && r.num > 0 {
 				if r.draft {
@@ -665,14 +668,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		case key.Matches(msg, keys.Close):
-			r := m.currentRow()
-			if r != nil && r.num > 0 {
-				m.confirm = &confirmAction{action: "close", repo: r.repo, num: r.num, title: r.title}
+			if m.sections[m.sectionIdx].name != "To Review" {
+				r := m.currentRow()
+				if r != nil && r.num > 0 {
+					m.confirm = &confirmAction{action: "close", repo: r.repo, num: r.num, title: r.title}
+				}
 			}
 		case key.Matches(msg, keys.DraftToggle):
-			r := m.currentRow()
-			if r != nil && r.num > 0 {
-				m.confirm = &confirmAction{action: "draft-toggle", repo: r.repo, num: r.num, title: r.title, draft: r.draft}
+			if m.sections[m.sectionIdx].name != "To Review" {
+				r := m.currentRow()
+				if r != nil && r.num > 0 {
+					m.confirm = &confirmAction{action: "draft-toggle", repo: r.repo, num: r.num, title: r.title, draft: r.draft}
+				}
 			}
 		case key.Matches(msg, keys.Refresh):
 			m.sectionErrs = map[string]string{}
