@@ -193,20 +193,32 @@ func resolveCI(commits struct {
 	return "success"
 }
 
-func (c *Client) MyPRs(ctx context.Context, orgs []string) ([]PR, error) {
-	user, err := c.User(ctx)
-	if err != nil {
-		return nil, err
+func ownerFilter(owners []string) string {
+	if len(owners) == 0 {
+		return ""
 	}
-	return c.search(ctx, fmt.Sprintf("is:open is:pr author:%s archived:false", user))
+	var b strings.Builder
+	for _, o := range owners {
+		b.WriteString(" user:")
+		b.WriteString(o)
+	}
+	return b.String()
 }
 
-func (c *Client) ReviewRequested(ctx context.Context) ([]PR, error) {
+func (c *Client) MyPRs(ctx context.Context, owners []string) ([]PR, error) {
 	user, err := c.User(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return c.search(ctx, fmt.Sprintf("is:open is:pr user-review-requested:%s", user))
+	return c.search(ctx, fmt.Sprintf("is:open is:pr author:%s archived:false%s", user, ownerFilter(owners)))
+}
+
+func (c *Client) ReviewRequested(ctx context.Context, owners []string) ([]PR, error) {
+	user, err := c.User(ctx)
+	if err != nil {
+		return nil, err
+	}
+	return c.search(ctx, fmt.Sprintf("is:open is:pr user-review-requested:%s%s", user, ownerFilter(owners)))
 }
 
 func (c *Client) AllReviewRequested(ctx context.Context) ([]PR, error) {
@@ -384,6 +396,28 @@ func (c *Client) ClosePR(ctx context.Context, repo string, number int) error {
 	).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("close PR #%d: %s: %w", number, strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+func (c *Client) ToggleDraft(ctx context.Context, repo string, number int, isDraft bool) error {
+	if isDraft {
+		out, err := exec.Command("gh", "pr", "ready",
+			fmt.Sprintf("%d", number),
+			"-R", repo,
+		).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("mark PR #%d ready: %s: %w", number, strings.TrimSpace(string(out)), err)
+		}
+		return nil
+	}
+	out, err := exec.Command("gh", "api",
+		fmt.Sprintf("repos/%s/pulls/%d", repo, number),
+		"-X", "PATCH",
+		"-f", "draft=true",
+	).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("convert PR #%d to draft: %s: %w", number, strings.TrimSpace(string(out)), err)
 	}
 	return nil
 }

@@ -76,7 +76,7 @@ ship/
 
 ```toml
 [github]
-orgs = ["fanduel"]                        # optional filter to cut cross-org noise
+owners = ["fanduel"]                      # scope PR search to these owners/orgs (user: qualifier)
 
 [ai]
 review_provider = "claude-cli"            # claude-cli | api

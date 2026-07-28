@@ -98,11 +98,12 @@ type row struct {
 }
 
 type section struct {
-	name        string
-	rows        []row
-	allRows     []row
+	name         string
+	rows         []row
+	allRows      []row
 	scrollOffset int
-	hideDrafts  bool
+	hideDrafts   bool
+	showStarred  bool
 }
 
 type keyMap struct {
@@ -113,9 +114,11 @@ type keyMap struct {
 	Enter       key.Binding
 	Merge       key.Binding
 	Close       key.Binding
+	DraftToggle key.Binding
 	Refresh     key.Binding
 	Quit        key.Binding
 	FilterDraft key.Binding
+	FilterStarred key.Binding
 	Search        key.Binding
 }
 
@@ -127,10 +130,12 @@ var keys = keyMap{
 	Enter:       key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open")),
 	Merge:       key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "merge")),
 	Close:       key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "close")),
+	DraftToggle: key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "toggle draft")),
 	Refresh:     key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
 	Quit:        key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
-	FilterDraft: key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "toggle drafts")),
-	Search:      key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "search")),
+	FilterDraft:  key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "toggle drafts")),
+	FilterStarred: key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "toggle starred")),
+	Search:        key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "search")),
 }
 
 type refreshDoneMsg struct {
@@ -139,10 +144,11 @@ type refreshDoneMsg struct {
 }
 
 type confirmAction struct {
-	action string // "merge" or "close"
+	action string // "merge", "close", or "draft-toggle"
 	repo   string
 	num    int
 	title  string
+	draft  bool
 }
 
 type actionDoneMsg struct {
@@ -190,27 +196,35 @@ func New(cfg *config.Config, st *store.Store, ghClient *gh.Client) Model {
 	return m
 }
 
-func (m *Model) sectionProp(name string) (offset int, hideDrafts bool) {
+func (m *Model) sectionProp(name string) (offset int, hideDrafts, showStarred bool) {
 	for _, s := range m.sections {
 		if s.name == name {
-			return s.scrollOffset, s.hideDrafts
+			return s.scrollOffset, s.hideDrafts, s.showStarred
 		}
 	}
-	return 0, false
+	return 0, false, false
 }
 
 func (m *Model) applyFilters() {
 	q := strings.ToLower(m.searchQuery)
+	starred := m.cfg.StarredRepos()
+	starredSet := make(map[string]bool, len(starred))
+	for _, r := range starred {
+		starredSet[r] = true
+	}
 	for i := range m.sections {
 		sectionQ := q
 		// search only applies to the active section
 		if i != m.sectionIdx {
 			sectionQ = ""
 		}
-		if m.sections[i].hideDrafts || sectionQ != "" {
+		if m.sections[i].hideDrafts || sectionQ != "" || m.sections[i].showStarred {
 			var filtered []row
 			for _, r := range m.sections[i].allRows {
 				if m.sections[i].hideDrafts && r.draft {
+					continue
+				}
+				if m.sections[i].showStarred && !starredSet[r.repo] {
 					continue
 				}
 				if sectionQ != "" && !strings.Contains(strings.ToLower(r.title), sectionQ) &&
@@ -241,8 +255,8 @@ func (m *Model) loadFromCache() {
 	var sections []section
 
 	prs, _ := m.store.CachedPRs("mine")
-	so, hd := m.sectionProp("My PRs")
-	s := section{name: "My PRs", scrollOffset: so, hideDrafts: hd}
+	so, hd, ss := m.sectionProp("My PRs")
+	s := section{name: "My PRs", scrollOffset: so, hideDrafts: hd, showStarred: ss}
 	for _, p := range prs {
 		r := row{
 				title:  p.Title,
@@ -294,8 +308,8 @@ func (m *Model) loadFromCache() {
 	sections = append(sections, s3)
 
 	revs, _ := m.store.CachedPRs("review-direct")
-	so, hd = m.sectionProp("To Review")
-	s2 := section{name: "To Review", scrollOffset: so, hideDrafts: hd}
+	so, hd, ss = m.sectionProp("To Review")
+	s2 := section{name: "To Review", scrollOffset: so, hideDrafts: hd, showStarred: ss}
 	for _, p := range revs {
 		r := row{
 			title:  p.Title,
@@ -313,8 +327,8 @@ func (m *Model) loadFromCache() {
 	sections = append(sections, s2)
 
 	deps, _ := m.store.CachedPRs("dep")
-	so, hd = m.sectionProp("Dependencies")
-	s4 := section{name: "Dependencies", scrollOffset: so, hideDrafts: hd}
+	so, hd, ss = m.sectionProp("Dependencies")
+	s4 := section{name: "Dependencies", scrollOffset: so, hideDrafts: hd, showStarred: ss}
 	for _, p := range deps {
 		r := row{
 			title:  p.Title,
@@ -417,7 +431,7 @@ func (m Model) sectionCommands(ctx context.Context) []tea.Cmd {
 
 func (m Model) refreshMyPRs(ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
-		prs, err := m.gh.MyPRs(ctx, m.cfg.GitHub.Orgs)
+		prs, err := m.gh.MyPRs(ctx, m.cfg.GitHub.Owners)
 		if err == nil {
 			cache := make([]store.CachedPR, len(prs))
 			for i, p := range prs {
@@ -431,7 +445,7 @@ func (m Model) refreshMyPRs(ctx context.Context) tea.Cmd {
 
 func (m Model) refreshReview(ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
-		revs, err := m.gh.ReviewRequested(ctx)
+		revs, err := m.gh.ReviewRequested(ctx, m.cfg.GitHub.Owners)
 		if err == nil {
 			cache := make([]store.CachedPR, len(revs))
 			for i, p := range revs {
@@ -525,7 +539,7 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 }
 
 func (m Model) autoRefreshTick() tea.Cmd {
-	return tea.Tick(60*time.Second, func(t time.Time) tea.Msg {
+	return tea.Tick(time.Duration(m.cfg.RefreshInterval)*time.Second, func(t time.Time) tea.Msg {
 		return autoRefreshMsg(t)
 	})
 }
@@ -552,11 +566,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
 				m.confirm = nil
 			case key.Matches(msg, keys.Enter):
+				if m.confirm.action == "merge-draft-error" {
+					m.confirm = nil
+					break
+				}
 				action := m.confirm.action
 				repo := m.confirm.repo
 				num := m.confirm.num
+				draft := m.confirm.draft
 				m.confirm = nil
-				return m, m.execAction(action, repo, num)
+				return m, m.execAction(action, repo, num, draft)
 			}
 			return m, nil
 		}
@@ -607,12 +626,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.Merge):
 			r := m.currentRow()
 			if r != nil && r.num > 0 {
-				m.confirm = &confirmAction{action: "merge", repo: r.repo, num: r.num, title: r.title}
+				if r.draft {
+					m.confirm = &confirmAction{action: "merge-draft-error", title: r.title}
+				} else {
+					m.confirm = &confirmAction{action: "merge", repo: r.repo, num: r.num, title: r.title}
+				}
 			}
 		case key.Matches(msg, keys.Close):
 			r := m.currentRow()
 			if r != nil && r.num > 0 {
 				m.confirm = &confirmAction{action: "close", repo: r.repo, num: r.num, title: r.title}
+			}
+		case key.Matches(msg, keys.DraftToggle):
+			r := m.currentRow()
+			if r != nil && r.num > 0 {
+				m.confirm = &confirmAction{action: "draft-toggle", repo: r.repo, num: r.num, title: r.title, draft: r.draft}
 			}
 		case key.Matches(msg, keys.Refresh):
 			m.sectionErrs = map[string]string{}
@@ -625,6 +653,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s := m.sections[m.sectionIdx]
 				if s.name != "Releases" {
 					s.hideDrafts = !s.hideDrafts
+					m.sections[m.sectionIdx] = s
+					m.applyFilters()
+				}
+			}
+			return m, nil
+		case key.Matches(msg, keys.FilterStarred):
+			if len(m.sections) > m.sectionIdx {
+				s := m.sections[m.sectionIdx]
+				if s.name != "Releases" {
+					s.showStarred = !s.showStarred
 					m.sections[m.sectionIdx] = s
 					m.applyFilters()
 				}
@@ -732,6 +770,10 @@ func (m Model) View() string {
 		if s.hideDrafts {
 			b.WriteString("  ")
 			b.WriteString(helpKey.Render("[no drafts]"))
+		}
+		if s.showStarred {
+			b.WriteString("  ")
+			b.WriteString(helpKey.Render("[starred]"))
 		}
 		if i == m.sectionIdx && (m.searching || m.searchQuery != "") {
 			q := m.searchQuery
@@ -949,11 +991,13 @@ func (m Model) viewHelp() string {
 		sep + helpKey.Render("/") + sep + helpKey.Render("search") +
 		sep + helpKey.Render("enter") + sep + helpKey.Render("open") +
 		sep + helpKey.Render("d") + sep + helpKey.Render("drafts") +
+		sep + helpKey.Render("s") + sep + helpKey.Render("starred") +
 		sep + helpKey.Render("m") + sep + helpKey.Render("merge") +
 		sep + helpKey.Render("c") + sep + helpKey.Render("close") +
+		sep + helpKey.Render("D") + sep + helpKey.Render("toggle draft") +
 		sep + helpKey.Render("r") + sep + helpKey.Render("refresh")
 	if !m.lastRefreshed.IsZero() {
-		line += helpKey.Render(" (auto in " + refreshCountdown(m.lastRefreshed) + ")")
+		line += helpKey.Render(" (auto in " + refreshCountdown(m.lastRefreshed, m.cfg.RefreshInterval) + ")")
 	}
 	line += sep + helpKey.Render("q") + sep + helpKey.Render("quit")
 	return line
@@ -965,14 +1009,17 @@ func (m Model) fullRefreshCmd() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-func (m Model) execAction(action, repo string, num int) tea.Cmd {
+func (m Model) execAction(action, repo string, num int, draft bool) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 		var err error
-		if action == "merge" {
+		switch action {
+		case "merge":
 			err = m.gh.MergePR(ctx, repo, num)
-		} else {
+		case "close":
 			err = m.gh.ClosePR(ctx, repo, num)
+		case "draft-toggle":
+			err = m.gh.ToggleDraft(ctx, repo, num, draft)
 		}
 		return actionDoneMsg{err: err}
 	}
@@ -1035,8 +1082,8 @@ func openBrowser(url string) {
 	}
 }
 
-func refreshCountdown(t time.Time) string {
-	remaining := 60 - int(time.Since(t).Seconds())
+func refreshCountdown(t time.Time, interval int) string {
+	remaining := interval - int(time.Since(t).Seconds())
 	if remaining < 0 {
 		remaining = 0
 	}
@@ -1046,11 +1093,34 @@ func refreshCountdown(t time.Time) string {
 func (m Model) renderConfirm() string {
 	c := m.confirm
 	action := "Merge"
-	if c.action == "close" {
+	switch c.action {
+	case "close":
 		action = "Close"
+	case "draft-toggle":
+		if c.draft {
+			action = "Ready"
+		} else {
+			action = "Draft"
+		}
 	}
 	var b strings.Builder
-	b.WriteString(dialogTitle.Render(action + " PR?"))
+	switch c.action {
+	case "merge-draft-error":
+		b.WriteString(dialogTitle.Render("Can't merge draft PR"))
+		b.WriteString("\n\n")
+		b.WriteString("Mark it ready for review first (D) then merge.")
+		b.WriteString("\n\n")
+		b.WriteString(dialogHelp.Render("esc to dismiss"))
+		return dialogStyle.Render(b.String())
+	case "draft-toggle":
+		if c.draft {
+			b.WriteString(dialogTitle.Render("Ready for review?"))
+		} else {
+			b.WriteString(dialogTitle.Render("Convert to draft?"))
+		}
+	default:
+		b.WriteString(dialogTitle.Render(action + " PR?"))
+	}
 	b.WriteString("\n\n")
 	b.WriteString(fmt.Sprintf("%s#%d: %s", c.repo, c.num, c.title))
 	b.WriteString("\n\n")

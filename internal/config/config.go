@@ -9,15 +9,16 @@ import (
 )
 
 type Config struct {
-	GitHub  GitHubConfig  `toml:"github"`
-	AI      AIConfig      `toml:"ai"`
-	Repos   []RepoConfig  `toml:"repo"`
-	Services []ServiceConfig `toml:"service"`
-	Jira    []JiraConfig  `toml:"jira"`
+	GitHub          GitHubConfig   `toml:"github"`
+	RefreshInterval int            `toml:"refresh_interval"`
+	AI              AIConfig       `toml:"ai"`
+	Repos           []RepoConfig   `toml:"repo"`
+	Services        []ServiceConfig `toml:"service"`
+	Jira            []JiraConfig   `toml:"jira"`
 }
 
 type GitHubConfig struct {
-	Orgs []string `toml:"orgs"`
+	Owners []string `toml:"owners"`
 }
 
 type AIConfig struct {
@@ -57,6 +58,7 @@ func DefaultPath() string {
 
 func Load(path string) (*Config, error) {
 	cfg := &Config{
+		RefreshInterval: 300,
 		AI: AIConfig{
 			ReviewProvider: "claude-cli",
 			ReviewModel:    "opus",
