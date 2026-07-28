@@ -3,7 +3,10 @@ package tui
 import (
 	"context"
 	"fmt"
+	"log"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"runtime"
 	"strings"
 
@@ -18,6 +21,18 @@ import (
 	"github.com/zach/ship/internal/version"
 	"time"
 )
+
+var shipLog *log.Logger
+
+func init() {
+	home, _ := os.UserHomeDir()
+	dir := filepath.Join(home, ".config", "ship")
+	os.MkdirAll(dir, 0o755)
+	f, err := os.OpenFile(filepath.Join(dir, "ship.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644)
+	if err == nil {
+		shipLog = log.New(f, "", log.LstdFlags)
+	}
+}
 
 var (
 	titleStyle = lipgloss.NewStyle().
@@ -39,6 +54,7 @@ var (
 
 	helpKey = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	headerStyle = lipgloss.NewStyle().PaddingLeft(2).Foreground(lipgloss.Color("244"))
+	errorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).PaddingLeft(2)
 	dialogStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("205")).
@@ -83,7 +99,10 @@ var keys = keyMap{
 	Quit:    key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 }
 
-type refreshDoneMsg struct{ source string }
+type refreshDoneMsg struct {
+	source string
+	err    error
+}
 
 type confirmAction struct {
 	action string // "merge" or "close"
@@ -107,9 +126,9 @@ type Model struct {
 	total         int
 	spin          spinner.Model
 	loading       map[string]bool
+	sectionErrs   map[string]string
 	confirm       *confirmAction
 	lastRefreshed time.Time
-	err           string
 }
 
 func New(cfg *config.Config, st *store.Store, ghClient *gh.Client) Model {
@@ -128,6 +147,7 @@ func New(cfg *config.Config, st *store.Store, ghClient *gh.Client) Model {
 			"Releases":      false,
 			"Dependencies":  false,
 		},
+		sectionErrs: map[string]string{},
 	}
 	m.loadFromCache()
 	return m
@@ -218,6 +238,7 @@ func (m *Model) recalcTotal() {
 
 func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.spin.Tick, m.autoRefreshTick()}
+	m.sectionErrs = map[string]string{}
 	for k := range m.loading {
 		m.loading[k] = true
 	}
@@ -244,7 +265,7 @@ func (m Model) refreshMyPRs(ctx context.Context) tea.Cmd {
 			}
 			m.store.SavePRs(cache, "mine")
 		}
-		return refreshDoneMsg{source: "My PRs"}
+		return refreshDoneMsg{source: "My PRs", err: err}
 	}
 }
 
@@ -258,7 +279,7 @@ func (m Model) refreshReview(ctx context.Context) tea.Cmd {
 			}
 			m.store.SavePRs(cache, "review-direct")
 		}
-		return refreshDoneMsg{source: "To Review"}
+		return refreshDoneMsg{source: "To Review", err: err}
 	}
 }
 
@@ -273,16 +294,18 @@ func (m Model) refreshDeps(ctx context.Context) tea.Cmd {
 			}
 			m.store.SavePRs(cache, "dep")
 		}
-		return refreshDoneMsg{source: "Dependencies"}
+		return refreshDoneMsg{source: "Dependencies", err: err}
 	}
 }
 
 func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
+		var lastErr error
 		for _, svc := range m.cfg.Services {
 			rc, err := k8s.NewRealClient("", svc.Context)
 			if err != nil {
 				m.store.SaveVersion(store.CachedVersion{Repo: svc.Repo, Error: fmt.Sprintf("k8s: %v", err)})
+				lastErr = err
 				continue
 			}
 			r := version.Resolve(ctx, rc, m.gh, svc)
@@ -301,8 +324,11 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 				PendingTags: pending,
 				Error:       r.Error,
 			})
+			if r.Error != "" {
+				lastErr = fmt.Errorf("%s: %s", svc.Repo, r.Error)
+			}
 		}
-		return refreshDoneMsg{source: "Releases"}
+		return refreshDoneMsg{source: "Releases", err: lastErr}
 	}
 }
 
@@ -369,6 +395,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.confirm = &confirmAction{action: "close", repo: r.repo, num: r.num, title: r.title}
 			}
 		case key.Matches(msg, keys.Refresh):
+			m.sectionErrs = map[string]string{}
 			for k := range m.loading {
 				m.loading[k] = true
 			}
@@ -377,6 +404,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case refreshDoneMsg:
 		m.loading[msg.source] = false
+		if msg.err != nil {
+			if shipLog != nil {
+				shipLog.Printf("%s: %v", msg.source, msg.err)
+			}
+			m.sectionErrs[msg.source] = msg.err.Error()
+		} else {
+			delete(m.sectionErrs, msg.source)
+		}
 		m.loadFromCache()
 		if m.allDone() {
 			m.markRefreshed()
@@ -384,6 +419,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case autoRefreshMsg:
 		if m.allDone() {
+			m.sectionErrs = map[string]string{}
 			for k := range m.loading {
 				m.loading[k] = true
 			}
@@ -392,8 +428,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, m.autoRefreshTick()
 
 	case actionDoneMsg:
+		m.sectionErrs = map[string]string{}
 		if msg.err != nil {
-			m.err = msg.err.Error()
+			if shipLog != nil {
+				shipLog.Printf("action: %v", msg.err)
+			}
 		}
 		for k := range m.loading {
 			m.loading[k] = true
@@ -450,6 +489,11 @@ func (m Model) View() string {
 			b.WriteString(m.spin.View())
 		}
 		b.WriteString("\n")
+
+		if errMsg, ok := m.sectionErrs[s.name]; ok {
+			b.WriteString(errorStyle.Render(errMsg))
+			b.WriteString("\n")
+		}
 
 		// column header for PR sections
 		if len(s.rows) > 0 && s.rows[0].num > 0 {
