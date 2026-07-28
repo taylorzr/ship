@@ -9,6 +9,7 @@ import (
 	"path/filepath"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -19,7 +20,6 @@ import (
 	"github.com/zach/ship/internal/k8s"
 	"github.com/zach/ship/internal/store"
 	"github.com/zach/ship/internal/version"
-	"time"
 )
 
 var shipLog *log.Logger
@@ -55,6 +55,7 @@ var (
 	helpKey = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	headerStyle = lipgloss.NewStyle().PaddingLeft(2).Foreground(lipgloss.Color("244"))
 	errorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).PaddingLeft(2)
+	overflowStyle = lipgloss.NewStyle().PaddingLeft(2).Foreground(lipgloss.Color("241"))
 	dialogStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("205")).
@@ -62,6 +63,8 @@ var (
 			Width(50)
 	dialogTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
 	dialogHelp  = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+
+	maxSectionRows = 15
 )
 
 type row struct {
@@ -80,23 +83,27 @@ type section struct {
 }
 
 type keyMap struct {
-	Up      key.Binding
-	Down    key.Binding
-	Enter   key.Binding
-	Merge   key.Binding
-	Close   key.Binding
-	Refresh key.Binding
-	Quit    key.Binding
+	Up        key.Binding
+	Down      key.Binding
+	SectionNext key.Binding
+	SectionPrev key.Binding
+	Enter     key.Binding
+	Merge     key.Binding
+	Close     key.Binding
+	Refresh   key.Binding
+	Quit      key.Binding
 }
 
 var keys = keyMap{
-	Up:      key.NewBinding(key.WithKeys("k", "up"), key.WithHelp("k/↑", "move up")),
-	Down:    key.NewBinding(key.WithKeys("j", "down"), key.WithHelp("j/↓", "move down")),
-	Enter:   key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open")),
-	Merge:   key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "merge")),
-	Close:   key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "close")),
-	Refresh: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
-	Quit:    key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+	Up:          key.NewBinding(key.WithKeys("k", "up"), key.WithHelp("k/↑", "move up")),
+	Down:        key.NewBinding(key.WithKeys("j", "down"), key.WithHelp("j/↓", "move down")),
+	SectionNext: key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next section")),
+	SectionPrev: key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("⇧+tab", "prev section")),
+	Enter:       key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open")),
+	Merge:       key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "merge")),
+	Close:       key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "close")),
+	Refresh:     key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
+	Quit:        key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 }
 
 type refreshDoneMsg struct {
@@ -129,6 +136,7 @@ type Model struct {
 	sectionErrs   map[string]string
 	confirm       *confirmAction
 	lastRefreshed time.Time
+	sectionIdx    int
 }
 
 func New(cfg *config.Config, st *store.Store, ghClient *gh.Client) Model {
@@ -222,6 +230,14 @@ func (m *Model) loadFromCache() {
 
 	m.sections = sections
 	m.recalcTotal()
+	if m.sectionIdx >= len(m.sections) {
+		m.sectionIdx = 0
+	}
+	start := m.sectionOffset(m.sectionIdx)
+	end := m.sectionEnd(m.sectionIdx)
+	if m.cursor < start || m.cursor >= end {
+		m.cursor = start
+	}
 	m.markRefreshed()
 }
 
@@ -232,8 +248,52 @@ func (m *Model) markRefreshed() {
 func (m *Model) recalcTotal() {
 	m.total = 0
 	for _, s := range m.sections {
-		m.total += len(s.rows)
+		m.total += visibleRows(s)
 	}
+	if m.cursor >= m.total && m.total > 0 {
+		m.cursor = m.total - 1
+	}
+}
+
+func (m *Model) sectionOffset(idx int) int {
+	off := 0
+	for i := 0; i < idx && i < len(m.sections); i++ {
+		off += visibleRows(m.sections[i])
+	}
+	return off
+}
+
+func (m *Model) sectionEnd(idx int) int {
+	return m.sectionOffset(idx) + visibleRows(m.sections[idx])
+}
+
+func (m *Model) nextRow() int {
+	end := m.sectionEnd(m.sectionIdx)
+	if m.cursor < end-1 {
+		return m.cursor + 1
+	}
+	return m.cursor
+}
+
+func (m *Model) prevRow() int {
+	start := m.sectionOffset(m.sectionIdx)
+	if m.cursor > start {
+		return m.cursor - 1
+	}
+	return m.cursor
+}
+
+func visibleRows(s section) int {
+	if len(s.rows) == 0 {
+		return 0
+	}
+	if s.rows[0].num == 0 {
+		return len(s.rows)
+	}
+	if len(s.rows) > maxSectionRows {
+		return maxSectionRows + 1 // +1 for the overflow line
+	}
+	return len(s.rows)
 }
 
 func (m Model) Init() tea.Cmd {
@@ -308,7 +368,9 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 				lastErr = err
 				continue
 			}
-			r := version.Resolve(ctx, rc, m.gh, svc)
+			svcCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			r := version.Resolve(svcCtx, rc, m.gh, svc)
+			cancel()
 			pending := ""
 			for i, t := range r.PendingTags {
 				if i > 0 {
@@ -372,13 +434,18 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.Quit):
 			return m, tea.Quit
 		case key.Matches(msg, keys.Down):
-			if m.cursor < m.total-1 {
-				m.cursor++
-			}
+			m.cursor = m.nextRow()
 		case key.Matches(msg, keys.Up):
-			if m.cursor > 0 {
-				m.cursor--
+			m.cursor = m.prevRow()
+		case key.Matches(msg, keys.SectionNext):
+			m.sectionIdx = (m.sectionIdx + 1) % len(m.sections)
+			m.cursor = m.sectionOffset(m.sectionIdx)
+		case key.Matches(msg, keys.SectionPrev):
+			m.sectionIdx--
+			if m.sectionIdx < 0 {
+				m.sectionIdx = len(m.sections) - 1
 			}
+			m.cursor = m.sectionOffset(m.sectionIdx)
 		case key.Matches(msg, keys.Enter):
 			r := m.currentRow()
 			if r != nil && r.url != "" {
@@ -458,10 +525,14 @@ func (m *Model) currentRow() *row {
 	}
 	remaining := m.cursor
 	for _, s := range m.sections {
-		if remaining < len(s.rows) {
+		vis := visibleRows(s)
+		if remaining < vis {
+			if s.rows[0].num > 0 && remaining >= maxSectionRows {
+				return nil
+			}
 			return &s.rows[remaining]
 		}
-		remaining -= len(s.rows)
+		remaining -= vis
 	}
 	return nil
 }
@@ -482,8 +553,14 @@ func (m Model) View() string {
 	b.WriteString(titleStyle.Render("ship"))
 	b.WriteString("\n")
 
-	for _, s := range m.sections {
-		b.WriteString(sectionStyle.Render(s.name))
+	for i, s := range m.sections {
+		headerText := s.name
+		if i == m.sectionIdx {
+			headerText = "▸ " + headerText
+			b.WriteString(sectionStyle.Copy().Foreground(lipgloss.Color("212")).Render(headerText))
+		} else {
+			b.WriteString(sectionStyle.Render(headerText))
+		}
 		if m.loading[s.name] {
 			b.WriteString("  ")
 			b.WriteString(m.spin.View())
@@ -510,7 +587,13 @@ func (m Model) View() string {
 			b.WriteString(headerStyle.Render(header))
 			b.WriteString("\n")
 
-			for _, r := range s.rows {
+			for i, r := range s.rows {
+				if i >= maxSectionRows {
+					remaining := len(s.rows) - i
+					b.WriteString(overflowStyle.Render(fmt.Sprintf("… %d more", remaining)))
+					b.WriteString("\n")
+					break
+				}
 				line := renderRow(r, globalIdx == m.cursor, repoWidth, m.width)
 				b.WriteString(line)
 				b.WriteString("\n")
@@ -590,7 +673,8 @@ func renderRow(r row, selected bool, repoWidth, maxWidth int) string {
 
 func (m Model) viewHelp() string {
 	sep := helpKey.Render(" · ")
-	line := helpKey.Render("j/k") + sep + helpKey.Render("move") +
+	line := helpKey.Render("tab/⇧+tab") + sep + helpKey.Render("section") +
+		sep + helpKey.Render("j/k") + sep + helpKey.Render("move") +
 		sep + helpKey.Render("enter") + sep + helpKey.Render("open") +
 		sep + helpKey.Render("m") + sep + helpKey.Render("merge") +
 		sep + helpKey.Render("c") + sep + helpKey.Render("close") +
