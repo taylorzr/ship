@@ -83,19 +83,23 @@ type row struct {
 type section struct {
 	name        string
 	rows        []row
+	allRows     []row
 	scrollOffset int
+	hideDrafts  bool
 }
 
 type keyMap struct {
-	Up        key.Binding
-	Down      key.Binding
+	Up          key.Binding
+	Down        key.Binding
 	SectionNext key.Binding
 	SectionPrev key.Binding
-	Enter     key.Binding
-	Merge     key.Binding
-	Close     key.Binding
-	Refresh   key.Binding
-	Quit      key.Binding
+	Enter       key.Binding
+	Merge       key.Binding
+	Close       key.Binding
+	Refresh     key.Binding
+	Quit        key.Binding
+	FilterDraft key.Binding
+	Search        key.Binding
 }
 
 var keys = keyMap{
@@ -108,6 +112,8 @@ var keys = keyMap{
 	Close:       key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "close")),
 	Refresh:     key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
 	Quit:        key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+	FilterDraft: key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "toggle drafts")),
+	Search:      key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "search")),
 }
 
 type refreshDoneMsg struct {
@@ -141,6 +147,8 @@ type Model struct {
 	confirm       *confirmAction
 	lastRefreshed time.Time
 	sectionIdx    int
+	searching     bool
+	searchQuery   string
 }
 
 func New(cfg *config.Config, st *store.Store, ghClient *gh.Client) Model {
@@ -165,22 +173,61 @@ func New(cfg *config.Config, st *store.Store, ghClient *gh.Client) Model {
 	return m
 }
 
-func (m *Model) scrollOffsetFor(name string) int {
+func (m *Model) sectionProp(name string) (offset int, hideDrafts bool) {
 	for _, s := range m.sections {
 		if s.name == name {
-			return s.scrollOffset
+			return s.scrollOffset, s.hideDrafts
 		}
 	}
-	return 0
+	return 0, false
+}
+
+func (m *Model) applyFilters() {
+	q := strings.ToLower(m.searchQuery)
+	for i := range m.sections {
+		sectionQ := q
+		// search only applies to the active section
+		if i != m.sectionIdx {
+			sectionQ = ""
+		}
+		if m.sections[i].hideDrafts || sectionQ != "" {
+			var filtered []row
+			for _, r := range m.sections[i].allRows {
+				if m.sections[i].hideDrafts && r.draft {
+					continue
+				}
+				if sectionQ != "" && !strings.Contains(strings.ToLower(r.title), sectionQ) &&
+					!strings.Contains(strings.ToLower(r.repo), sectionQ) &&
+					!strings.Contains(strings.ToLower(r.name), sectionQ) &&
+					!strings.Contains(strings.ToLower(r.pending), sectionQ) {
+					continue
+				}
+				filtered = append(filtered, r)
+			}
+			m.sections[i].rows = filtered
+		} else {
+			m.sections[i].rows = m.sections[i].allRows
+		}
+		if m.sections[i].scrollOffset >= len(m.sections[i].rows) {
+			m.sections[i].scrollOffset = 0
+		}
+	}
+	m.recalcTotal()
+	start := m.sectionOffset(m.sectionIdx)
+	end := m.sectionEnd(m.sectionIdx)
+	if m.cursor < start || m.cursor >= end {
+		m.cursor = start
+	}
 }
 
 func (m *Model) loadFromCache() {
 	var sections []section
 
 	prs, _ := m.store.CachedPRs("mine")
-	s := section{name: "My PRs", scrollOffset: m.scrollOffsetFor("My PRs")}
+	so, hd := m.sectionProp("My PRs")
+	s := section{name: "My PRs", scrollOffset: so, hideDrafts: hd}
 	for _, p := range prs {
-		s.rows = append(s.rows, row{
+		r := row{
 			title:  p.Title,
 			repo:   p.Repo,
 			num:    p.Number,
@@ -188,14 +235,17 @@ func (m *Model) loadFromCache() {
 			ci:     p.CIState,
 			review: p.ReviewDecision,
 			draft:  p.IsDraft,
-		})
+		}
+		s.allRows = append(s.allRows, r)
+		s.rows = append(s.rows, r)
 	}
 	sections = append(sections, s)
 
 	revs, _ := m.store.CachedPRs("review-direct")
-	s2 := section{name: "To Review", scrollOffset: m.scrollOffsetFor("To Review")}
+	so, hd = m.sectionProp("To Review")
+	s2 := section{name: "To Review", scrollOffset: so, hideDrafts: hd}
 	for _, p := range revs {
-		s2.rows = append(s2.rows, row{
+		r := row{
 			title:  p.Title,
 			repo:   p.Repo,
 			num:    p.Number,
@@ -203,7 +253,9 @@ func (m *Model) loadFromCache() {
 			ci:     p.CIState,
 			review: p.ReviewDecision,
 			draft:  p.IsDraft,
-		})
+		}
+		s2.allRows = append(s2.allRows, r)
+		s2.rows = append(s2.rows, r)
 	}
 	sections = append(sections, s2)
 
@@ -242,9 +294,10 @@ func (m *Model) loadFromCache() {
 	sections = append(sections, s3)
 
 	deps, _ := m.store.CachedPRs("dep")
-	s4 := section{name: "Dependencies", scrollOffset: m.scrollOffsetFor("Dependencies")}
+	so, hd = m.sectionProp("Dependencies")
+	s4 := section{name: "Dependencies", scrollOffset: so, hideDrafts: hd}
 	for _, p := range deps {
-		s4.rows = append(s4.rows, row{
+		r := row{
 			title:  p.Title,
 			repo:   p.Repo,
 			num:    p.Number,
@@ -252,29 +305,14 @@ func (m *Model) loadFromCache() {
 			ci:     p.CIState,
 			review: p.ReviewDecision,
 			draft:  p.IsDraft,
-		})
+		}
+		s4.allRows = append(s4.allRows, r)
+		s4.rows = append(s4.rows, r)
 	}
 	sections = append(sections, s4)
 
 	m.sections = sections
-	// clamp scroll offsets after row count changes
-	for i := range m.sections {
-		if m.sections[i].scrollOffset >= len(m.sections[i].rows) {
-			m.sections[i].scrollOffset = 0
-		}
-	}
-	m.recalcTotal()
-	if m.sectionIdx >= len(m.sections) {
-		m.sectionIdx = 0
-	}
-	start := m.sectionOffset(m.sectionIdx)
-	end := m.sectionEnd(m.sectionIdx)
-	if m.cursor < start || m.cursor >= end {
-		m.cursor = start + m.sections[m.sectionIdx].scrollOffset
-	}
-	if m.cursor >= end {
-		m.cursor = end - 1
-	}
+	m.applyFilters()
 	m.markRefreshed()
 }
 
@@ -502,6 +540,29 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if m.searching {
+			switch {
+			case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
+				m.searching = false
+				m.searchQuery = ""
+				m.applyFilters()
+			case key.Matches(msg, keys.Enter):
+				m.searching = false
+				m.applyFilters()
+			case key.Matches(msg, key.NewBinding(key.WithKeys("backspace"))):
+				if len(m.searchQuery) > 0 {
+					m.searchQuery = m.searchQuery[:len(m.searchQuery)-1]
+					m.applyFilters()
+				}
+			default:
+				r := []rune(msg.String())
+				if len(r) == 1 && r[0] >= 32 && r[0] <= 126 {
+					m.searchQuery += string(r[0])
+					m.applyFilters()
+				}
+			}
+			return m, nil
+		}
 		switch {
 		case key.Matches(msg, keys.Quit):
 			return m, tea.Quit
@@ -539,6 +600,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.loading[k] = true
 			}
 			return m, m.fullRefreshCmd()
+		case key.Matches(msg, keys.FilterDraft):
+			m.sections[m.sectionIdx].hideDrafts = !m.sections[m.sectionIdx].hideDrafts
+			m.applyFilters()
+			return m, nil
+		case key.Matches(msg, keys.Search):
+			m.searching = true
+			m.searchQuery = ""
+			return m, nil
+		case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
+			if m.searchQuery != "" {
+				m.searchQuery = ""
+				m.applyFilters()
+			}
 		}
 
 	case refreshDoneMsg:
@@ -628,6 +702,14 @@ func (m Model) View() string {
 			b.WriteString(sectionStyle.Copy().Foreground(lipgloss.Color("212")).Render(headerText))
 		} else {
 			b.WriteString(sectionStyle.Render(headerText))
+		}
+		if s.hideDrafts {
+			b.WriteString("  ")
+			b.WriteString(helpKey.Render("[no drafts]"))
+		}
+		if m.searchQuery != "" && i == m.sectionIdx {
+			b.WriteString("  ")
+			b.WriteString(helpKey.Render("/" + m.searchQuery))
 		}
 		if m.loading[s.name] {
 			b.WriteString("  ")
@@ -725,6 +807,11 @@ func (m Model) View() string {
 	}
 
 	b.WriteString("\n")
+	if m.searching {
+		prompt := "/" + m.searchQuery + "█"
+		b.WriteString(helpKey.Render(prompt))
+		b.WriteString("\n")
+	}
 	b.WriteString(m.viewHelp())
 
 	return b.String()
@@ -797,7 +884,9 @@ func (m Model) viewHelp() string {
 	sep := helpKey.Render(" · ")
 	line := helpKey.Render("tab/⇧+tab") + sep + helpKey.Render("section") +
 		sep + helpKey.Render("j/k") + sep + helpKey.Render("move") +
+		sep + helpKey.Render("/") + sep + helpKey.Render("search") +
 		sep + helpKey.Render("enter") + sep + helpKey.Render("open") +
+		sep + helpKey.Render("d") + sep + helpKey.Render("drafts") +
 		sep + helpKey.Render("m") + sep + helpKey.Render("merge") +
 		sep + helpKey.Render("c") + sep + helpKey.Render("close") +
 		sep + helpKey.Render("r") + sep + helpKey.Render("refresh")
