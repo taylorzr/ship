@@ -93,7 +93,18 @@ func (s *Store) migrate() error {
 			status      TEXT
 		);
 	`)
-	return err
+	if err != nil {
+		return err
+	}
+
+	// migrate: add is_draft column if missing
+	var hasDraft bool
+	err = s.db.QueryRow(`SELECT COUNT(*) > 0 FROM pragma_table_info('pr') WHERE name = 'is_draft'`).Scan(&hasDraft)
+	if err == nil && !hasDraft {
+		s.db.Exec(`ALTER TABLE pr ADD COLUMN is_draft INTEGER NOT NULL DEFAULT 0`)
+	}
+
+	return nil
 }
 
 type CachedPR struct {
@@ -107,6 +118,7 @@ type CachedPR struct {
 	CIState        string
 	Mergeable      string
 	UpdatedAt      string
+	IsDraft        bool
 }
 
 func (s *Store) SavePRs(prs []CachedPR, role string) error {
@@ -122,8 +134,8 @@ func (s *Store) SavePRs(prs []CachedPR, role string) error {
 	}
 
 	stmt, err := tx.Prepare(`INSERT OR REPLACE INTO pr
-		(number, repo, title, author, role, url, review_decision, ci_state, mergeable, updated_at)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		(number, repo, title, author, role, url, review_decision, ci_state, mergeable, updated_at, is_draft)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
@@ -131,7 +143,7 @@ func (s *Store) SavePRs(prs []CachedPR, role string) error {
 
 	for _, p := range prs {
 		if _, err := stmt.Exec(p.Number, p.Repo, p.Title, p.Author, p.Role,
-			p.URL, p.ReviewDecision, p.CIState, p.Mergeable, p.UpdatedAt); err != nil {
+			p.URL, p.ReviewDecision, p.CIState, p.Mergeable, p.UpdatedAt, p.IsDraft); err != nil {
 			return err
 		}
 	}
@@ -145,7 +157,7 @@ func (s *Store) CachedPRs(role string) ([]CachedPR, error) {
 		where = "WHERE role = ?"
 		args = append(args, role)
 	}
-	rows, err := s.db.Query(`SELECT number, repo, title, author, role, url, review_decision, ci_state, mergeable, updated_at FROM pr `+where+` ORDER BY updated_at DESC`, args...)
+	rows, err := s.db.Query(`SELECT number, repo, title, author, role, url, review_decision, ci_state, mergeable, updated_at, is_draft FROM pr `+where+` ORDER BY updated_at DESC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -155,7 +167,7 @@ func (s *Store) CachedPRs(role string) ([]CachedPR, error) {
 	for rows.Next() {
 		var p CachedPR
 		if err := rows.Scan(&p.Number, &p.Repo, &p.Title, &p.Author, &p.Role,
-			&p.URL, &p.ReviewDecision, &p.CIState, &p.Mergeable, &p.UpdatedAt); err != nil {
+			&p.URL, &p.ReviewDecision, &p.CIState, &p.Mergeable, &p.UpdatedAt, &p.IsDraft); err != nil {
 			return nil, err
 		}
 		out = append(out, p)

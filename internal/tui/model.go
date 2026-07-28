@@ -39,6 +39,13 @@ var (
 
 	helpKey = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	headerStyle = lipgloss.NewStyle().PaddingLeft(2).Foreground(lipgloss.Color("244"))
+	dialogStyle = lipgloss.NewStyle().
+			Border(lipgloss.RoundedBorder()).
+			BorderForeground(lipgloss.Color("205")).
+			Padding(1, 2).
+			Width(50)
+	dialogTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
+	dialogHelp  = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 )
 
 type row struct {
@@ -48,6 +55,7 @@ type row struct {
 	url    string
 	ci     string
 	review string
+	draft  bool
 }
 
 type section struct {
@@ -59,6 +67,8 @@ type keyMap struct {
 	Up      key.Binding
 	Down    key.Binding
 	Enter   key.Binding
+	Merge   key.Binding
+	Close   key.Binding
 	Refresh key.Binding
 	Quit    key.Binding
 }
@@ -66,12 +76,25 @@ type keyMap struct {
 var keys = keyMap{
 	Up:      key.NewBinding(key.WithKeys("k", "up"), key.WithHelp("k/↑", "move up")),
 	Down:    key.NewBinding(key.WithKeys("j", "down"), key.WithHelp("j/↓", "move down")),
-	Enter:   key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open in browser")),
+	Enter:   key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open")),
+	Merge:   key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "merge")),
+	Close:   key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "close")),
 	Refresh: key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
 	Quit:    key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 }
 
 type refreshDoneMsg struct{ source string }
+
+type confirmAction struct {
+	action string // "merge" or "close"
+	repo   string
+	num    int
+	title  string
+}
+
+type actionDoneMsg struct {
+	err error
+}
 
 type Model struct {
 	cfg           *config.Config
@@ -84,6 +107,7 @@ type Model struct {
 	total         int
 	spin          spinner.Model
 	loading       map[string]bool
+	confirm       *confirmAction
 	lastRefreshed time.Time
 	err           string
 }
@@ -122,6 +146,7 @@ func (m *Model) loadFromCache() {
 			url:    p.URL,
 			ci:     p.CIState,
 			review: p.ReviewDecision,
+			draft:  p.IsDraft,
 		})
 	}
 	sections = append(sections, s)
@@ -136,6 +161,7 @@ func (m *Model) loadFromCache() {
 			url:    p.URL,
 			ci:     p.CIState,
 			review: p.ReviewDecision,
+			draft:  p.IsDraft,
 		})
 	}
 	sections = append(sections, s2)
@@ -169,6 +195,7 @@ func (m *Model) loadFromCache() {
 			url:    p.URL,
 			ci:     p.CIState,
 			review: p.ReviewDecision,
+			draft:  p.IsDraft,
 		})
 	}
 	sections = append(sections, s4)
@@ -300,6 +327,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, cmd
 
 	case tea.KeyMsg:
+		if m.confirm != nil {
+			switch {
+			case key.Matches(msg, keys.Quit):
+				return m, tea.Quit
+			case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
+				m.confirm = nil
+			case key.Matches(msg, keys.Enter):
+				action := m.confirm.action
+				repo := m.confirm.repo
+				num := m.confirm.num
+				m.confirm = nil
+				return m, m.execAction(action, repo, num)
+			}
+			return m, nil
+		}
 		switch {
 		case key.Matches(msg, keys.Quit):
 			return m, tea.Quit
@@ -315,6 +357,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			r := m.currentRow()
 			if r != nil && r.url != "" {
 				openBrowser(r.url)
+			}
+		case key.Matches(msg, keys.Merge):
+			r := m.currentRow()
+			if r != nil && r.num > 0 {
+				m.confirm = &confirmAction{action: "merge", repo: r.repo, num: r.num, title: r.title}
+			}
+		case key.Matches(msg, keys.Close):
+			r := m.currentRow()
+			if r != nil && r.num > 0 {
+				m.confirm = &confirmAction{action: "close", repo: r.repo, num: r.num, title: r.title}
 			}
 		case key.Matches(msg, keys.Refresh):
 			for k := range m.loading {
@@ -338,6 +390,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.fullRefreshCmd()
 		}
 		return m, m.autoRefreshTick()
+
+	case actionDoneMsg:
+		if msg.err != nil {
+			m.err = msg.err.Error()
+		}
+		for k := range m.loading {
+			m.loading[k] = true
+		}
+		return m, m.fullRefreshCmd()
 	}
 
 	return m, nil
@@ -367,6 +428,15 @@ func (m *Model) currentRow() *row {
 }
 
 func (m Model) View() string {
+	if m.confirm != nil {
+		if m.width > 0 && m.height > 0 {
+			return lipgloss.Place(m.width, m.height,
+				lipgloss.Center, lipgloss.Center,
+				m.renderConfirm())
+		}
+		return strings.Repeat("\n", 5) + m.renderConfirm()
+	}
+
 	var globalIdx int
 	var b strings.Builder
 
@@ -383,15 +453,25 @@ func (m Model) View() string {
 
 		// column header for PR sections
 		if len(s.rows) > 0 && s.rows[0].num > 0 {
-			b.WriteString(headerStyle.Render("CI Rev  Repo                              #       Title"))
+			repoWidth := 30
+			if m.width > 0 {
+				repoWidth = m.width * 30 / 100
+				if repoWidth < 15 {
+					repoWidth = 15
+				} else if repoWidth > 50 {
+					repoWidth = 50
+				}
+			}
+			header := fmt.Sprintf("CI Rev  %s  #       Title", padWidth("Repo", repoWidth))
+			b.WriteString(headerStyle.Render(header))
 			b.WriteString("\n")
-		}
 
-		for _, r := range s.rows {
-			line := renderRow(r, globalIdx == m.cursor)
-			b.WriteString(line)
-			b.WriteString("\n")
-			globalIdx++
+			for _, r := range s.rows {
+				line := renderRow(r, globalIdx == m.cursor, repoWidth, m.width)
+				b.WriteString(line)
+				b.WriteString("\n")
+				globalIdx++
+			}
 		}
 	}
 
@@ -401,11 +481,34 @@ func (m Model) View() string {
 	return b.String()
 }
 
-func renderRow(r row, selected bool) string {
-	icon := ""
-	if r.ci != "" {
-		icon = ciIcon(r.ci)
+func truncateWidth(s string, max int) string {
+	if lipgloss.Width(s) <= max {
+		return s
 	}
+	var out strings.Builder
+	var w int
+	for _, r := range s {
+		rw := lipgloss.Width(string(r))
+		if w+rw > max {
+			out.WriteString("…")
+			break
+		}
+		out.WriteRune(r)
+		w += rw
+	}
+	return out.String()
+}
+
+func padWidth(s string, w int) string {
+	sw := lipgloss.Width(s)
+	if sw >= w {
+		return s
+	}
+	return s + strings.Repeat(" ", w-sw)
+}
+
+func renderRow(r row, selected bool, repoWidth, maxWidth int) string {
+	icon := ciIcon(r.ci)
 
 	rev := ""
 	if r.review != "" {
@@ -414,12 +517,25 @@ func renderRow(r row, selected bool) string {
 		rev = "·"
 	}
 
+	left := icon + " " + rev
+
 	var line string
 	if r.num > 0 {
-		line = fmt.Sprintf("%s %s  %s  #%-5d  %s",
-			icon, rev, padRight(r.repo, 30), r.num, r.title)
+		title := r.title
+		if r.draft {
+			title = "[DRAFT] " + title
+		}
+		repo := truncateWidth(r.repo, repoWidth)
+		line = fmt.Sprintf("%s%s  #%-5d  %s",
+			padWidth(left, 8), padWidth(repo, repoWidth), r.num, title)
+		if maxWidth > 0 {
+			line = truncateWidth(line, maxWidth)
+		}
 	} else {
 		line = r.title
+		if maxWidth > 0 {
+			line = truncateWidth(line, maxWidth)
+		}
 	}
 
 	if selected {
@@ -428,17 +544,12 @@ func renderRow(r row, selected bool) string {
 	return rowStyle.Render(line)
 }
 
-func padRight(s string, w int) string {
-	if len(s) >= w {
-		return s
-	}
-	return s + strings.Repeat(" ", w-len(s))
-}
-
 func (m Model) viewHelp() string {
 	sep := helpKey.Render(" · ")
 	line := helpKey.Render("j/k") + sep + helpKey.Render("move") +
 		sep + helpKey.Render("enter") + sep + helpKey.Render("open") +
+		sep + helpKey.Render("m") + sep + helpKey.Render("merge") +
+		sep + helpKey.Render("c") + sep + helpKey.Render("close") +
 		sep + helpKey.Render("r") + sep + helpKey.Render("refresh")
 	if !m.lastRefreshed.IsZero() {
 		line += helpKey.Render(" (auto in " + refreshCountdown(m.lastRefreshed) + ")")
@@ -451,6 +562,19 @@ func (m Model) fullRefreshCmd() tea.Cmd {
 	cmds := []tea.Cmd{m.autoRefreshTick()}
 	cmds = append(cmds, m.sectionCommands(context.Background())...)
 	return tea.Batch(cmds...)
+}
+
+func (m Model) execAction(action, repo string, num int) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		var err error
+		if action == "merge" {
+			err = m.gh.MergePR(ctx, repo, num)
+		} else {
+			err = m.gh.ClosePR(ctx, repo, num)
+		}
+		return actionDoneMsg{err: err}
+	}
 }
 
 func ciIcon(state string) string {
@@ -491,6 +615,7 @@ func toCached(p gh.PR, role string) store.CachedPR {
 		CIState:        p.CIState,
 		Mergeable:      p.Mergeable,
 		UpdatedAt:      p.UpdatedAt,
+		IsDraft:        p.IsDraft,
 	}
 }
 
@@ -515,4 +640,19 @@ func refreshCountdown(t time.Time) string {
 		remaining = 0
 	}
 	return fmt.Sprintf("%ds", remaining)
+}
+
+func (m Model) renderConfirm() string {
+	c := m.confirm
+	action := "Merge"
+	if c.action == "close" {
+		action = "Close"
+	}
+	var b strings.Builder
+	b.WriteString(dialogTitle.Render(action + " PR?"))
+	b.WriteString("\n\n")
+	b.WriteString(fmt.Sprintf("%s#%d: %s", c.repo, c.num, c.title))
+	b.WriteString("\n\n")
+	b.WriteString(dialogHelp.Render("enter to confirm · esc to cancel"))
+	return dialogStyle.Render(b.String())
 }

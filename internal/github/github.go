@@ -23,6 +23,7 @@ type PR struct {
 	CIState        string
 	Mergeable      string
 	UpdatedAt      string
+	IsDraft        bool
 }
 
 type Client struct {
@@ -71,6 +72,7 @@ type prNode struct {
 		Number         int
 		Title          string
 		URL            string
+		IsDraft        bool
 		Author         struct{ Login string }
 		ReviewDecision string
 		Mergeable      githubv4.MergeableState
@@ -135,6 +137,7 @@ func (c *Client) search(ctx context.Context, query string) ([]PR, error) {
 				CIState:        ciState,
 				Mergeable:      string(pr.Mergeable),
 				UpdatedAt:      pr.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+				IsDraft:        pr.IsDraft,
 			})
 		}
 
@@ -360,4 +363,27 @@ func (c *Client) PendingTags(ctx context.Context, repo, prodSHA, branch string) 
 		return pending[i].Name < pending[j].Name
 	})
 	return pending, nil
+}
+
+func (c *Client) MergePR(ctx context.Context, repo string, number int) error {
+	out, err := exec.Command("gh", "api",
+		fmt.Sprintf("repos/%s/pulls/%d/merge", repo, number),
+		"-f", "merge_method=squash",
+	).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("merge PR #%d: %s: %w", number, strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+func (c *Client) ClosePR(ctx context.Context, repo string, number int) error {
+	out, err := exec.Command("gh", "api",
+		fmt.Sprintf("repos/%s/pulls/%d", repo, number),
+		"-X", "PATCH",
+		"-f", "state=closed",
+	).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("close PR #%d: %s: %w", number, strings.TrimSpace(string(out)), err)
+	}
+	return nil
 }
