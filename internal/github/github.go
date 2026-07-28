@@ -244,9 +244,9 @@ type CommitSummary struct {
 }
 
 func (c *Client) Compare(ctx context.Context, repo, base, head string) (*CompareResult, error) {
-	out, err := exec.Command("gh", "api", fmt.Sprintf("repos/%s/compare/%s...%s", repo, base, head)).Output()
+	out, err := exec.Command("gh", "api", fmt.Sprintf("repos/%s/compare/%s...%s", repo, base, head)).CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("gh api compare: %w", err)
+		return nil, fmt.Errorf("gh api compare: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	var resp struct {
 		AheadBy  int `json:"ahead_by"`
@@ -280,17 +280,17 @@ type TagInfo struct {
 }
 
 func (c *Client) ResolveRef(ctx context.Context, repo, ref string) (string, error) {
-	out, err := exec.Command("gh", "api", fmt.Sprintf("repos/%s/git/ref/tags/%s", repo, ref), "--jq", ".object.sha").Output()
+	out, err := exec.Command("gh", "api", fmt.Sprintf("repos/%s/git/ref/tags/%s", repo, ref), "--jq", ".object.sha").CombinedOutput()
 	if err != nil {
-		return "", fmt.Errorf("resolve ref %s: %w", ref, err)
+		return "", fmt.Errorf("resolve ref %s: %s: %w", ref, strings.TrimSpace(string(out)), err)
 	}
 	return strings.TrimSpace(string(out)), nil
 }
 
 func (c *Client) ListTags(ctx context.Context, repo string) ([]TagInfo, error) {
-	out, err := exec.Command("gh", "api", fmt.Sprintf("repos/%s/git/refs/tags?per_page=100", repo)).Output()
+	out, err := exec.Command("gh", "api", fmt.Sprintf("repos/%s/git/refs/tags?per_page=100", repo)).CombinedOutput()
 	if err != nil {
-		return nil, fmt.Errorf("list tags: %w", err)
+		return nil, fmt.Errorf("list tags: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	var resp []struct {
 		Ref  string `json:"ref"`
@@ -320,7 +320,7 @@ func (c *Client) ListTagsReachableFrom(ctx context.Context, repo, branch string)
 	for _, tag := range allTags {
 		// check if tag commit is reachable from branch using merge-base
 		out, err := exec.Command("gh", "api", fmt.Sprintf("repos/%s/compare/%s...%s", repo, tag.SHA, branch),
-			"--jq", ".status").Output()
+			"--jq", ".status").CombinedOutput()
 		if err != nil {
 			continue
 		}
