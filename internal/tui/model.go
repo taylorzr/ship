@@ -76,6 +76,8 @@ type row struct {
 	ci     string
 	review string
 	draft  bool
+	name   string // display name (releases section)
+	pending string // pending versions (releases section)
 }
 
 type section struct {
@@ -206,21 +208,36 @@ func (m *Model) loadFromCache() {
 	sections = append(sections, s2)
 
 	versions, _ := m.store.CachedVersions()
+	svcNames := make(map[string]string, len(m.cfg.Services))
+	for _, svc := range m.cfg.Services {
+		svcNames[svc.Repo] = svc.Name
+	}
 	s3 := section{name: "Releases"}
 	for _, v := range versions {
-		title := ""
-		if v.Error != "" {
-			title = fmt.Sprintf("✗ %s — %s", v.Repo, v.Error)
-		} else {
-			title = fmt.Sprintf("prod %s", v.ProdRef)
-			if v.AheadBy > 0 {
-				title += fmt.Sprintf(" · +%d", v.AheadBy)
-			}
-			if v.PendingTags != "" {
-				title += fmt.Sprintf(" · pending %s", v.PendingTags)
-			}
+		title := v.ProdRef
+		if title == "" {
+			title = "-"
+		} else if v.AheadBy > 0 {
+			title = fmt.Sprintf("+%d %s", v.AheadBy, title)
 		}
-		s3.rows = append(s3.rows, row{title: title})
+		name := v.Repo
+		if n, ok := svcNames[v.Repo]; ok && n != "" {
+			name = n
+		}
+		pending := v.PendingTags
+		if pending == "" {
+			pending = "✓"
+		}
+		r := row{
+			name:    name,
+			title:   title,
+			pending: pending,
+		}
+		if v.Error != "" {
+			r.title = "✗ " + v.Error
+			r.pending = ""
+		}
+		s3.rows = append(s3.rows, r)
 	}
 	sections = append(sections, s3)
 
@@ -664,8 +681,35 @@ func (m Model) View() string {
 
 			globalIdx += len(s.rows)
 		} else if len(s.rows) > 0 {
+			// compute column widths
+			maxName := 4  // "Name"
+			maxCur := 7   // "Current"
+			for _, r := range s.rows {
+				if w := lipgloss.Width(r.name); w > maxName {
+					maxName = w
+				}
+				if w := lipgloss.Width(r.title); w > maxCur {
+					maxCur = w
+				}
+			}
+			if maxName > 30 {
+				maxName = 30
+			}
+			if maxCur > 40 {
+				maxCur = 40
+			}
+			sep := "  "
+			header := fmt.Sprintf("%s  %s  %s", padWidth("Name", maxName), padWidth("Current", maxCur), "Pending")
+			b.WriteString(headerStyle.Render(header))
+			b.WriteString("\n")
+
 			for i, r := range s.rows {
-				line := r.title
+				line := fmt.Sprintf("%s%s%s%s%s",
+					padWidth(truncateWidth(r.name, maxName), maxName),
+					sep,
+					padWidth(truncateWidth(r.title, maxCur), maxCur),
+					sep,
+					r.pending)
 				if m.width > 0 {
 					line = truncateWidth(line, m.width)
 				}

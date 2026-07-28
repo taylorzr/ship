@@ -31,6 +31,7 @@ type RepoConfig struct {
 }
 
 type ServiceConfig struct {
+	Name            string `toml:"name"`
 	Repo            string `toml:"repo"`
 	Context         string `toml:"context"`
 	Namespace       string `toml:"namespace"`
