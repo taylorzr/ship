@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/spf13/cobra"
@@ -179,7 +180,9 @@ func runReleases(cmd *cobra.Command, args []string) error {
 		if mockK8s != nil {
 			svcK8s = mockK8s
 		} else {
-			rc, err := k8s.NewRealClient("", svc.Context)
+			svcCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			rc, err := k8s.NewRealClient(svcCtx, "", svc.Context)
+			cancel()
 			if err != nil {
 				fmt.Printf("── %s ──\n  ✗ k8s: %v\n\n", svc.Repo, err)
 				continue

@@ -386,13 +386,14 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
 		var lastErr error
 		for _, svc := range m.cfg.Services {
-			rc, err := k8s.NewRealClient("", svc.Context)
+			svcCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+			rc, err := k8s.NewRealClient(svcCtx, "", svc.Context)
 			if err != nil {
 				m.store.SaveVersion(store.CachedVersion{Repo: svc.Repo, Error: fmt.Sprintf("k8s: %v", err)})
 				lastErr = err
+				cancel()
 				continue
 			}
-			svcCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 			r := version.Resolve(svcCtx, rc, m.gh, svc)
 			cancel()
 			pending := ""

@@ -15,37 +15,56 @@ type RealClient struct {
 	context   string
 }
 
-func NewRealClient(kubeconfig, context string) (*RealClient, error) {
-	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
-	if kubeconfig != "" {
-		loadingRules.ExplicitPath = kubeconfig
-	}
-	configOverrides := &clientcmd.ConfigOverrides{CurrentContext: context}
-	cfg := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
-
-	rawCfg, err := cfg.RawConfig()
-	if err != nil {
-		return nil, fmt.Errorf("kubeconfig: %w", err)
+func NewRealClient(ctx context.Context, kubeconfig, context string) (*RealClient, error) {
+	type result struct {
+		client *RealClient
+		err    error
 	}
 
-	actualCtx := rawCfg.CurrentContext
-	if context != "" {
-		actualCtx = context
-	}
-	if actualCtx == "" {
-		return nil, fmt.Errorf("kubeconfig: no context set — run kubectl config use-context <ctx> or set context in config.toml")
-	}
+	ch := make(chan result, 1)
+	go func() {
+		loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
+		if kubeconfig != "" {
+			loadingRules.ExplicitPath = kubeconfig
+		}
+		configOverrides := &clientcmd.ConfigOverrides{CurrentContext: context}
+		cfg := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, configOverrides)
 
-	restCfg, err := cfg.ClientConfig()
-	if err != nil {
-		return nil, fmt.Errorf("kubeconfig context %q: %w", actualCtx, err)
-	}
+		rawCfg, err := cfg.RawConfig()
+		if err != nil {
+			ch <- result{nil, fmt.Errorf("kubeconfig: %w", err)}
+			return
+		}
 
-	clientset, err := kubernetes.NewForConfig(restCfg)
-	if err != nil {
-		return nil, fmt.Errorf("kubernetes client for %q: %w", actualCtx, err)
+		actualCtx := rawCfg.CurrentContext
+		if context != "" {
+			actualCtx = context
+		}
+		if actualCtx == "" {
+			ch <- result{nil, fmt.Errorf("kubeconfig: no context set — run kubectl config use-context <ctx> or set context in config.toml")}
+			return
+		}
+
+		restCfg, err := cfg.ClientConfig()
+		if err != nil {
+			ch <- result{nil, fmt.Errorf("kubeconfig context %q: %w", actualCtx, err)}
+			return
+		}
+
+		clientset, err := kubernetes.NewForConfig(restCfg)
+		if err != nil {
+			ch <- result{nil, fmt.Errorf("kubernetes client for %q: %w", actualCtx, err)}
+			return
+		}
+		ch <- result{&RealClient{clientset: clientset, context: actualCtx}, nil}
+	}()
+
+	select {
+	case r := <-ch:
+		return r.client, r.err
+	case <-ctx.Done():
+		return nil, ctx.Err()
 	}
-	return &RealClient{clientset: clientset, context: actualCtx}, nil
 }
 
 func (c *RealClient) GetDeployment(ctx context.Context, context, namespace, name string) (*Deployment, error) {
