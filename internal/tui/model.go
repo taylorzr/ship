@@ -101,16 +101,18 @@ type row struct {
 	updatedAt string // RFC 3339 timestamp
 	depth     int    // nesting level for releases section
 	prodRef   string // prod tag/SHA for compare URLs
+	role      string // review role ("review-direct" or "review-team")
 }
 
 type section struct {
-	name         string
-	rows         []row
-	allRows      []row
-	scrollOffset int
-	hideDrafts   bool
-	showStarred  bool
-	sortNewest   bool
+	name            string
+	rows            []row
+	allRows         []row
+	scrollOffset    int
+	hideDrafts      bool
+	showStarred     bool
+	sortNewest      bool
+	hideTeamReviews bool
 }
 
 type keyMap struct {
@@ -129,6 +131,7 @@ type keyMap struct {
 	Search        key.Binding
 	Diff          key.Binding
 	Deploy        key.Binding
+	TeamFilter    key.Binding
 }
 
 var keys = keyMap{
@@ -147,6 +150,7 @@ var keys = keyMap{
 	Search:        key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
 	Diff:          key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "toggle drafts/diff")),
 	Deploy:        key.NewBinding(key.WithKeys("T"), key.WithHelp("T", "ship/deploy")),
+	TeamFilter:    key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "toggle team reviews")),
 }
 
 type refreshDoneMsg struct {
@@ -212,13 +216,13 @@ func New(cfg *config.Config, st *store.Store, ghClient *gh.Client, mockK8sImage 
 	return m
 }
 
-func (m *Model) sectionProp(name string) (offset int, hideDrafts, showStarred, sortNewest bool) {
+func (m *Model) sectionProp(name string) (offset int, hideDrafts, showStarred, sortNewest, hideTeamReviews bool) {
 	for _, s := range m.sections {
 		if s.name == name {
-			return s.scrollOffset, s.hideDrafts, s.showStarred, s.sortNewest
+			return s.scrollOffset, s.hideDrafts, s.showStarred, s.sortNewest, s.hideTeamReviews
 		}
 	}
-	return 0, false, false, true
+	return 0, false, false, true, false
 }
 
 func (m *Model) applyFilters() {
@@ -242,6 +246,9 @@ func (m *Model) applyFilters() {
 			}
 			for _, r := range allRows {
 				if m.sections[i].hideDrafts && r.draft {
+					continue
+				}
+				if m.sections[i].hideTeamReviews && r.role == "review-team" {
 					continue
 				}
 				if m.sections[i].showStarred && !starredSet[r.repo] {
@@ -277,7 +284,7 @@ func (m *Model) loadFromCache() {
 	var sections []section
 
 	prs, _ := m.store.CachedPRs("mine")
-	so, hd, ss, sn := m.sectionProp("My PRs")
+	so, hd, ss, sn, _ := m.sectionProp("My PRs")
 	s := section{name: "My PRs", scrollOffset: so, hideDrafts: hd, showStarred: ss, sortNewest: sn}
 	for _, p := range prs {
 		r := row{
@@ -303,7 +310,7 @@ func (m *Model) loadFromCache() {
 		svcNames[svc.Repo] = svc.Name
 		svcRepos[svc.Repo] = true
 	}
-	so, hd, ss, sn = m.sectionProp("Releases")
+	so, hd, ss, sn, _ = m.sectionProp("Releases")
 	s3 := section{name: "Releases", scrollOffset: so, hideDrafts: hd, showStarred: ss, sortNewest: sn}
 	for _, v := range versions {
 		if !svcRepos[v.Repo] {
@@ -371,13 +378,12 @@ func (m *Model) loadFromCache() {
 	}
 	sections = append(sections, s3)
 
-	so, hd, ss, sn = m.sectionProp("To Review")
+	so, hd, ss, sn, htr := m.sectionProp("To Review")
 	dir, _ := m.store.CachedPRs("review-direct")
 	team, _ := m.store.CachedPRs("review-team")
 	seen := map[string]bool{}
-	all := append(dir, team...)
-	s2 := section{name: "To Review", scrollOffset: so, hideDrafts: hd, showStarred: ss, sortNewest: sn}
-	for _, p := range all {
+	s2 := section{name: "To Review", scrollOffset: so, hideDrafts: hd, showStarred: ss, sortNewest: sn, hideTeamReviews: htr}
+	for _, p := range dir {
 		key := fmt.Sprintf("%s#%d", p.Repo, p.Number)
 		if seen[key] {
 			continue
@@ -393,6 +399,28 @@ func (m *Model) loadFromCache() {
 			draft:  p.IsDraft,
 			updatedAt: p.UpdatedAt,
 			mergeable: p.Mergeable,
+			role:     "review-direct",
+		}
+		s2.allRows = append(s2.allRows, r)
+		s2.rows = append(s2.rows, r)
+	}
+	for _, p := range team {
+		key := fmt.Sprintf("%s#%d", p.Repo, p.Number)
+		if seen[key] {
+			continue
+		}
+		seen[key] = true
+		r := row{
+			title:  p.Title,
+			repo:   p.Repo,
+			num:    p.Number,
+			url:    p.URL,
+			ci:     p.CIState,
+			review: p.ReviewDecision,
+			draft:  p.IsDraft,
+			updatedAt: p.UpdatedAt,
+			mergeable: p.Mergeable,
+			role:     "review-team",
 		}
 		s2.allRows = append(s2.allRows, r)
 		s2.rows = append(s2.rows, r)
@@ -400,7 +428,7 @@ func (m *Model) loadFromCache() {
 	sections = append(sections, s2)
 
 	deps, _ := m.store.CachedPRs("dep")
-	so, hd, ss, sn = m.sectionProp("Dependencies")
+	so, hd, ss, sn, _ = m.sectionProp("Dependencies")
 	s4 := section{name: "Dependencies", scrollOffset: so, hideDrafts: hd, showStarred: ss, sortNewest: sn}
 	for _, p := range deps {
 		r := row{
@@ -875,6 +903,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
+		case key.Matches(msg, keys.TeamFilter):
+			if m.sections[m.sectionIdx].name == "To Review" {
+				s := m.sections[m.sectionIdx]
+				s.hideTeamReviews = !s.hideTeamReviews
+				m.sections[m.sectionIdx] = s
+				m.applyFilters()
+			}
 		case key.Matches(msg, keys.Deploy):
 			if m.sections[m.sectionIdx].name == "Releases" {
 				r := m.currentRow()
@@ -1091,6 +1126,10 @@ func (m Model) View() string {
 			b.WriteString("  ")
 			b.WriteString(helpKey.Render("[starred]"))
 		}
+		if s.hideTeamReviews {
+			b.WriteString("  ")
+			b.WriteString(helpKey.Render("[mine]"))
+		}
 		if !s.sortNewest {
 			b.WriteString("  ")
 			b.WriteString(helpKey.Render("[oldest]"))
@@ -1133,7 +1172,7 @@ func (m Model) View() string {
 						}
 					}
 				}
-			case "My PRs", "To Review", "Team Review", "Dependencies":
+			case "My PRs", "Dependencies":
 				draftLabel := "draft"
 				if r := m.currentRow(); r != nil && r.draft {
 					draftLabel = "ready"
@@ -1142,6 +1181,23 @@ func (m Model) View() string {
 					"  " + helpKey.Render("M:") + " " + helpKey.Render("merge") +
 					"  " + helpKey.Render("C:") + " " + helpKey.Render("close") +
 					"  |  " + helpKey.Render("d:") + " " + helpKey.Render("drafts") +
+					"  " + helpKey.Render("*:") + " " + helpKey.Render("starred") +
+					"  " + helpKey.Render("s:") + " " + helpKey.Render("sort") +
+					"  " + helpKey.Render("/:") + " " + helpKey.Render("filter")
+			case "To Review", "Team Review":
+				draftLabel := "draft"
+				if r := m.currentRow(); r != nil && r.draft {
+					draftLabel = "ready"
+				}
+				teamLabel := "team"
+				if m.sections[m.sectionIdx].hideTeamReviews {
+					teamLabel = "mine"
+				}
+				actions = helpKey.Render("R:") + " " + helpKey.Render(draftLabel) +
+					"  " + helpKey.Render("M:") + " " + helpKey.Render("merge") +
+					"  " + helpKey.Render("C:") + " " + helpKey.Render("close") +
+					"  |  " + helpKey.Render("t:") + " " + helpKey.Render(teamLabel) +
+					"  " + helpKey.Render("d:") + " " + helpKey.Render("drafts") +
 					"  " + helpKey.Render("*:") + " " + helpKey.Render("starred") +
 					"  " + helpKey.Render("s:") + " " + helpKey.Render("sort") +
 					"  " + helpKey.Render("/:") + " " + helpKey.Render("filter")
