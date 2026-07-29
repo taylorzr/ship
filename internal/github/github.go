@@ -228,7 +228,7 @@ func (c *Client) TeamReviewRequested(ctx context.Context, teams []string) ([]PR,
 	var q strings.Builder
 	q.WriteString("is:open is:pr")
 	for _, t := range teams {
-		q.WriteString(" review-requested:")
+		q.WriteString(" team-review-requested:")
 		q.WriteString(t)
 	}
 	return c.search(ctx, q.String())
