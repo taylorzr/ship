@@ -110,6 +110,32 @@ func (s *Store) migrate() error {
 		s.db.Exec(`ALTER TABLE version ADD COLUMN untagged_commits TEXT DEFAULT ''`)
 	}
 
+	// migrate v2: include role in primary key so sections don't overwrite each other
+	var rolePK int
+	s.db.QueryRow(`SELECT COALESCE(pk, 0) FROM pragma_table_info('pr') WHERE name = 'role'`).Scan(&rolePK)
+	if rolePK == 0 {
+		s.db.Exec(`DROP TABLE IF EXISTS pr_old`)
+		s.db.Exec(`ALTER TABLE pr RENAME TO pr_old`)
+		s.db.Exec(`
+			CREATE TABLE pr (
+				number      INTEGER,
+				repo        TEXT,
+				title       TEXT,
+				author      TEXT,
+				role        TEXT,
+				url         TEXT,
+				review_decision TEXT,
+				ci_state    TEXT,
+				mergeable   TEXT,
+				updated_at  TEXT,
+				is_draft    INTEGER NOT NULL DEFAULT 0,
+				PRIMARY KEY (repo, number, role)
+			)
+		`)
+		s.db.Exec(`INSERT INTO pr (number, repo, title, author, role, url, review_decision, ci_state, mergeable, updated_at, is_draft) SELECT number, repo, title, author, role, url, review_decision, ci_state, mergeable, updated_at, is_draft FROM pr_old`)
+		s.db.Exec(`DROP TABLE pr_old`)
+	}
+
 	return nil
 }
 

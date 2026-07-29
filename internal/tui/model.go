@@ -564,7 +564,7 @@ func (m Model) refreshDeps(ctx context.Context) tea.Cmd {
 			return refreshDoneMsg{source: "Dependencies"}
 		}
 		deps, err := m.gh.DepPRs(ctx, starred, m.cfg.GitHub.DepAuthors)
-		if err == nil && len(deps) > 0 {
+		if err == nil {
 			cache := make([]store.CachedPR, len(deps))
 			for i, p := range deps {
 				cache[i] = toCached(p, "dep")
