@@ -2,6 +2,7 @@ package tui
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"os"
@@ -96,6 +97,8 @@ type row struct {
 	name      string // display name (releases section)
 	pending   string // pending versions (releases section)
 	updatedAt string // RFC 3339 timestamp
+	depth     int    // nesting level for releases section
+	prodRef   string // prod tag/SHA for compare URLs
 }
 
 type section struct {
@@ -119,10 +122,11 @@ type keyMap struct {
 	DraftToggle key.Binding
 	Refresh     key.Binding
 	Quit        key.Binding
-	FilterDraft   key.Binding
 	FilterStarred key.Binding
 	SortToggle    key.Binding
 	Search        key.Binding
+	Diff          key.Binding
+	Deploy        key.Binding
 }
 
 var keys = keyMap{
@@ -136,10 +140,11 @@ var keys = keyMap{
 	DraftToggle: key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "toggle draft")),
 	Refresh:     key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
 	Quit:        key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
-	FilterDraft:   key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "toggle drafts")),
 	FilterStarred: key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "toggle starred")),
 	SortToggle:    key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "toggle sort")),
-	Search:        key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "search")),
+	Search:        key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
+	Diff:          key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "toggle drafts/diff")),
+	Deploy:        key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "ship/deploy")),
 }
 
 type refreshDoneMsg struct {
@@ -291,11 +296,17 @@ func (m *Model) loadFromCache() {
 
 	versions, _ := m.store.CachedVersions()
 	svcNames := make(map[string]string, len(m.cfg.Services))
+	svcRepos := make(map[string]bool, len(m.cfg.Services))
 	for _, svc := range m.cfg.Services {
 		svcNames[svc.Repo] = svc.Name
+		svcRepos[svc.Repo] = true
 	}
-	s3 := section{name: "Releases"}
+	so, hd, ss, sn = m.sectionProp("Releases")
+	s3 := section{name: "Releases", scrollOffset: so, hideDrafts: hd, showStarred: ss, sortNewest: sn}
 	for _, v := range versions {
+		if !svcRepos[v.Repo] {
+			continue
+		}
 		title := v.ProdRef
 		if title == "" {
 			title = "-"
@@ -306,20 +317,55 @@ func (m *Model) loadFromCache() {
 		if n, ok := svcNames[v.Repo]; ok && n != "" {
 			name = n
 		}
-		pending := v.PendingTags
-		if pending == "" {
-			pending = "✓"
-		}
 		r := row{
 			name:    name,
 			title:   title,
-			pending: pending,
+			repo:    v.Repo,
+			prodRef: v.ProdRef,
+			url:     fmt.Sprintf("https://github.com/%s/releases/tag/%s", v.Repo, v.ProdRef),
+			depth:   0,
 		}
 		if v.Error != "" {
 			r.title = "✗ " + v.Error
-			r.pending = ""
+		} else if v.PendingTags == "" {
+			r.pending = "✓"
 		}
+		s3.allRows = append(s3.allRows, r)
 		s3.rows = append(s3.rows, r)
+		if v.PendingTags != "" && v.Error == "" {
+			for _, tag := range strings.Split(v.PendingTags, ", ") {
+				if tag == "" {
+					continue
+				}
+				pr := row{
+					pending: tag,
+					repo:    v.Repo,
+					prodRef: v.ProdRef,
+					url:     fmt.Sprintf("https://github.com/%s/releases/tag/%s", v.Repo, tag),
+					depth:   1,
+				}
+				s3.allRows = append(s3.allRows, pr)
+				s3.rows = append(s3.rows, pr)
+			}
+		}
+		if v.UntaggedCommits != "" && v.Error == "" {
+			var commits []struct {
+				SHA     string `json:"sha"`
+				Message string `json:"message"`
+			}
+			if err := json.Unmarshal([]byte(v.UntaggedCommits), &commits); err == nil {
+				for _, c := range commits {
+					pr := row{
+						title:   fmt.Sprintf("%s %s", c.SHA, c.Message),
+						repo:    v.Repo,
+						prodRef: v.ProdRef,
+						depth:   1,
+					}
+					s3.allRows = append(s3.allRows, pr)
+					s3.rows = append(s3.rows, pr)
+				}
+			}
+		}
 	}
 	sections = append(sections, s3)
 
@@ -400,6 +446,16 @@ func (m *Model) sectionOffset(idx int) int {
 
 func (m *Model) sectionEnd(idx int) int {
 	return m.sectionOffset(idx) + visibleRows(m.sections[idx])
+}
+
+func (m *Model) advanceSection(dir int) {
+	m.sectionIdx = (m.sectionIdx + dir) % len(m.sections)
+	if m.sectionIdx < 0 {
+		m.sectionIdx = len(m.sections) - 1
+	}
+	if visibleRows(m.sections[m.sectionIdx]) > 0 {
+		m.cursor = m.sectionOffset(m.sectionIdx) + m.sections[m.sectionIdx].scrollOffset
+	}
 }
 
 func (m *Model) nextRow() int {
@@ -519,12 +575,13 @@ func (m Model) refreshDeps(ctx context.Context) tea.Cmd {
 func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
 		type svcResult struct {
-			Repo        string
-			ProdRef     string
-			ProdSHA     string
-			AheadBy     int
-			PendingTags string
-			Error       string
+			Repo            string
+			ProdRef         string
+			ProdSHA         string
+			AheadBy         int
+			PendingTags     string
+			UntaggedCommits string
+			Error           string
 		}
 
 		var wg sync.WaitGroup
@@ -556,13 +613,27 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 					}
 					pending += t.Name
 				}
+				untagged := ""
+				if len(r.UntaggedCommits) > 0 {
+					var buf strings.Builder
+					buf.WriteByte('[')
+					for i, c := range r.UntaggedCommits {
+						if i > 0 {
+							buf.WriteByte(',')
+						}
+						fmt.Fprintf(&buf, `{"sha":%q,"message":%q}`, c.SHA[:7], c.Message)
+					}
+					buf.WriteByte(']')
+					untagged = buf.String()
+				}
 				results <- svcResult{
-					Repo:        svc.Repo,
-					ProdRef:     r.ProdRef,
-					ProdSHA:     r.ProdSHA,
-					AheadBy:     r.AheadBy,
-					PendingTags: pending,
-					Error:       r.Error,
+					Repo:            svc.Repo,
+					ProdRef:         r.ProdRef,
+					ProdSHA:         r.ProdSHA,
+					AheadBy:         r.AheadBy,
+					PendingTags:     pending,
+					UntaggedCommits: untagged,
+					Error:           r.Error,
 				}
 			}(svc)
 		}
@@ -573,12 +644,13 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 		var lastErr error
 		for res := range results {
 			m.store.SaveVersion(store.CachedVersion{
-				Repo:        res.Repo,
-				ProdRef:     res.ProdRef,
-				ProdSHA:     res.ProdSHA,
-				AheadBy:     res.AheadBy,
-				PendingTags: res.PendingTags,
-				Error:       res.Error,
+				Repo:            res.Repo,
+				ProdRef:         res.ProdRef,
+				ProdSHA:         res.ProdSHA,
+				AheadBy:         res.AheadBy,
+				PendingTags:     res.PendingTags,
+				UntaggedCommits: res.UntaggedCommits,
+				Error:           res.Error,
 			})
 			if res.Error != "" {
 				lastErr = fmt.Errorf("%s: %s", res.Repo, res.Error)
@@ -659,29 +731,83 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, tea.Quit
 		case key.Matches(msg, keys.Down):
 			if visibleRows(m.sections[m.sectionIdx]) > 0 {
-				m.cursor = m.nextRow()
+				s := &m.sections[m.sectionIdx]
+				end := m.sectionOffset(m.sectionIdx) + len(s.rows)
+				if m.cursor >= end-1 {
+					m.advanceSection(1)
+				} else {
+					m.cursor = m.nextRow()
+				}
+			} else {
+				m.advanceSection(1)
 			}
 		case key.Matches(msg, keys.Up):
 			if visibleRows(m.sections[m.sectionIdx]) > 0 {
-				m.cursor = m.prevRow()
+				start := m.sectionOffset(m.sectionIdx)
+				if m.cursor <= start {
+					m.advanceSection(-1)
+				} else {
+					m.cursor = m.prevRow()
+				}
+			} else {
+				m.advanceSection(-1)
 			}
 		case key.Matches(msg, keys.SectionNext):
-			m.sectionIdx = (m.sectionIdx + 1) % len(m.sections)
-			if visibleRows(m.sections[m.sectionIdx]) > 0 {
-				m.cursor = m.sectionOffset(m.sectionIdx) + m.sections[m.sectionIdx].scrollOffset
-			}
+			m.advanceSection(1)
 		case key.Matches(msg, keys.SectionPrev):
-			m.sectionIdx--
-			if m.sectionIdx < 0 {
-				m.sectionIdx = len(m.sections) - 1
-			}
-			if visibleRows(m.sections[m.sectionIdx]) > 0 {
-				m.cursor = m.sectionOffset(m.sectionIdx) + m.sections[m.sectionIdx].scrollOffset
-			}
+			m.advanceSection(-1)
 		case key.Matches(msg, keys.Enter):
 			r := m.currentRow()
 			if r != nil && r.url != "" {
 				openBrowser(r.url)
+			}
+		case key.Matches(msg, keys.Diff):
+			switch m.sections[m.sectionIdx].name {
+			case "Releases":
+				r := m.currentRow()
+				if r != nil && r.repo != "" && r.prodRef != "" {
+					var url string
+					if r.depth == 0 {
+						var branch string
+						for _, svc := range m.cfg.Services {
+							if svc.Repo == r.repo {
+								branch = svc.Branch
+								break
+							}
+						}
+						if branch == "" {
+							branch = "main"
+						}
+						url = fmt.Sprintf("https://github.com/%s/compare/%s..%s", r.repo, r.prodRef, branch)
+					} else {
+						url = fmt.Sprintf("https://github.com/%s/compare/%s..%s", r.repo, r.prodRef, r.pending)
+					}
+					if url != "" {
+						openBrowser(url)
+					}
+				}
+			default:
+				if len(m.sections) > m.sectionIdx {
+					s := m.sections[m.sectionIdx]
+					if s.name != "Releases" {
+						s.hideDrafts = !s.hideDrafts
+						m.sections[m.sectionIdx] = s
+						m.applyFilters()
+					}
+				}
+				return m, nil
+			}
+		case key.Matches(msg, keys.Deploy):
+			if m.sections[m.sectionIdx].name == "Releases" {
+				r := m.currentRow()
+				if r != nil && r.repo != "" {
+					for _, svc := range m.cfg.Services {
+						if svc.Repo == r.repo && svc.DeployURL != "" {
+							openBrowser(svc.DeployURL)
+							break
+						}
+					}
+				}
 			}
 		case key.Matches(msg, keys.Merge):
 			if m.sections[m.sectionIdx].name == "To Review" {
@@ -730,16 +856,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.loading[k] = true
 			}
 			return m, m.fullRefreshCmd()
-		case key.Matches(msg, keys.FilterDraft):
-			if len(m.sections) > m.sectionIdx {
-				s := m.sections[m.sectionIdx]
-				if s.name != "Releases" {
-					s.hideDrafts = !s.hideDrafts
-					m.sections[m.sectionIdx] = s
-					m.applyFilters()
-				}
-			}
-			return m, nil
 		case key.Matches(msg, keys.FilterStarred):
 			if len(m.sections) > m.sectionIdx {
 				s := m.sections[m.sectionIdx]
@@ -930,7 +1046,16 @@ func (m Model) View() string {
 			var actions string
 			switch s.name {
 			case "Releases":
-				actions = helpKey.Render("enter:") + " " + helpKey.Render("open")
+				actions = helpKey.Render("enter:") + " " + helpKey.Render("open") +
+					"  " + helpKey.Render("d:") + " " + helpKey.Render("diff")
+				if r := m.currentRow(); r != nil && r.repo != "" {
+					for _, svc := range m.cfg.Services {
+						if svc.Repo == r.repo && svc.DeployURL != "" {
+							actions += "  " + helpKey.Render("t:") + " " + helpKey.Render("ship")
+							break
+						}
+					}
+				}
 			case "My PRs", "Dependencies":
 				draftLabel := "draft"
 				if r := m.currentRow(); r != nil && r.draft {
@@ -939,6 +1064,7 @@ func (m Model) View() string {
 				actions = helpKey.Render("enter:") + " " + helpKey.Render("open") +
 					"  " + helpKey.Render("m:") + " " + helpKey.Render("merge") +
 					"  " + helpKey.Render("c:") + " " + helpKey.Render("close") +
+					"  " + helpKey.Render("d:") + " " + helpKey.Render("drafts") +
 					"  " + helpKey.Render("D:") + " " + helpKey.Render(draftLabel)
 			default:
 				actions = helpKey.Render("enter:") + " " + helpKey.Render("open")
@@ -947,7 +1073,7 @@ func (m Model) View() string {
 				actions += "  " + helpKey.Render("d:") + " " + helpKey.Render("drafts") +
 					"  " + helpKey.Render("s:") + " " + helpKey.Render("starred") +
 					"  " + helpKey.Render("S:") + " " + helpKey.Render("sort") +
-					"  " + helpKey.Render("/:") + " " + helpKey.Render("search")
+					"  " + helpKey.Render("/:") + " " + helpKey.Render("filter")
 			}
 			b.WriteString(actions)
 			b.WriteString("\n")
@@ -1007,12 +1133,18 @@ func (m Model) View() string {
 			// compute column widths
 			maxName := 4  // "Name"
 			maxCur := 7   // "Current"
+			maxPen := 7   // "Pending"
 			for _, r := range s.rows {
-				if w := lipgloss.Width(r.name); w > maxName {
-					maxName = w
+				if r.depth == 0 {
+					if w := lipgloss.Width(r.name); w > maxName {
+						maxName = w
+					}
+					if w := lipgloss.Width(r.title); w > maxCur {
+						maxCur = w
+					}
 				}
-				if w := lipgloss.Width(r.title); w > maxCur {
-					maxCur = w
+				if w := lipgloss.Width(r.pending); w > maxPen {
+					maxPen = w
 				}
 			}
 			if maxName > 30 {
@@ -1021,18 +1153,45 @@ func (m Model) View() string {
 			if maxCur > 40 {
 				maxCur = 40
 			}
+			if maxPen > 60 {
+				maxPen = 60
+			}
+			if m.width > 0 {
+				avail := m.width - maxName - maxCur - 4 // 2 separators + padding
+				if avail < maxPen {
+					maxPen = avail
+				}
+				if maxPen < 4 {
+					maxPen = 4
+				}
+			}
 			sep := "  "
-			header := fmt.Sprintf("%s  %s  %s", padWidth("Name", maxName), padWidth("Current", maxCur), "Pending")
+			header := fmt.Sprintf("%s%s%s%s%s",
+				padWidth("Name", maxName),
+				sep,
+				padWidth("Current", maxCur),
+				sep,
+				padWidth("Pending", maxPen))
 			b.WriteString(headerStyle.Render(header))
 			b.WriteString("\n")
 
 			for i, r := range s.rows {
-				line := fmt.Sprintf("%s%s%s%s%s",
-					padWidth(truncateWidth(r.name, maxName), maxName),
-					sep,
-					padWidth(truncateWidth(r.title, maxCur), maxCur),
-					sep,
-					r.pending)
+				var line string
+				if r.depth == 0 {
+					line = fmt.Sprintf("%s%s%s%s%s",
+						padWidth(truncateWidth(r.name, maxName), maxName),
+						sep,
+						padWidth(truncateWidth(r.title, maxCur), maxCur),
+						sep,
+						padWidth(truncateWidth(r.pending, maxPen), maxPen))
+				} else {
+					line = fmt.Sprintf("%s%s%s%s%s",
+						padWidth("", maxName),
+						sep,
+						padWidth("", maxCur),
+						sep,
+						padWidth(truncateWidth(r.pending, maxPen), maxPen))
+				}
 				if m.width > 0 {
 					line = truncateWidth(line, m.width)
 				}
@@ -1157,9 +1316,6 @@ func (m Model) viewHelp() string {
 		"  " + helpKey.Render("gg:") + " " + helpKey.Render("top") +
 		"  " + helpKey.Render("G:") + " " + helpKey.Render("bottom") +
 		"  " + helpKey.Render("r:") + " " + helpKey.Render("refresh")
-	if !m.lastRefreshed.IsZero() {
-		line += helpKey.Render("  (auto in " + refreshCountdown(m.lastRefreshed, m.cfg.RefreshInterval) + ")")
-	}
 	line += "  " + helpKey.Render("q:") + " " + helpKey.Render("quit")
 	return line
 }
@@ -1241,14 +1397,6 @@ func openBrowser(url string) {
 	if cmd != nil {
 		cmd.Start()
 	}
-}
-
-func refreshCountdown(t time.Time, interval int) string {
-	remaining := interval - int(time.Since(t).Seconds())
-	if remaining < 0 {
-		remaining = 0
-	}
-	return fmt.Sprintf("%ds", remaining)
 }
 
 func (m Model) renderConfirm() string {

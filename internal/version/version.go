@@ -10,14 +10,15 @@ import (
 )
 
 type Result struct {
-	Service      config.ServiceConfig
-	ProdRef      string // tag or SHA from k8s image
-	ProdSHA      string // resolved git SHA
-	ProdTag      string // if the prod ref was a tag
-	AheadBy      int
-	PendingTags  []gh.PendingTag
-	Commits      []gh.CommitSummary
-	Error        string
+	Service        config.ServiceConfig
+	ProdRef        string // tag or SHA from k8s image
+	ProdSHA        string // resolved git SHA
+	ProdTag        string // if the prod ref was a tag
+	AheadBy        int
+	PendingTags    []gh.PendingTag
+	UntaggedCommits []gh.CommitSummary
+	Commits        []gh.CommitSummary
+	Error          string
 }
 
 func Resolve(ctx context.Context, k8sClient k8s.Client, ghClient *gh.Client, svc config.ServiceConfig) *Result {
@@ -68,6 +69,13 @@ func Resolve(ctx context.Context, k8sClient k8s.Client, ghClient *gh.Client, svc
 		return r
 	}
 	r.PendingTags = pending
+
+	if !svc.SkipUntagged {
+		untagged, err := ghClient.UntaggedFirstParent(ctx, svc.Repo, r.ProdSHA, branch, compare.Commits)
+		if err == nil {
+			r.UntaggedCommits = untagged
+		}
+	}
 
 	return r
 }

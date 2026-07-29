@@ -44,6 +44,7 @@ type ServiceConfig struct {
 	VersionKey      string `toml:"version_key"`
 	DeployURL       string `toml:"deploy_url"`
 	Branch          string `toml:"branch"`
+	SkipUntagged    bool   `toml:"skip_untagged"`
 }
 
 type JiraConfig struct {

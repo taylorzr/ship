@@ -318,6 +318,7 @@ type CommitSummary struct {
 	SHA     string
 	Message string
 	Author  string
+	Parents []string
 }
 
 func (c *Client) Compare(ctx context.Context, repo, base, head string) (*CompareResult, error) {
@@ -328,7 +329,10 @@ func (c *Client) Compare(ctx context.Context, repo, base, head string) (*Compare
 	var resp struct {
 		AheadBy  int `json:"ahead_by"`
 		Commits  []struct {
-			SHA    string `json:"sha"`
+			SHA     string `json:"sha"`
+			Parents []struct {
+				SHA string `json:"sha"`
+			} `json:"parents"`
 			Commit struct {
 				Message  string `json:"message"`
 				Author   struct {
@@ -342,11 +346,15 @@ func (c *Client) Compare(ctx context.Context, repo, base, head string) (*Compare
 	}
 	result := &CompareResult{AheadBy: resp.AheadBy}
 	for _, c := range resp.Commits {
-		result.Commits = append(result.Commits, CommitSummary{
-			SHA:     c.SHA[:7],
+		cs := CommitSummary{
+			SHA:     c.SHA,
 			Message: strings.Split(c.Commit.Message, "\n")[0],
 			Author:  c.Commit.Author.Name,
-		})
+		}
+		for _, p := range c.Parents {
+			cs.Parents = append(cs.Parents, p.SHA)
+		}
+		result.Commits = append(result.Commits, cs)
 	}
 	return result, nil
 }
@@ -357,7 +365,7 @@ type TagInfo struct {
 }
 
 func (c *Client) ResolveRef(ctx context.Context, repo, ref string) (string, error) {
-	out, err := exec.Command("gh", "api", fmt.Sprintf("repos/%s/git/ref/refs/tags/%s", repo, ref), "--jq", ".object.sha").CombinedOutput()
+	out, err := exec.Command("gh", "api", fmt.Sprintf("repos/%s/git/ref/tags/%s", repo, ref), "--jq", ".object.sha").CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("resolve ref %s: %s: %w", ref, strings.TrimSpace(string(out)), err)
 	}
@@ -440,6 +448,46 @@ func (c *Client) PendingTags(ctx context.Context, repo, prodSHA, branch string) 
 		return pending[i].Name < pending[j].Name
 	})
 	return pending, nil
+}
+
+func (c *Client) UntaggedFirstParent(ctx context.Context, repo, prodSHA, branch string, commits []CommitSummary) ([]CommitSummary, error) {
+	if len(commits) == 0 {
+		return nil, nil
+	}
+
+	tags, err := c.ListTags(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
+
+	tagged := make(map[string]bool, len(tags))
+	for _, t := range tags {
+		tagged[t.SHA] = true
+	}
+
+	commitMap := make(map[string]CommitSummary, len(commits))
+	for _, cm := range commits {
+		commitMap[cm.SHA] = cm
+	}
+
+	var untagged []CommitSummary
+	cur := commits[len(commits)-1].SHA
+	for cur != "" {
+		cm, ok := commitMap[cur]
+		if !ok {
+			break
+		}
+		if !tagged[cur] {
+			untagged = append(untagged, cm)
+		}
+		if len(cm.Parents) > 0 {
+			cur = cm.Parents[0]
+		} else {
+			break
+		}
+	}
+
+	return untagged, nil
 }
 
 func (c *Client) MergePR(ctx context.Context, repo string, number int) error {

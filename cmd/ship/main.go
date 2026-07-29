@@ -225,7 +225,7 @@ func printVersion(r *version.Result) {
 	fmt.Println()
 
 	for _, c := range r.Commits {
-		fmt.Printf("    %s  %s\n", c.SHA, c.Message)
+		fmt.Printf("    %s  %s\n", c.SHA[:7], c.Message)
 	}
 	fmt.Println()
 }
