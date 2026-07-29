@@ -328,7 +328,7 @@ func (m *Model) loadFromCache() {
 		if v.Error != "" {
 			r.title = "✗ " + v.Error
 		} else if v.PendingTags == "" {
-			r.pending = "✓"
+			r.pending = "-"
 		}
 		s3.allRows = append(s3.allRows, r)
 		s3.rows = append(s3.rows, r)
