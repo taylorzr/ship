@@ -135,16 +135,16 @@ var keys = keyMap{
 	SectionNext: key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next section")),
 	SectionPrev: key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("⇧+tab", "prev section")),
 	Enter:       key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open")),
-	Merge:       key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "merge")),
-	Close:       key.NewBinding(key.WithKeys("c"), key.WithHelp("c", "close")),
-	DraftToggle: key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "toggle draft")),
+	Merge:       key.NewBinding(key.WithKeys("M"), key.WithHelp("M", "merge")),
+	Close:       key.NewBinding(key.WithKeys("C"), key.WithHelp("C", "close")),
+	DraftToggle: key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "toggle draft")),
 	Refresh:     key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
 	Quit:        key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
-	FilterStarred: key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "toggle starred")),
-	SortToggle:    key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "toggle sort")),
+	FilterStarred: key.NewBinding(key.WithKeys("*"), key.WithHelp("*", "toggle starred")),
+	SortToggle:    key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "toggle sort")),
 	Search:        key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
 	Diff:          key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "toggle drafts/diff")),
-	Deploy:        key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "ship/deploy")),
+	Deploy:        key.NewBinding(key.WithKeys("T"), key.WithHelp("T", "ship/deploy")),
 }
 
 type refreshDoneMsg struct {
@@ -1046,12 +1046,11 @@ func (m Model) View() string {
 			var actions string
 			switch s.name {
 			case "Releases":
-				actions = helpKey.Render("enter:") + " " + helpKey.Render("open") +
-					"  " + helpKey.Render("d:") + " " + helpKey.Render("diff")
+				actions = helpKey.Render("d:") + " " + helpKey.Render("diff")
 				if r := m.currentRow(); r != nil && r.repo != "" {
 					for _, svc := range m.cfg.Services {
 						if svc.Repo == r.repo && svc.DeployURL != "" {
-							actions += "  " + helpKey.Render("t:") + " " + helpKey.Render("ship")
+							actions += "  |  " + helpKey.Render("T:") + " " + helpKey.Render("ship")
 							break
 						}
 					}
@@ -1061,18 +1060,12 @@ func (m Model) View() string {
 				if r := m.currentRow(); r != nil && r.draft {
 					draftLabel = "ready"
 				}
-				actions = helpKey.Render("enter:") + " " + helpKey.Render("open") +
-					"  " + helpKey.Render("m:") + " " + helpKey.Render("merge") +
-					"  " + helpKey.Render("c:") + " " + helpKey.Render("close") +
-					"  " + helpKey.Render("d:") + " " + helpKey.Render("drafts") +
-					"  " + helpKey.Render("D:") + " " + helpKey.Render(draftLabel)
-			default:
-				actions = helpKey.Render("enter:") + " " + helpKey.Render("open")
-			}
-			if s.name != "Releases" {
-				actions += "  " + helpKey.Render("d:") + " " + helpKey.Render("drafts") +
-					"  " + helpKey.Render("s:") + " " + helpKey.Render("starred") +
-					"  " + helpKey.Render("S:") + " " + helpKey.Render("sort") +
+				actions = helpKey.Render("R:") + " " + helpKey.Render(draftLabel) +
+					"  " + helpKey.Render("M:") + " " + helpKey.Render("merge") +
+					"  " + helpKey.Render("C:") + " " + helpKey.Render("close") +
+					"  |  " + helpKey.Render("d:") + " " + helpKey.Render("drafts") +
+					"  " + helpKey.Render("*:") + " " + helpKey.Render("starred") +
+					"  " + helpKey.Render("s:") + " " + helpKey.Render("sort") +
 					"  " + helpKey.Render("/:") + " " + helpKey.Render("filter")
 			}
 			b.WriteString(actions)
@@ -1311,11 +1304,14 @@ func renderRow(r row, selected bool, repoWidth, maxWidth int) string {
 }
 
 func (m Model) viewHelp() string {
-	line := helpKey.Render("tab/⇧+tab:") + " " + helpKey.Render("section") +
-		"  " + helpKey.Render("j/k:") + " " + helpKey.Render("nav") +
+	line := helpKey.Render("j/k/tab/⇧+tab:") + " " + helpKey.Render("nav") +
 		"  " + helpKey.Render("gg:") + " " + helpKey.Render("top") +
 		"  " + helpKey.Render("G:") + " " + helpKey.Render("bottom") +
+		"  |  " + helpKey.Render("enter:") + " " + helpKey.Render("open") +
 		"  " + helpKey.Render("r:") + " " + helpKey.Render("refresh")
+	if !m.lastRefreshed.IsZero() {
+		line += helpKey.Render(" (in " + refreshCountdown(m.lastRefreshed, m.cfg.RefreshInterval) + ")")
+	}
 	line += "  " + helpKey.Render("q:") + " " + helpKey.Render("quit")
 	return line
 }
@@ -1397,6 +1393,17 @@ func openBrowser(url string) {
 	if cmd != nil {
 		cmd.Start()
 	}
+}
+
+func refreshCountdown(t time.Time, interval int) string {
+	remaining := interval - int(time.Since(t).Seconds())
+	if remaining < 0 {
+		remaining = 0
+	}
+	if remaining >= 60 {
+		return fmt.Sprintf("%dm", (remaining+30)/60)
+	}
+	return fmt.Sprintf("%ds", remaining)
 }
 
 func (m Model) renderConfirm() string {
