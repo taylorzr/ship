@@ -113,6 +113,7 @@ type section struct {
 	showStarred     bool
 	sortNewest      bool
 	hideTeamReviews bool
+	statusFilter    string // "" or "mergeable"
 }
 
 type keyMap struct {
@@ -131,7 +132,8 @@ type keyMap struct {
 	Search        key.Binding
 	Diff          key.Binding
 	Deploy        key.Binding
-	MineFilter    key.Binding
+	TeamFilter    key.Binding
+	MergeFilter   key.Binding
 }
 
 var keys = keyMap{
@@ -150,7 +152,8 @@ var keys = keyMap{
 	Search:        key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
 	Diff:          key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "toggle drafts/diff")),
 	Deploy:        key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "ship")),
-	MineFilter:    key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "toggle mine/team")),
+	TeamFilter:    key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "toggle team")),
+	MergeFilter:   key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "toggle mergeable")),
 }
 
 type refreshDoneMsg struct {
@@ -216,13 +219,13 @@ func New(cfg *config.Config, st *store.Store, ghClient *gh.Client, mockK8sImage 
 	return m
 }
 
-func (m *Model) sectionProp(name string) (offset int, hideDrafts, showStarred, sortNewest, hideTeamReviews bool) {
+func (m *Model) sectionProp(name string) (offset int, hideDrafts, showStarred, sortNewest, hideTeamReviews bool, statusFilter string) {
 	for _, s := range m.sections {
 		if s.name == name {
-			return s.scrollOffset, s.hideDrafts, s.showStarred, s.sortNewest, s.hideTeamReviews
+			return s.scrollOffset, s.hideDrafts, s.showStarred, s.sortNewest, s.hideTeamReviews, s.statusFilter
 		}
 	}
-	return 0, false, false, true, false
+	return 0, false, false, true, false, ""
 }
 
 func (m *Model) applyFilters() {
@@ -238,7 +241,7 @@ func (m *Model) applyFilters() {
 		if i != m.sectionIdx {
 			sectionQ = ""
 		}
-		if m.sections[i].hideDrafts || sectionQ != "" || m.sections[i].showStarred || m.sections[i].hideTeamReviews {
+		if m.sections[i].hideDrafts || sectionQ != "" || m.sections[i].showStarred || m.sections[i].hideTeamReviews || m.sections[i].statusFilter != "" {
 			var filtered []row
 			allRows := m.sections[i].allRows
 			if !m.sections[i].sortNewest {
@@ -246,6 +249,9 @@ func (m *Model) applyFilters() {
 			}
 			for _, r := range allRows {
 				if m.sections[i].hideDrafts && r.draft {
+					continue
+				}
+				if m.sections[i].statusFilter == "mergeable" && (r.ci != "success" || r.review != "APPROVED") {
 					continue
 				}
 				if m.sections[i].hideTeamReviews && r.role == "review-team" {
@@ -288,7 +294,7 @@ func (m *Model) loadFromCache() {
 	var sections []section
 
 	prs, _ := m.store.CachedPRs("mine")
-	so, hd, ss, sn, _ := m.sectionProp("My PRs")
+	so, hd, ss, sn, _, _ := m.sectionProp("My PRs")
 	s := section{name: "My PRs", scrollOffset: so, hideDrafts: hd, showStarred: ss, sortNewest: sn}
 	for _, p := range prs {
 		r := row{
@@ -314,7 +320,7 @@ func (m *Model) loadFromCache() {
 		svcNames[svc.Repo] = svc.Name
 		svcRepos[svc.Repo] = true
 	}
-	so, hd, ss, sn, _ = m.sectionProp("Releases")
+	so, hd, ss, sn, _, _ = m.sectionProp("Releases")
 	s3 := section{name: "Releases", scrollOffset: so, hideDrafts: hd, showStarred: ss, sortNewest: sn}
 	for _, v := range versions {
 		if !svcRepos[v.Repo] {
@@ -323,8 +329,6 @@ func (m *Model) loadFromCache() {
 		title := v.ProdRef
 		if title == "" {
 			title = "-"
-		} else if v.AheadBy > 0 {
-			title = fmt.Sprintf("+%d %s", v.AheadBy, title)
 		}
 		name := v.Repo
 		if n, ok := svcNames[v.Repo]; ok && n != "" {
@@ -342,6 +346,9 @@ func (m *Model) loadFromCache() {
 			r.title = "✗ " + v.Error
 		} else if v.PendingTags == "" {
 			r.pending = "-"
+		} else {
+			tags := strings.Split(v.PendingTags, ", ")
+			r.pending = fmt.Sprintf("+%d", len(tags))
 		}
 		s3.allRows = append(s3.allRows, r)
 		s3.rows = append(s3.rows, r)
@@ -382,11 +389,11 @@ func (m *Model) loadFromCache() {
 	}
 	sections = append(sections, s3)
 
-	so, hd, ss, sn, htr := m.sectionProp("To Review")
+	so, hd, ss, sn, htr, sf := m.sectionProp("To Review")
 	dir, _ := m.store.CachedPRs("review-direct")
 	team, _ := m.store.CachedPRs("review-team")
 	seen := map[string]bool{}
-	s2 := section{name: "To Review", scrollOffset: so, hideDrafts: hd, showStarred: ss, sortNewest: sn, hideTeamReviews: htr}
+	s2 := section{name: "To Review", scrollOffset: so, hideDrafts: hd, showStarred: ss, sortNewest: sn, hideTeamReviews: htr, statusFilter: sf}
 	for _, p := range dir {
 		key := fmt.Sprintf("%s#%d", p.Repo, p.Number)
 		if seen[key] {
@@ -432,7 +439,7 @@ func (m *Model) loadFromCache() {
 	sections = append(sections, s2)
 
 	deps, _ := m.store.CachedPRs("dep")
-	so, hd, ss, sn, _ = m.sectionProp("Dependencies")
+	so, hd, ss, sn, _, _ = m.sectionProp("Dependencies")
 	s4 := section{name: "Dependencies", scrollOffset: so, hideDrafts: hd, showStarred: ss, sortNewest: sn}
 	for _, p := range deps {
 		r := row{
@@ -907,10 +914,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-		case key.Matches(msg, keys.MineFilter):
+		case key.Matches(msg, keys.TeamFilter):
 			if m.sections[m.sectionIdx].name == "To Review" {
 				s := m.sections[m.sectionIdx]
 				s.hideTeamReviews = !s.hideTeamReviews
+				m.sections[m.sectionIdx] = s
+				m.applyFilters()
+			}
+		case key.Matches(msg, keys.MergeFilter):
+			if m.sections[m.sectionIdx].name != "Releases" {
+				s := m.sections[m.sectionIdx]
+				if s.statusFilter == "mergeable" {
+					s.statusFilter = ""
+				} else {
+					s.statusFilter = "mergeable"
+				}
 				m.sections[m.sectionIdx] = s
 				m.applyFilters()
 			}
@@ -1134,6 +1152,10 @@ func (m Model) View() string {
 			b.WriteString("  ")
 			b.WriteString(helpKey.Render("[mine]"))
 		}
+		if s.statusFilter == "mergeable" {
+			b.WriteString("  ")
+			b.WriteString(helpKey.Render("[mergeable]"))
+		}
 		if !s.sortNewest {
 			b.WriteString("  ")
 			b.WriteString(helpKey.Render("[oldest]"))
@@ -1185,7 +1207,8 @@ func (m Model) View() string {
 				actions = helpKey.Render("R:") + " " + helpKey.Render(draftLabel) +
 					"  " + helpKey.Render("M:") + " " + helpKey.Render("merge") +
 					"  " + helpKey.Render("C:") + " " + helpKey.Render("close") +
-					"  |  " + helpKey.Render("d:") + " " + helpKey.Render("drafts") +
+					"  |  " + helpKey.Render("m:") + " " + helpKey.Render("mergeable") +
+					"  " + helpKey.Render("d:") + " " + helpKey.Render("drafts") +
 					"  " + helpKey.Render("*:") + " " + helpKey.Render("starred") +
 					"  " + helpKey.Render("s:") + " " + helpKey.Render("sort") +
 					"  " + helpKey.Render("/:") + " " + helpKey.Render("filter")
@@ -1201,7 +1224,8 @@ func (m Model) View() string {
 				actions = helpKey.Render("R:") + " " + helpKey.Render(draftLabel) +
 					"  " + helpKey.Render("M:") + " " + helpKey.Render("merge") +
 					"  " + helpKey.Render("C:") + " " + helpKey.Render("close") +
-					"  |  " + helpKey.Render("m:") + " " + helpKey.Render(teamLabel) +
+					"  |  " + helpKey.Render("m:") + " " + helpKey.Render("mergeable") +
+					"  " + helpKey.Render("t:") + " " + helpKey.Render(teamLabel) +
 					"  " + helpKey.Render("d:") + " " + helpKey.Render("drafts") +
 					"  " + helpKey.Render("*:") + " " + helpKey.Render("starred") +
 					"  " + helpKey.Render("s:") + " " + helpKey.Render("sort") +
