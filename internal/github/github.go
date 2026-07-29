@@ -426,21 +426,28 @@ func (c *Client) PendingTags(ctx context.Context, repo, prodSHA, branch, source,
 		return c.pendingTagsFromGit(ctx, repo, prodSHA)
 	}
 
-	pending, err := c.pendingTagsFromReleases(ctx, repo, prodSHA, prodTag)
-	if err != nil || (source == "" && len(pending) == 0 && err == nil) {
-		// auto-fallback: no releases found, try git tags
+	pending, releasesExist, err := c.pendingTagsFromReleases(ctx, repo, prodSHA, prodTag)
+	if err != nil {
+		if source == "" {
+			tag, tagErr := c.pendingTagsFromGit(ctx, repo, prodSHA)
+			if tagErr == nil && len(tag) > 0 {
+				return tag, nil
+			}
+		}
+		return nil, err
+	}
+
+	if source == "" && !releasesExist {
 		tag, tagErr := c.pendingTagsFromGit(ctx, repo, prodSHA)
 		if tagErr == nil && len(tag) > 0 {
 			return tag, nil
 		}
-		if err != nil {
-			return nil, err
-		}
 	}
-	return pending, err
+
+	return pending, nil
 }
 
-func (c *Client) pendingTagsFromReleases(ctx context.Context, repo, prodSHA, prodTag string) ([]PendingTag, error) {
+func (c *Client) pendingTagsFromReleases(ctx context.Context, repo, prodSHA, prodTag string) ([]PendingTag, bool, error) {
 	type ghRelease struct {
 		TagName    string `json:"tag_name"`
 		Prerelease bool   `json:"prerelease"`
@@ -454,12 +461,12 @@ func (c *Client) pendingTagsFromReleases(ctx context.Context, repo, prodSHA, pro
 		out, err := exec.CommandContext(ctx, "gh", "api",
 			fmt.Sprintf("repos/%s/releases?per_page=100&page=%d", repo, page)).CombinedOutput()
 		if err != nil {
-			return nil, fmt.Errorf("list releases: %s: %w", strings.TrimSpace(string(out)), err)
+			return nil, false, fmt.Errorf("list releases: %s: %w", strings.TrimSpace(string(out)), err)
 		}
 
 		var releases []ghRelease
 		if err := json.Unmarshal(out, &releases); err != nil {
-			return nil, fmt.Errorf("parse releases: %w", err)
+			return nil, false, fmt.Errorf("parse releases: %w", err)
 		}
 		if len(releases) == 0 {
 			break
@@ -470,7 +477,7 @@ func (c *Client) pendingTagsFromReleases(ctx context.Context, repo, prodSHA, pro
 	}
 
 	if len(allReleases) == 0 {
-		return nil, nil
+		return nil, false, nil
 	}
 
 	// If we have a known prod tag, use its creation time to determine what's pending.
@@ -501,27 +508,13 @@ func (c *Client) pendingTagsFromReleases(ctx context.Context, repo, prodSHA, pro
 					pending = append(pending, PendingTag{Name: rel.TagName})
 				}
 			}
-			return pending, nil
+			return pending, true, nil
 		}
-		// prod tag not found among releases — fall through to git-compare approach
 	}
 
-	// Fallback: use git-compare to find releases that haven't been shipped.
-	var pending []PendingTag
-	for _, rel := range allReleases {
-		if rel.Prerelease {
-			continue
-		}
-		comp, err := c.Compare(ctx, repo, prodSHA, rel.TagName)
-		if err != nil {
-			continue
-		}
-		if comp.AheadBy == 0 {
-			return pending, nil
-		}
-		pending = append(pending, PendingTag{Name: rel.TagName})
-	}
-	return pending, nil
+	// Without a prod tag or prod tag not found among releases, we can't do
+	// reliable ordering. Return empty — caller decides fallback strategy.
+	return nil, true, nil
 }
 
 func (c *Client) pendingTagsFromGit(ctx context.Context, repo, prodSHA string) ([]PendingTag, error) {
