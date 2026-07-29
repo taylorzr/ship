@@ -560,8 +560,11 @@ func (m Model) refreshTeamReview(ctx context.Context) tea.Cmd {
 func (m Model) refreshDeps(ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
 		starred := m.cfg.StarredRepos()
+		if len(starred) == 0 {
+			return refreshDoneMsg{source: "Dependencies"}
+		}
 		deps, err := m.gh.DepPRs(ctx, starred, m.cfg.GitHub.DepAuthors)
-		if err == nil {
+		if err == nil && len(deps) > 0 {
 			cache := make([]store.CachedPR, len(deps))
 			for i, p := range deps {
 				cache[i] = toCached(p, "dep")
@@ -1055,7 +1058,7 @@ func (m Model) View() string {
 						}
 					}
 				}
-			case "My PRs", "Dependencies":
+			case "My PRs", "To Review", "Team Review", "Dependencies":
 				draftLabel := "draft"
 				if r := m.currentRow(); r != nil && r.draft {
 					draftLabel = "ready"
@@ -1291,7 +1294,7 @@ func renderRow(r row, selected bool, repoWidth, maxWidth int) string {
 		rev = "·"
 	}
 
-	left := icon + " " + rev
+	left := icon + "  " + rev
 
 	const ageWidth = 6
 
