@@ -1168,7 +1168,19 @@ func (m Model) View() string {
 			b.WriteString(headerStyle.Render(header))
 			b.WriteString("\n")
 
-			for i, r := range s.rows {
+			visStart := s.scrollOffset
+			visEnd := visStart + m.maxVisibleRows()
+			if visEnd > len(s.rows) {
+				visEnd = len(s.rows)
+			}
+
+			if visStart > 0 {
+				b.WriteString(overflowStyle.Render(fmt.Sprintf("↑ %d more above", visStart)))
+				b.WriteString("\n")
+			}
+
+			for i := visStart; i < visEnd; i++ {
+				r := s.rows[i]
 				var line string
 				if r.depth == 0 {
 					line = fmt.Sprintf("%s%s%s%s%s",
@@ -1195,6 +1207,13 @@ func (m Model) View() string {
 				}
 				b.WriteString("\n")
 			}
+
+			remaining := len(s.rows) - visEnd
+			if remaining > 0 {
+				b.WriteString(overflowStyle.Render(fmt.Sprintf("↓ %d more below", remaining)))
+				b.WriteString("\n")
+			}
+
 			globalIdx += len(s.rows)
 		}
 	}

@@ -5,7 +5,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os/exec"
-	"sort"
 	"strings"
 	"time"
 
@@ -444,9 +443,6 @@ func (c *Client) PendingTags(ctx context.Context, repo, prodSHA, branch string) 
 		}
 	}
 
-	sort.Slice(pending, func(i, j int) bool {
-		return pending[i].Name < pending[j].Name
-	})
 	return pending, nil
 }
 
