@@ -149,7 +149,7 @@ var keys = keyMap{
 	SortToggle:    key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "toggle sort")),
 	Search:        key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
 	Diff:          key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "toggle drafts/diff")),
-	Deploy:        key.NewBinding(key.WithKeys("T"), key.WithHelp("T", "ship/deploy")),
+	Deploy:        key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "ship")),
 	MineFilter:    key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "toggle mine/team")),
 }
 
@@ -1171,7 +1171,8 @@ func (m Model) View() string {
 				if r := m.currentRow(); r != nil && r.repo != "" {
 					for _, svc := range m.cfg.Services {
 						if svc.Repo == r.repo && svc.DeployURL != "" {
-							actions += "  |  " + helpKey.Render("T:") + " " + helpKey.Render("ship")
+							actions = helpKey.Render("S:") + " " + helpKey.Render("ship") +
+								"  " + actions
 							break
 						}
 					}
