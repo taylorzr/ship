@@ -18,9 +18,10 @@ type Config struct {
 }
 
 type GitHubConfig struct {
-	Owners     []string `toml:"owners"`
-	DepAuthors []string `toml:"dep_authors"`
-	ReviewTeams []string `toml:"review_teams"`
+	Owners        []string `toml:"owners"`
+	ExcludeOwners []string `toml:"exclude_owners"`
+	DepAuthors    []string `toml:"dep_authors"`
+	ReviewTeams   []string `toml:"review_teams"`
 }
 
 type AIConfig struct {

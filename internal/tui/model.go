@@ -178,9 +178,10 @@ type Model struct {
 	searching     bool
 	searchQuery   string
 	gPending      bool
+	mockK8sImage  string
 }
 
-func New(cfg *config.Config, st *store.Store, ghClient *gh.Client) Model {
+func New(cfg *config.Config, st *store.Store, ghClient *gh.Client, mockK8sImage string) Model {
 	s := spinner.New()
 	s.Spinner = spinner.Ellipsis
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
@@ -198,6 +199,7 @@ func New(cfg *config.Config, st *store.Store, ghClient *gh.Client) Model {
 			"Team Review":   false,
 		},
 		sectionErrs: map[string]string{},
+		mockK8sImage: mockK8sImage,
 	}
 	m.loadFromCache()
 	return m
@@ -259,7 +261,7 @@ func (m *Model) applyFilters() {
 	m.recalcTotal()
 	start := m.sectionOffset(m.sectionIdx)
 	end := m.sectionEnd(m.sectionIdx)
-	if m.cursor < start || m.cursor >= end {
+	if visibleRows(m.sections[m.sectionIdx]) > 0 && (m.cursor < start || m.cursor >= end) {
 		m.cursor = start
 	}
 }
@@ -535,10 +537,16 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 				svcCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 				defer cancel()
 
-				rc, err := k8s.NewRealClient(svcCtx, "", svc.Context)
-				if err != nil {
-					results <- svcResult{Repo: svc.Repo, Error: fmt.Sprintf("k8s: %v", err)}
-					return
+				var rc k8s.Client
+				if m.mockK8sImage != "" {
+					rc = k8s.NewMock(m.mockK8sImage)
+				} else {
+					var err error
+					rc, err = k8s.NewRealClient(svcCtx, "", svc.Context)
+					if err != nil {
+						results <- svcResult{Repo: svc.Repo, Error: fmt.Sprintf("k8s: %v", err)}
+						return
+					}
 				}
 				r := version.Resolve(svcCtx, rc, m.gh, svc)
 				pending := ""
@@ -650,18 +658,26 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.Quit):
 			return m, tea.Quit
 		case key.Matches(msg, keys.Down):
-			m.cursor = m.nextRow()
+			if visibleRows(m.sections[m.sectionIdx]) > 0 {
+				m.cursor = m.nextRow()
+			}
 		case key.Matches(msg, keys.Up):
-			m.cursor = m.prevRow()
+			if visibleRows(m.sections[m.sectionIdx]) > 0 {
+				m.cursor = m.prevRow()
+			}
 		case key.Matches(msg, keys.SectionNext):
 			m.sectionIdx = (m.sectionIdx + 1) % len(m.sections)
-			m.cursor = m.sectionOffset(m.sectionIdx) + m.sections[m.sectionIdx].scrollOffset
+			if visibleRows(m.sections[m.sectionIdx]) > 0 {
+				m.cursor = m.sectionOffset(m.sectionIdx) + m.sections[m.sectionIdx].scrollOffset
+			}
 		case key.Matches(msg, keys.SectionPrev):
 			m.sectionIdx--
 			if m.sectionIdx < 0 {
 				m.sectionIdx = len(m.sections) - 1
 			}
-			m.cursor = m.sectionOffset(m.sectionIdx) + m.sections[m.sectionIdx].scrollOffset
+			if visibleRows(m.sections[m.sectionIdx]) > 0 {
+				m.cursor = m.sectionOffset(m.sectionIdx) + m.sections[m.sectionIdx].scrollOffset
+			}
 		case key.Matches(msg, keys.Enter):
 			r := m.currentRow()
 			if r != nil && r.url != "" {
@@ -748,7 +764,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.gPending {
 				m.gPending = false
 				// gg — go to top of section
-				if len(m.sections) > m.sectionIdx {
+				if len(m.sections) > m.sectionIdx && visibleRows(m.sections[m.sectionIdx]) > 0 {
 					m.sections[m.sectionIdx].scrollOffset = 0
 					m.cursor = m.sectionOffset(m.sectionIdx)
 				}
@@ -836,7 +852,7 @@ func (m *Model) allDone() bool {
 }
 
 func (m *Model) currentRow() *row {
-	if m.total == 0 {
+	if m.total == 0 || m.cursor < 0 {
 		return nil
 	}
 	remaining := m.cursor
@@ -907,6 +923,34 @@ func (m Model) View() string {
 				b.WriteString(errorStyle.Render(errMsg))
 				b.WriteString("\n")
 			}
+		}
+
+		// section-specific action hints
+		if i == m.sectionIdx {
+			var actions string
+			switch s.name {
+			case "Releases":
+				actions = helpKey.Render("enter:") + " " + helpKey.Render("open")
+			case "My PRs", "Dependencies":
+				draftLabel := "draft"
+				if r := m.currentRow(); r != nil && r.draft {
+					draftLabel = "ready"
+				}
+				actions = helpKey.Render("enter:") + " " + helpKey.Render("open") +
+					"  " + helpKey.Render("m:") + " " + helpKey.Render("merge") +
+					"  " + helpKey.Render("c:") + " " + helpKey.Render("close") +
+					"  " + helpKey.Render("D:") + " " + helpKey.Render(draftLabel)
+			default:
+				actions = helpKey.Render("enter:") + " " + helpKey.Render("open")
+			}
+			if s.name != "Releases" {
+				actions += "  " + helpKey.Render("d:") + " " + helpKey.Render("drafts") +
+					"  " + helpKey.Render("s:") + " " + helpKey.Render("starred") +
+					"  " + helpKey.Render("S:") + " " + helpKey.Render("sort") +
+					"  " + helpKey.Render("/:") + " " + helpKey.Render("search")
+			}
+			b.WriteString(actions)
+			b.WriteString("\n")
 		}
 
 		// column header for PR sections
@@ -1108,24 +1152,15 @@ func renderRow(r row, selected bool, repoWidth, maxWidth int) string {
 }
 
 func (m Model) viewHelp() string {
-	sep := helpKey.Render(" · ")
-	line := helpKey.Render("tab/⇧+tab") + sep + helpKey.Render("section") +
-		sep + helpKey.Render("j/k") + sep + helpKey.Render("move") +
-		sep + helpKey.Render("/") + sep + helpKey.Render("search") +
-		sep + helpKey.Render("enter") + sep + helpKey.Render("open") +
-		sep + helpKey.Render("d") + sep + helpKey.Render("drafts") +
-		sep + helpKey.Render("s") + sep + helpKey.Render("starred") +
-		sep + helpKey.Render("S") + sep + helpKey.Render("sort") +
-		sep + helpKey.Render("gg") + sep + helpKey.Render("top") +
-		sep + helpKey.Render("G") + sep + helpKey.Render("bottom") +
-		sep + helpKey.Render("m") + sep + helpKey.Render("merge") +
-		sep + helpKey.Render("c") + sep + helpKey.Render("close") +
-		sep + helpKey.Render("D") + sep + helpKey.Render("toggle draft") +
-		sep + helpKey.Render("r") + sep + helpKey.Render("refresh")
+	line := helpKey.Render("tab/⇧+tab:") + " " + helpKey.Render("section") +
+		"  " + helpKey.Render("j/k:") + " " + helpKey.Render("nav") +
+		"  " + helpKey.Render("gg:") + " " + helpKey.Render("top") +
+		"  " + helpKey.Render("G:") + " " + helpKey.Render("bottom") +
+		"  " + helpKey.Render("r:") + " " + helpKey.Render("refresh")
 	if !m.lastRefreshed.IsZero() {
-		line += helpKey.Render(" (auto in " + refreshCountdown(m.lastRefreshed, m.cfg.RefreshInterval) + ")")
+		line += helpKey.Render("  (auto in " + refreshCountdown(m.lastRefreshed, m.cfg.RefreshInterval) + ")")
 	}
-	line += sep + helpKey.Render("q") + sep + helpKey.Render("quit")
+	line += "  " + helpKey.Render("q:") + " " + helpKey.Render("quit")
 	return line
 }
 

@@ -44,6 +44,7 @@ var releasesRepo string
 func init() {
 	rootCmd.AddCommand(countCmd)
 	rootCmd.AddCommand(releasesCmd)
+	rootCmd.Flags().StringVar(&mockK8sImage, "mock-k8s", "", "mock k8s with this image (e.g. repo/app:v10.1.0)")
 	releasesCmd.Flags().StringVar(&mockK8sImage, "mock-k8s", "", "mock k8s with this image (e.g. repo/app:v10.1.0)")
 	releasesCmd.Flags().StringVar(&releasesRepo, "repo", "", "filter to a specific repo (e.g. taylorzr/kitty-meow)")
 }
@@ -71,9 +72,9 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("gh auth: %w", err)
 	}
 
-	ghClient := gh.NewClient(token)
+	ghClient := gh.NewClient(token, cfg.GitHub.ExcludeOwners)
 
-	m := tui.New(cfg, st, ghClient)
+	m := tui.New(cfg, st, ghClient, mockK8sImage)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("tui: %w", err)
@@ -158,7 +159,7 @@ func runReleases(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("gh auth: %w", err)
 	}
 
-	ghClient := gh.NewClient(token)
+	ghClient := gh.NewClient(token, cfg.GitHub.ExcludeOwners)
 	ctx := context.Background()
 
 	var mockK8s *k8s.MockClient

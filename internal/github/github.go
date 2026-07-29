@@ -28,16 +28,17 @@ type PR struct {
 }
 
 type Client struct {
-	gql  *githubv4.Client
-	user string
+	gql           *githubv4.Client
+	user          string
+	excludeOwners []string
 }
 
-func NewClient(token string) *Client {
+func NewClient(token string, excludeOwners []string) *Client {
 	src := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
 	http := oauth2.NewClient(context.Background(), src)
 	http.Timeout = 30 * time.Second
 	gql := githubv4.NewClient(http)
-	return &Client{gql: gql}
+	return &Client{gql: gql, excludeOwners: excludeOwners}
 }
 
 func (c *Client) User(ctx context.Context) (string, error) {
@@ -238,12 +239,21 @@ func ownerFilter(owners []string) string {
 	return b.String()
 }
 
+func (c *Client) excludeFilter() string {
+	var b strings.Builder
+	for _, o := range c.excludeOwners {
+		b.WriteString(" -user:")
+		b.WriteString(o)
+	}
+	return b.String()
+}
+
 func (c *Client) MyPRs(ctx context.Context, owners []string) ([]PR, error) {
 	user, err := c.User(ctx)
 	if err != nil {
 		return nil, err
 	}
-	return c.search(ctx, fmt.Sprintf("is:open is:pr author:%s archived:false%s", user, ownerFilter(owners)))
+	return c.search(ctx, fmt.Sprintf("is:open is:pr author:%s archived:false%s%s", user, ownerFilter(owners), c.excludeFilter()))
 }
 
 func (c *Client) ReviewRequested(ctx context.Context, owners []string) ([]PR, error) {
@@ -251,7 +261,7 @@ func (c *Client) ReviewRequested(ctx context.Context, owners []string) ([]PR, er
 	if err != nil {
 		return nil, err
 	}
-	return c.search(ctx, fmt.Sprintf("is:open is:pr user-review-requested:%s%s", user, ownerFilter(owners)))
+	return c.search(ctx, fmt.Sprintf("is:open is:pr user-review-requested:%s%s%s", user, ownerFilter(owners), c.excludeFilter()))
 }
 
 func (c *Client) TeamReviewRequested(ctx context.Context, teams []string) ([]PR, error) {
@@ -264,6 +274,7 @@ func (c *Client) TeamReviewRequested(ctx context.Context, teams []string) ([]PR,
 		q.WriteString(" team-review-requested:")
 		q.WriteString(t)
 	}
+	q.WriteString(c.excludeFilter())
 	return c.search(ctx, q.String())
 }
 
@@ -272,7 +283,7 @@ func (c *Client) AllReviewRequested(ctx context.Context) ([]PR, error) {
 	if err != nil {
 		return nil, err
 	}
-	return c.search(ctx, fmt.Sprintf("is:open is:pr review-requested:%s", user))
+	return c.search(ctx, fmt.Sprintf("is:open is:pr review-requested:%s%s", user, c.excludeFilter()))
 }
 
 func (c *Client) DepPRs(ctx context.Context, repos []string, authors []string) ([]PR, error) {
