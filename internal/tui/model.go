@@ -909,9 +909,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s.hideTeamReviews = !s.hideTeamReviews
 				m.sections[m.sectionIdx] = s
 				m.applyFilters()
-				if visibleRows(m.sections[m.sectionIdx]) == 0 {
-					m.advanceSection(1)
-				}
 			}
 		case key.Matches(msg, keys.Deploy):
 			if m.sections[m.sectionIdx].name == "Releases" {
