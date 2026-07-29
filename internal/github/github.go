@@ -422,25 +422,47 @@ type PendingTag struct {
 }
 
 func (c *Client) PendingTags(ctx context.Context, repo, prodSHA, branch string) ([]PendingTag, error) {
-	tags, err := c.ListTags(ctx, repo)
-	if err != nil {
-		return nil, err
+	type ghRelease struct {
+		TagName    string `json:"tag_name"`
+		Prerelease bool   `json:"prerelease"`
+		CreatedAt  string `json:"created_at"`
 	}
 
 	var pending []PendingTag
-	for _, tag := range tags {
-		// skip the tag that matches prod
-		if tag.SHA == prodSHA {
-			continue
-		}
-		// check if this tag is ahead of prod (i.e. contains commits not in prod)
-		comp, err := c.Compare(ctx, repo, prodSHA, tag.Name)
+	page := 1
+
+	for {
+		out, err := exec.Command("gh", "api",
+			fmt.Sprintf("repos/%s/releases?per_page=100&page=%d", repo, page)).CombinedOutput()
 		if err != nil {
-			continue
+			return nil, fmt.Errorf("list releases: %s: %w", strings.TrimSpace(string(out)), err)
 		}
-		if comp.AheadBy > 0 {
-			pending = append(pending, PendingTag{Name: tag.Name, SHA: tag.SHA[:7]})
+
+		var releases []ghRelease
+		if err := json.Unmarshal(out, &releases); err != nil {
+			return nil, fmt.Errorf("parse releases: %w", err)
 		}
+		if len(releases) == 0 {
+			break
+		}
+
+		for _, rel := range releases {
+			if rel.Prerelease {
+				continue
+			}
+
+			comp, err := c.Compare(ctx, repo, prodSHA, rel.TagName)
+			if err != nil {
+				continue
+			}
+			if comp.AheadBy == 0 {
+				// reached a release behind or equal to prod — stop entirely
+				return pending, nil
+			}
+			pending = append(pending, PendingTag{Name: rel.TagName})
+		}
+
+		page++
 	}
 
 	return pending, nil
