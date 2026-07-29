@@ -238,7 +238,7 @@ func (m *Model) applyFilters() {
 		if i != m.sectionIdx {
 			sectionQ = ""
 		}
-		if m.sections[i].hideDrafts || sectionQ != "" || m.sections[i].showStarred {
+		if m.sections[i].hideDrafts || sectionQ != "" || m.sections[i].showStarred || m.sections[i].hideTeamReviews {
 			var filtered []row
 			allRows := m.sections[i].allRows
 			if !m.sections[i].sortNewest {
