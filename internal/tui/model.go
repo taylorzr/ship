@@ -273,10 +273,14 @@ func (m *Model) applyFilters() {
 		}
 	}
 	m.recalcTotal()
-	start := m.sectionOffset(m.sectionIdx)
-	end := m.sectionEnd(m.sectionIdx)
-	if visibleRows(m.sections[m.sectionIdx]) > 0 && (m.cursor < start || m.cursor >= end) {
-		m.cursor = start
+	if visibleRows(m.sections[m.sectionIdx]) == 0 {
+		m.cursor = -1
+	} else {
+		start := m.sectionOffset(m.sectionIdx)
+		end := m.sectionEnd(m.sectionIdx)
+		if m.cursor < start || m.cursor >= end {
+			m.cursor = start
+		}
 	}
 }
 
