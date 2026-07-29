@@ -421,11 +421,29 @@ type PendingTag struct {
 	SHA  string
 }
 
-func (c *Client) PendingTags(ctx context.Context, repo, prodSHA, branch string) ([]PendingTag, error) {
+func (c *Client) PendingTags(ctx context.Context, repo, prodSHA, branch, source string) ([]PendingTag, error) {
+	if source == "tags" {
+		return c.pendingTagsFromGit(ctx, repo, prodSHA)
+	}
+
+	pending, err := c.pendingTagsFromReleases(ctx, repo, prodSHA)
+	if err != nil || (source == "" && len(pending) == 0 && err == nil) {
+		// auto-fallback: no releases found, try git tags
+		tag, tagErr := c.pendingTagsFromGit(ctx, repo, prodSHA)
+		if tagErr == nil && len(tag) > 0 {
+			return tag, nil
+		}
+		if err != nil {
+			return nil, err
+		}
+	}
+	return pending, err
+}
+
+func (c *Client) pendingTagsFromReleases(ctx context.Context, repo, prodSHA string) ([]PendingTag, error) {
 	type ghRelease struct {
 		TagName    string `json:"tag_name"`
 		Prerelease bool   `json:"prerelease"`
-		CreatedAt  string `json:"created_at"`
 	}
 
 	var pending []PendingTag
@@ -456,7 +474,6 @@ func (c *Client) PendingTags(ctx context.Context, repo, prodSHA, branch string) 
 				continue
 			}
 			if comp.AheadBy == 0 {
-				// reached a release behind or equal to prod — stop entirely
 				return pending, nil
 			}
 			pending = append(pending, PendingTag{Name: rel.TagName})
@@ -465,6 +482,28 @@ func (c *Client) PendingTags(ctx context.Context, repo, prodSHA, branch string) 
 		page++
 	}
 
+	return pending, nil
+}
+
+func (c *Client) pendingTagsFromGit(ctx context.Context, repo, prodSHA string) ([]PendingTag, error) {
+	tags, err := c.ListTags(ctx, repo)
+	if err != nil {
+		return nil, err
+	}
+
+	var pending []PendingTag
+	for _, tag := range tags {
+		if tag.SHA == prodSHA {
+			continue
+		}
+		comp, err := c.Compare(ctx, repo, prodSHA, tag.Name)
+		if err != nil {
+			continue
+		}
+		if comp.AheadBy > 0 {
+			pending = append(pending, PendingTag{Name: tag.Name})
+		}
+	}
 	return pending, nil
 }
 
