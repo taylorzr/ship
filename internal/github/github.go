@@ -421,12 +421,12 @@ type PendingTag struct {
 	SHA  string
 }
 
-func (c *Client) PendingTags(ctx context.Context, repo, prodSHA, branch, source string) ([]PendingTag, error) {
+func (c *Client) PendingTags(ctx context.Context, repo, prodSHA, branch, source, prodTag string) ([]PendingTag, error) {
 	if source == "tags" {
 		return c.pendingTagsFromGit(ctx, repo, prodSHA)
 	}
 
-	pending, err := c.pendingTagsFromReleases(ctx, repo, prodSHA)
+	pending, err := c.pendingTagsFromReleases(ctx, repo, prodSHA, prodTag)
 	if err != nil || (source == "" && len(pending) == 0 && err == nil) {
 		// auto-fallback: no releases found, try git tags
 		tag, tagErr := c.pendingTagsFromGit(ctx, repo, prodSHA)
@@ -440,13 +440,14 @@ func (c *Client) PendingTags(ctx context.Context, repo, prodSHA, branch, source 
 	return pending, err
 }
 
-func (c *Client) pendingTagsFromReleases(ctx context.Context, repo, prodSHA string) ([]PendingTag, error) {
+func (c *Client) pendingTagsFromReleases(ctx context.Context, repo, prodSHA, prodTag string) ([]PendingTag, error) {
 	type ghRelease struct {
 		TagName    string `json:"tag_name"`
 		Prerelease bool   `json:"prerelease"`
+		CreatedAt  string `json:"created_at"`
 	}
 
-	var pending []PendingTag
+	var allReleases []ghRelease
 	page := 1
 
 	for {
@@ -464,24 +465,62 @@ func (c *Client) pendingTagsFromReleases(ctx context.Context, repo, prodSHA stri
 			break
 		}
 
-		for _, rel := range releases {
-			if rel.Prerelease {
-				continue
-			}
-
-			comp, err := c.Compare(ctx, repo, prodSHA, rel.TagName)
-			if err != nil {
-				continue
-			}
-			if comp.AheadBy == 0 {
-				return pending, nil
-			}
-			pending = append(pending, PendingTag{Name: rel.TagName})
-		}
-
+		allReleases = append(allReleases, releases...)
 		page++
 	}
 
+	if len(allReleases) == 0 {
+		return nil, nil
+	}
+
+	// If we have a known prod tag, use its creation time to determine what's pending.
+	if prodTag != "" {
+		var prodTime time.Time
+		found := false
+		for _, rel := range allReleases {
+			if rel.TagName == prodTag {
+				t, err := time.Parse(time.RFC3339, rel.CreatedAt)
+				if err == nil {
+					prodTime = t
+					found = true
+				}
+				break
+			}
+		}
+		if found {
+			var pending []PendingTag
+			for _, rel := range allReleases {
+				if rel.Prerelease || rel.TagName == prodTag {
+					continue
+				}
+				t, err := time.Parse(time.RFC3339, rel.CreatedAt)
+				if err != nil {
+					continue
+				}
+				if t.After(prodTime) {
+					pending = append(pending, PendingTag{Name: rel.TagName})
+				}
+			}
+			return pending, nil
+		}
+		// prod tag not found among releases — fall through to git-compare approach
+	}
+
+	// Fallback: use git-compare to find releases that haven't been shipped.
+	var pending []PendingTag
+	for _, rel := range allReleases {
+		if rel.Prerelease {
+			continue
+		}
+		comp, err := c.Compare(ctx, repo, prodSHA, rel.TagName)
+		if err != nil {
+			continue
+		}
+		if comp.AheadBy == 0 {
+			return pending, nil
+		}
+		pending = append(pending, PendingTag{Name: rel.TagName})
+	}
 	return pending, nil
 }
 
