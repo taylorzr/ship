@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"sort"
 	"strings"
+	"time"
 
 	"github.com/shurcooL/githubv4"
 	"golang.org/x/oauth2"
@@ -34,6 +35,7 @@ type Client struct {
 func NewClient(token string) *Client {
 	src := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
 	http := oauth2.NewClient(context.Background(), src)
+	http.Timeout = 30 * time.Second
 	gql := githubv4.NewClient(http)
 	return &Client{gql: gql}
 }
@@ -106,47 +108,78 @@ type searchResult struct {
 }
 
 func (c *Client) search(ctx context.Context, query string) ([]PR, error) {
-	var all []PR
-	var after *githubv4.String
+	var lastErr error
+	backoff := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
 
-	for {
-		var q searchResult
-		variables := map[string]any{
-			"query": githubv4.String(query),
-			"first": githubv4.Int(50),
-			"after": (*githubv4.String)(nil),
-		}
-		if after != nil {
-			variables["after"] = after
+	for attempt := range 4 {
+		var all []PR
+		var after *githubv4.String
+		lastErr = nil
+		ok := true
+
+	retryLoop:
+		for {
+			var q searchResult
+			variables := map[string]any{
+				"query": githubv4.String(query),
+				"first": githubv4.Int(50),
+				"after": (*githubv4.String)(nil),
+			}
+			if after != nil {
+				variables["after"] = after
+			}
+
+			if err := c.gql.Query(ctx, &q, variables); err != nil {
+				lastErr = err
+				ok = false
+				break retryLoop
+			}
+
+			for _, n := range q.Search.Nodes {
+				pr := n.PullRequest
+				ciState := resolveCI(pr.Commits)
+				all = append(all, PR{
+					Number:         pr.Number,
+					Repo:           pr.Repository.NameWithOwner,
+					Title:          pr.Title,
+					Author:         pr.Author.Login,
+					URL:            pr.URL,
+					ReviewDecision: string(pr.ReviewDecision),
+					CIState:        ciState,
+					Mergeable:      string(pr.Mergeable),
+					UpdatedAt:      pr.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+					IsDraft:        pr.IsDraft,
+				})
+			}
+
+			if !q.Search.PageInfo.HasNextPage || len(q.Search.Nodes) == 0 {
+				break retryLoop
+			}
+			after = &q.Search.PageInfo.EndCursor
 		}
 
-		if err := c.gql.Query(ctx, &q, variables); err != nil {
-			return nil, fmt.Errorf("github search %q: %w", query, err)
+		if ok {
+			return all, nil
 		}
 
-		for _, n := range q.Search.Nodes {
-			pr := n.PullRequest
-			ciState := resolveCI(pr.Commits)
-			all = append(all, PR{
-				Number:         pr.Number,
-				Repo:           pr.Repository.NameWithOwner,
-				Title:          pr.Title,
-				Author:         pr.Author.Login,
-				URL:            pr.URL,
-				ReviewDecision: string(pr.ReviewDecision),
-				CIState:        ciState,
-				Mergeable:      string(pr.Mergeable),
-				UpdatedAt:      pr.UpdatedAt.Format("2006-01-02T15:04:05Z"),
-				IsDraft:        pr.IsDraft,
-			})
-		}
-
-		if !q.Search.PageInfo.HasNextPage || len(q.Search.Nodes) == 0 {
+		if attempt == 3 {
 			break
 		}
-		after = &q.Search.PageInfo.EndCursor
+
+		// only retry on 5xx errors
+		errStr := lastErr.Error()
+		if !strings.Contains(errStr, "502") && !strings.Contains(errStr, "503") &&
+			!strings.Contains(errStr, "504") && !strings.Contains(errStr, "5") {
+			return nil, lastErr
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(backoff[attempt]):
+		}
 	}
-	return all, nil
+	return nil, fmt.Errorf("github search %q: %w", query, lastErr)
 }
 
 func resolveCI(commits struct {
