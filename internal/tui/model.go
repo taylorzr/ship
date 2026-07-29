@@ -131,7 +131,7 @@ type keyMap struct {
 	Search        key.Binding
 	Diff          key.Binding
 	Deploy        key.Binding
-	TeamFilter    key.Binding
+	MineFilter    key.Binding
 }
 
 var keys = keyMap{
@@ -150,7 +150,7 @@ var keys = keyMap{
 	Search:        key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
 	Diff:          key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "toggle drafts/diff")),
 	Deploy:        key.NewBinding(key.WithKeys("T"), key.WithHelp("T", "ship/deploy")),
-	TeamFilter:    key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "toggle team reviews")),
+	MineFilter:    key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "toggle mine/team")),
 }
 
 type refreshDoneMsg struct {
@@ -903,12 +903,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				return m, nil
 			}
-		case key.Matches(msg, keys.TeamFilter):
+		case key.Matches(msg, keys.MineFilter):
 			if m.sections[m.sectionIdx].name == "To Review" {
 				s := m.sections[m.sectionIdx]
 				s.hideTeamReviews = !s.hideTeamReviews
 				m.sections[m.sectionIdx] = s
 				m.applyFilters()
+				if visibleRows(m.sections[m.sectionIdx]) == 0 {
+					m.advanceSection(1)
+				}
 			}
 		case key.Matches(msg, keys.Deploy):
 			if m.sections[m.sectionIdx].name == "Releases" {
@@ -1196,7 +1199,7 @@ func (m Model) View() string {
 				actions = helpKey.Render("R:") + " " + helpKey.Render(draftLabel) +
 					"  " + helpKey.Render("M:") + " " + helpKey.Render("merge") +
 					"  " + helpKey.Render("C:") + " " + helpKey.Render("close") +
-					"  |  " + helpKey.Render("t:") + " " + helpKey.Render(teamLabel) +
+					"  |  " + helpKey.Render("m:") + " " + helpKey.Render(teamLabel) +
 					"  " + helpKey.Render("d:") + " " + helpKey.Render("drafts") +
 					"  " + helpKey.Render("*:") + " " + helpKey.Render("starred") +
 					"  " + helpKey.Render("s:") + " " + helpKey.Render("sort") +
