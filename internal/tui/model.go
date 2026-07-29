@@ -519,7 +519,19 @@ func (m Model) sectionCommands(ctx context.Context) []tea.Cmd {
 
 func (m Model) refreshMyPRs(ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
+		if shipLog != nil {
+			shipLog.Printf("refreshing My PRs")
+		}
+		start := time.Now()
 		prs, err := m.gh.MyPRs(ctx, m.cfg.GitHub.Owners)
+		if shipLog != nil {
+			dur := time.Since(start).Truncate(time.Millisecond)
+			if err != nil {
+				shipLog.Printf("My PRs: %v (%v)", err, dur)
+			} else {
+				shipLog.Printf("My PRs: %d PRs (%v)", len(prs), dur)
+			}
+		}
 		if err == nil {
 			cache := make([]store.CachedPR, len(prs))
 			for i, p := range prs {
@@ -533,7 +545,19 @@ func (m Model) refreshMyPRs(ctx context.Context) tea.Cmd {
 
 func (m Model) refreshReview(ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
+		if shipLog != nil {
+			shipLog.Printf("refreshing To Review")
+		}
+		start := time.Now()
 		revs, err := m.gh.ReviewRequested(ctx, m.cfg.GitHub.Owners)
+		if shipLog != nil {
+			dur := time.Since(start).Truncate(time.Millisecond)
+			if err != nil {
+				shipLog.Printf("To Review: %v (%v)", err, dur)
+			} else {
+				shipLog.Printf("To Review: %d PRs (%v)", len(revs), dur)
+			}
+		}
 		if err == nil {
 			cache := make([]store.CachedPR, len(revs))
 			for i, p := range revs {
@@ -547,7 +571,19 @@ func (m Model) refreshReview(ctx context.Context) tea.Cmd {
 
 func (m Model) refreshTeamReview(ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
+		if shipLog != nil {
+			shipLog.Printf("refreshing Team Review")
+		}
+		start := time.Now()
 		prs, err := m.gh.TeamReviewRequested(ctx, m.cfg.GitHub.ReviewTeams)
+		if shipLog != nil {
+			dur := time.Since(start).Truncate(time.Millisecond)
+			if err != nil {
+				shipLog.Printf("Team Review: %v (%v)", err, dur)
+			} else {
+				shipLog.Printf("Team Review: %d PRs (%v)", len(prs), dur)
+			}
+		}
 		if err == nil {
 			cache := make([]store.CachedPR, len(prs))
 			for i, p := range prs {
@@ -563,9 +599,24 @@ func (m Model) refreshDeps(ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
 		starred := m.cfg.StarredRepos()
 		if len(starred) == 0 {
+			if shipLog != nil {
+				shipLog.Printf("Dependencies: skipped (no starred repos)")
+			}
 			return refreshDoneMsg{source: "Dependencies"}
 		}
+		if shipLog != nil {
+			shipLog.Printf("refreshing Dependencies")
+		}
+		start := time.Now()
 		deps, err := m.gh.DepPRs(ctx, starred, m.cfg.GitHub.DepAuthors)
+		if shipLog != nil {
+			dur := time.Since(start).Truncate(time.Millisecond)
+			if err != nil {
+				shipLog.Printf("Dependencies: %v (%v)", err, dur)
+			} else {
+				shipLog.Printf("Dependencies: %d PRs (%v)", len(deps), dur)
+			}
+		}
 		if err == nil {
 			cache := make([]store.CachedPR, len(deps))
 			for i, p := range deps {
@@ -579,6 +630,11 @@ func (m Model) refreshDeps(ctx context.Context) tea.Cmd {
 
 func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
+		if shipLog != nil {
+			shipLog.Printf("refreshing Releases (%d services)", len(m.cfg.Services))
+		}
+		start := time.Now()
+
 		type svcResult struct {
 			Repo            string
 			ProdRef         string
@@ -599,6 +655,7 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 				svcCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
 				defer cancel()
 
+				svcStart := time.Now()
 				var rc k8s.Client
 				if m.mockK8sImage != "" {
 					rc = k8s.NewMock(m.mockK8sImage)
@@ -631,6 +688,14 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 					buf.WriteByte(']')
 					untagged = buf.String()
 				}
+				if shipLog != nil {
+					dur := time.Since(svcStart).Truncate(time.Millisecond)
+					if r.Error != "" {
+						shipLog.Printf("  %s: %s (%v)", svc.Repo, r.Error, dur)
+					} else {
+						shipLog.Printf("  %s: ahead=%d tags=%q (%v)", svc.Repo, r.AheadBy, pending, dur)
+					}
+				}
 				results <- svcResult{
 					Repo:            svc.Repo,
 					ProdRef:         r.ProdRef,
@@ -659,6 +724,14 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 			})
 			if res.Error != "" {
 				lastErr = fmt.Errorf("%s: %s", res.Repo, res.Error)
+			}
+		}
+		total := time.Since(start).Truncate(time.Millisecond)
+		if shipLog != nil {
+			if lastErr != nil {
+				shipLog.Printf("Releases: %v (%v)", lastErr, total)
+			} else {
+				shipLog.Printf("Releases: %d services ok (%v)", len(m.cfg.Services), total)
 			}
 		}
 		return refreshDoneMsg{source: "Releases", err: lastErr}

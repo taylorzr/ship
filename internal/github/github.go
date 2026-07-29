@@ -321,7 +321,7 @@ type CommitSummary struct {
 }
 
 func (c *Client) Compare(ctx context.Context, repo, base, head string) (*CompareResult, error) {
-	out, err := exec.Command("gh", "api", fmt.Sprintf("repos/%s/compare/%s...%s", repo, base, head)).CombinedOutput()
+	out, err := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("repos/%s/compare/%s...%s", repo, base, head)).CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("gh api compare: %s: %w", strings.TrimSpace(string(out)), err)
 	}
@@ -364,7 +364,7 @@ type TagInfo struct {
 }
 
 func (c *Client) ResolveRef(ctx context.Context, repo, ref string) (string, error) {
-	out, err := exec.Command("gh", "api", fmt.Sprintf("repos/%s/git/ref/tags/%s", repo, ref), "--jq", ".object.sha").CombinedOutput()
+	out, err := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("repos/%s/git/ref/tags/%s", repo, ref), "--jq", ".object.sha").CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("resolve ref %s: %s: %w", ref, strings.TrimSpace(string(out)), err)
 	}
@@ -372,7 +372,7 @@ func (c *Client) ResolveRef(ctx context.Context, repo, ref string) (string, erro
 }
 
 func (c *Client) ListTags(ctx context.Context, repo string) ([]TagInfo, error) {
-	out, err := exec.Command("gh", "api", fmt.Sprintf("repos/%s/git/refs/tags?per_page=100", repo)).CombinedOutput()
+	out, err := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("repos/%s/git/refs/tags?per_page=100", repo)).CombinedOutput()
 	if err != nil {
 		return nil, fmt.Errorf("list tags: %s: %w", strings.TrimSpace(string(out)), err)
 	}
@@ -403,7 +403,7 @@ func (c *Client) ListTagsReachableFrom(ctx context.Context, repo, branch string)
 	var result []TagInfo
 	for _, tag := range allTags {
 		// check if tag commit is reachable from branch using merge-base
-		out, err := exec.Command("gh", "api", fmt.Sprintf("repos/%s/compare/%s...%s", repo, tag.SHA, branch),
+		out, err := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("repos/%s/compare/%s...%s", repo, tag.SHA, branch),
 			"--jq", ".status").CombinedOutput()
 		if err != nil {
 			continue
@@ -450,7 +450,7 @@ func (c *Client) pendingTagsFromReleases(ctx context.Context, repo, prodSHA stri
 	page := 1
 
 	for {
-		out, err := exec.Command("gh", "api",
+		out, err := exec.CommandContext(ctx, "gh", "api",
 			fmt.Sprintf("repos/%s/releases?per_page=100&page=%d", repo, page)).CombinedOutput()
 		if err != nil {
 			return nil, fmt.Errorf("list releases: %s: %w", strings.TrimSpace(string(out)), err)
@@ -548,7 +548,7 @@ func (c *Client) UntaggedFirstParent(ctx context.Context, repo, prodSHA, branch 
 }
 
 func (c *Client) MergePR(ctx context.Context, repo string, number int) error {
-	out, err := exec.Command("gh", "api",
+	out, err := exec.CommandContext(ctx, "gh", "api",
 		fmt.Sprintf("repos/%s/pulls/%d/merge", repo, number),
 		"-f", "merge_method=squash",
 	).CombinedOutput()
@@ -559,7 +559,7 @@ func (c *Client) MergePR(ctx context.Context, repo string, number int) error {
 }
 
 func (c *Client) ClosePR(ctx context.Context, repo string, number int) error {
-	out, err := exec.Command("gh", "api",
+	out, err := exec.CommandContext(ctx, "gh", "api",
 		fmt.Sprintf("repos/%s/pulls/%d", repo, number),
 		"-X", "PATCH",
 		"-f", "state=closed",
@@ -572,7 +572,7 @@ func (c *Client) ClosePR(ctx context.Context, repo string, number int) error {
 
 func (c *Client) ToggleDraft(ctx context.Context, repo string, number int, isDraft bool) error {
 	if isDraft {
-		out, err := exec.Command("gh", "pr", "ready",
+		out, err := exec.CommandContext(ctx, "gh", "pr", "ready",
 			fmt.Sprintf("%d", number),
 			"-R", repo,
 		).CombinedOutput()
@@ -581,7 +581,7 @@ func (c *Client) ToggleDraft(ctx context.Context, repo string, number int, isDra
 		}
 		return nil
 	}
-	out, err := exec.Command("gh", "api",
+	out, err := exec.CommandContext(ctx, "gh", "api",
 		fmt.Sprintf("repos/%s/pulls/%d", repo, number),
 		"-X", "PATCH",
 		"-f", "draft=true",
