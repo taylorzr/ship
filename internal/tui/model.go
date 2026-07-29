@@ -75,12 +75,14 @@ func (m *Model) maxVisibleRows() int {
 	if n == 0 {
 		return 15
 	}
-	perSection := (m.height - 10) / n
+	// overhead: title + help + per-section (name + header) + active section actions
+	overhead := 2 + 2*n + 1
+	perSection := (m.height - overhead) / n
 	if perSection < 1 {
 		return 1
 	}
-	if perSection > 15 {
-		return 15
+	if perSection > 10 {
+		return 10
 	}
 	return perSection
 }
