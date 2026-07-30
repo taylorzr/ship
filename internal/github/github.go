@@ -686,3 +686,18 @@ func (c *Client) CreateTag(ctx context.Context, repo, tag, sha string) error {
 	}
 	return nil
 }
+
+func (c *Client) OwnerType(ctx context.Context, owner string) string {
+	out, err := exec.CommandContext(ctx, "gh", "api",
+		fmt.Sprintf("users/%s", owner),
+		"--jq", ".type",
+	).CombinedOutput()
+	if err != nil {
+		return "org"
+	}
+	t := strings.TrimSpace(string(out))
+	if t == "User" {
+		return "user"
+	}
+	return "org"
+}

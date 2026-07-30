@@ -297,7 +297,7 @@ func (m *Model) applyFilters() {
 				if m.sections[i].hideTeamReviews && r.role == "review-team" {
 					continue
 				}
-				if m.sections[i].showStarred && !starredSet[r.repo] {
+				if m.sections[i].showStarred && m.sections[i].name != "Services" && !starredSet[r.repo] {
 					continue
 				}
 				if sectionQ != "" && !strings.Contains(strings.ToLower(r.title), sectionQ) &&
@@ -1377,7 +1377,7 @@ func (m Model) View() string {
 			b.WriteString("  ")
 			b.WriteString(helpKey.Render("[no drafts]"))
 		}
-		if s.showStarred {
+		if s.showStarred && s.name != "Services" {
 			b.WriteString("  ")
 			b.WriteString(helpKey.Render("[starred]"))
 		}
@@ -1910,7 +1910,7 @@ func (m Model) openBrowse() {
 		return
 	}
 	s := m.sections[m.sectionIdx]
-	q := s.browseQuery(m.cfg)
+	q := s.browseQuery(m.cfg, m.gh)
 	if q == "" {
 		return
 	}
@@ -1918,18 +1918,34 @@ func (m Model) openBrowse() {
 	openBrowser(u)
 }
 
-func (s section) browseQuery(cfg *config.Config) string {
+func (s section) browseQuery(cfg *config.Config, gh *gh.Client) string {
 	var parts []string
+	ctx := context.Background()
 	switch s.name {
 	case "My PRs":
 		parts = append(parts, "is:open is:pr author:@me archived:false")
 		for _, o := range cfg.GitHub.Owners {
-			parts = append(parts, "org:"+o)
+			if gh.OwnerType(ctx, o) == "user" {
+				parts = append(parts, "user:"+o)
+			} else {
+				parts = append(parts, "org:"+o)
+			}
 		}
 	case "To Review":
-		parts = append(parts, "is:open is:pr user-review-requested:@me")
+		if s.hideTeamReviews {
+			parts = append(parts, "is:open is:pr user-review-requested:@me")
+		} else {
+			parts = append(parts, "is:open is:pr")
+			for _, t := range cfg.GitHub.ReviewTeams {
+				parts = append(parts, "team-review-requested:"+t)
+			}
+		}
 		for _, o := range cfg.GitHub.Owners {
-			parts = append(parts, "org:"+o)
+			if gh.OwnerType(ctx, o) == "user" {
+				parts = append(parts, "user:"+o)
+			} else {
+				parts = append(parts, "org:"+o)
+			}
 		}
 	case "Team Review":
 		parts = append(parts, "is:open is:pr")
@@ -1938,8 +1954,10 @@ func (s section) browseQuery(cfg *config.Config) string {
 		}
 	case "Dependencies":
 		parts = append(parts, "is:open is:pr")
-		for _, r := range cfg.StarredRepos() {
-			parts = append(parts, "repo:"+r)
+		if s.showStarred {
+			for _, r := range cfg.StarredRepos() {
+				parts = append(parts, "repo:"+r)
+			}
 		}
 		for _, a := range cfg.GitHub.DepAuthors {
 			parts = append(parts, "author:"+a)
