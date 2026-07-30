@@ -918,7 +918,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tagging = false
 			m.tagQuery = ""
 			if tag != "" {
-				url := fmt.Sprintf("https://github.com/%s/releases/new?tag=%s&target=%s&generate_release_notes=true", m.tagMeta.repo, url.QueryEscape(tag), m.tagMeta.branch)
+				url := fmt.Sprintf("https://github.com/%s/releases/new?tag=%s&target=%s", m.tagMeta.repo, url.QueryEscape(tag), m.tagMeta.branch)
 				openBrowser(url)
 			}
 			case key.Matches(msg, key.NewBinding(key.WithKeys("backspace"))):
@@ -1791,30 +1791,27 @@ func (m Model) renderHelpOverlay() string {
 }
 
 func (m Model) renderTagInput() string {
-	var b strings.Builder
-
 	if m.tagMeta.loading {
-		b.WriteString(dialogTitle.Render("Loading..."))
-		b.WriteString("\n\n")
-		b.WriteString(m.spin.View())
-	} else {
-		action := "Tag"
-		if m.tagMeta.hasReleases {
-			action = "Release"
-		}
-		b.WriteString(dialogTitle.Render("Create " + action))
-		b.WriteString("\n\n")
-
-		if m.tagMeta.latest != "" {
-			b.WriteString(helpKey.Render("Latest: " + m.tagMeta.latest))
-			b.WriteString("\n\n")
-		} else {
-			b.WriteString(helpKey.Render("(no tags yet)"))
-			b.WriteString("\n\n")
-		}
+		return dialogStyle.Render(dialogTitle.Render("Loading") + "\n\n" + m.spin.View())
 	}
 
-	b.WriteString(helpKey.Render("Tag: "))
+	var b strings.Builder
+	action := "Tag"
+	if m.tagMeta.hasReleases {
+		action = "Release"
+	}
+	b.WriteString(dialogTitle.Render("Create " + action))
+	b.WriteString("\n\n")
+
+	if m.tagMeta.latest != "" {
+		b.WriteString(helpKey.Render("Latest: " + m.tagMeta.latest))
+		b.WriteString("\n\n")
+	} else {
+		b.WriteString(helpKey.Render("(no tags yet)"))
+		b.WriteString("\n\n")
+	}
+
+	b.WriteString(inputStyle.Render("Tag: "))
 	cursor := ""
 	if m.tagQuery == "" {
 		cursor = "█"
