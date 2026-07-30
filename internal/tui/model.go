@@ -221,8 +221,10 @@ type Model struct {
 type tagState struct {
 	repo        string
 	sha         string
+	branch      string
 	latest      string
 	hasReleases bool
+	loading     bool
 }
 
 type tagMetaMsg struct {
@@ -909,16 +911,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.tagging = false
 				m.tagQuery = ""
 				if tag != "" {
-					return m, m.createTagRelease(m.tagMeta.repo, tag, m.tagMeta.sha)
+					return m, m.createTagRelease(m.tagMeta.repo, tag, m.tagMeta.sha, m.tagMeta.branch)
 				}
-			case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+o"))):
-				tag := strings.TrimSpace(m.tagQuery)
-				m.tagging = false
-				m.tagQuery = ""
-				if tag != "" {
-					url := fmt.Sprintf("https://github.com/%s/releases/new?tag=%s&target=%s", m.tagMeta.repo, url.QueryEscape(tag), m.tagMeta.sha)
-					openBrowser(url)
-				}
+		case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+o"))):
+			tag := strings.TrimSpace(m.tagQuery)
+			m.tagging = false
+			m.tagQuery = ""
+			if tag != "" {
+				url := fmt.Sprintf("https://github.com/%s/releases/new?tag=%s&target=%s&generate_release_notes=true", m.tagMeta.repo, url.QueryEscape(tag), m.tagMeta.branch)
+				openBrowser(url)
+			}
 			case key.Matches(msg, key.NewBinding(key.WithKeys("backspace"))):
 				if len(m.tagQuery) > 0 {
 					m.tagQuery = m.tagQuery[:len(m.tagQuery)-1]
@@ -1118,17 +1120,21 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if s.name == "Services" {
 					r := m.currentRow()
 					if r != nil && r.url == "" && r.sha != "" {
-var versioning string
-for _, svc := range m.cfg.Services {
-	if svc.Repo == r.repo {
-		versioning = svc.Versioning
-		break
-	}
-}
-		m.tagging = true
-		m.tagQuery = ""
-		m.tagMeta = tagState{repo: r.repo, sha: r.sha}
-		return m, m.fetchTagMetaCmd(r.repo, versioning)
+						var versioning, branch string
+						for _, svc := range m.cfg.Services {
+							if svc.Repo == r.repo {
+								versioning = svc.Versioning
+								branch = svc.Branch
+								break
+							}
+						}
+						if branch == "" {
+							branch = "main"
+						}
+						m.tagging = true
+						m.tagQuery = ""
+						m.tagMeta = tagState{repo: r.repo, sha: r.sha, branch: branch, loading: true}
+						return m, m.fetchTagMetaCmd(r.repo, versioning)
 					}
 				}
 			}
@@ -1247,6 +1253,7 @@ for _, svc := range m.cfg.Services {
 	case tagMetaMsg:
 		m.tagMeta.latest = msg.latest
 		m.tagMeta.hasReleases = msg.hasReleases
+		m.tagMeta.loading = false
 		if m.tagging && m.tagQuery == "" {
 			for _, svc := range m.cfg.Services {
 				if svc.Repo == m.tagMeta.repo && svc.Versioning == "sequential" {
@@ -1284,16 +1291,20 @@ func (m *Model) currentRow() *row {
 }
 
 func nextSequentialVersion(latest string) string {
+	if latest == "" {
+		return "v0.0.1"
+	}
 	prefix := ""
 	if strings.HasPrefix(strings.ToLower(latest), "v") {
 		prefix = "v"
 	}
 	trimmed := strings.TrimLeft(latest, "vV")
 	parts := strings.Split(trimmed, ".")
-	if len(parts) < 3 {
-		return ""
+	if len(parts) == 0 {
+		return prefix + "0.0.1"
 	}
-	n, err := strconv.Atoi(parts[len(parts)-1])
+	last := parts[len(parts)-1]
+	n, err := strconv.Atoi(last)
 	if err != nil {
 		return ""
 	}
@@ -1310,7 +1321,7 @@ func (m *Model) fetchTagMetaCmd(repo, versioning string) tea.Cmd {
 	}
 }
 
-func (m *Model) createTagRelease(repo, tag, sha string) tea.Cmd {
+func (m *Model) createTagRelease(repo, tag, sha, branch string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 		hasReleases, err := m.gh.RepoHasReleases(ctx, repo)
@@ -1318,7 +1329,7 @@ func (m *Model) createTagRelease(repo, tag, sha string) tea.Cmd {
 			return errorMsg(fmt.Sprintf("create tag/release: %v", err))
 		}
 		if hasReleases {
-			err = m.gh.CreateRelease(ctx, repo, tag, sha)
+			err = m.gh.CreateRelease(ctx, repo, tag, branch)
 		} else {
 			err = m.gh.CreateTag(ctx, repo, tag, sha)
 		}
@@ -1782,19 +1793,25 @@ func (m Model) renderHelpOverlay() string {
 func (m Model) renderTagInput() string {
 	var b strings.Builder
 
-	action := "Tag"
-	if m.tagMeta.hasReleases {
-		action = "Release"
-	}
-	b.WriteString(dialogTitle.Render("Create " + action))
-	b.WriteString("\n\n")
-
-	if m.tagMeta.latest != "" {
-		b.WriteString(helpKey.Render("Latest: " + m.tagMeta.latest))
+	if m.tagMeta.loading {
+		b.WriteString(dialogTitle.Render("Loading..."))
 		b.WriteString("\n\n")
+		b.WriteString(m.spin.View())
 	} else {
-		b.WriteString(helpKey.Render("(no tags yet)"))
+		action := "Tag"
+		if m.tagMeta.hasReleases {
+			action = "Release"
+		}
+		b.WriteString(dialogTitle.Render("Create " + action))
 		b.WriteString("\n\n")
+
+		if m.tagMeta.latest != "" {
+			b.WriteString(helpKey.Render("Latest: " + m.tagMeta.latest))
+			b.WriteString("\n\n")
+		} else {
+			b.WriteString(helpKey.Render("(no tags yet)"))
+			b.WriteString("\n\n")
+		}
 	}
 
 	b.WriteString(helpKey.Render("Tag: "))
