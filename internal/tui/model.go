@@ -265,7 +265,7 @@ func (m *Model) sectionProp(name string) (offset int, hideDrafts, showStarred, s
 			return s.scrollOffset, s.hideDrafts, s.showStarred, s.sortNewest, s.hideTeamReviews, s.statusFilter
 		}
 	}
-	return 0, false, false, true, false, ""
+	return 0, false, len(m.cfg.StarredRepos()) > 0, true, false, ""
 }
 
 func (m *Model) applyFilters() {
@@ -490,6 +490,8 @@ func (m *Model) loadFromCache() {
 			headSha: p.HeadSHA,
 		}
 		m.loadReviewState(&r)
+		s2.allRows = append(s2.allRows, r)
+		s2.rows = append(s2.rows, r)
 	}
 	sections = append(sections, s2)
 
@@ -1812,13 +1814,13 @@ func (m Model) renderTagInput() string {
 	}
 
 	b.WriteString(inputStyle.Render("Tag: "))
-	cursor := ""
-	if m.tagQuery == "" {
-		cursor = "█"
-	}
-	b.WriteString(inputStyle.Render(m.tagQuery + cursor))
+	b.WriteString(inputStyle.Render(m.tagQuery + "█"))
 	b.WriteString("\n\n")
 	b.WriteString(dialogHelp.Render("enter: create  ctrl+o: open in browser  esc: cancel"))
+	if m.tagMeta.hasReleases {
+		b.WriteString("\n")
+		b.WriteString(dialogHelp.Render("release notes will be generated"))
+	}
 
 	return dialogStyle.Render(b.String())
 }
