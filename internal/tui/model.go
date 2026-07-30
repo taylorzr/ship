@@ -31,9 +31,6 @@ var shipLog *log.Logger
 
 type errorMsg string
 type refreshMsg struct{}
-type tagMetaMsg struct {
-	latest string
-}
 
 func init() {
 	home, _ := os.UserHomeDir()
@@ -221,9 +218,15 @@ type Model struct {
 }
 
 type tagState struct {
-	repo   string
-	sha    string
-	latest string
+	repo        string
+	sha         string
+	latest      string
+	hasReleases bool
+}
+
+type tagMetaMsg struct {
+	latest      string
+	hasReleases bool
 }
 
 func New(cfg *config.Config, st *store.Store, ghClient *gh.Client, mockK8sImage string) Model {
@@ -907,6 +910,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if tag != "" {
 					return m, m.createTagRelease(m.tagMeta.repo, tag, m.tagMeta.sha)
 				}
+			case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+o"))):
+				tag := strings.TrimSpace(m.tagQuery)
+				m.tagging = false
+				m.tagQuery = ""
+				if tag != "" {
+					url := fmt.Sprintf("https://github.com/%s/releases/new?tag=%s&target=%s", m.tagMeta.repo, url.QueryEscape(tag), m.tagMeta.sha)
+					openBrowser(url)
+				}
 			case key.Matches(msg, key.NewBinding(key.WithKeys("backspace"))):
 				if len(m.tagQuery) > 0 {
 					m.tagQuery = m.tagQuery[:len(m.tagQuery)-1]
@@ -1113,10 +1124,10 @@ for _, svc := range m.cfg.Services {
 		break
 	}
 }
-m.tagging = true
-m.tagQuery = ""
-m.tagMeta = tagState{repo: r.repo, sha: r.sha}
-return m, m.fetchLatestTagCmd(r.repo, versioning)
+		m.tagging = true
+		m.tagQuery = ""
+		m.tagMeta = tagState{repo: r.repo, sha: r.sha}
+		return m, m.fetchTagMetaCmd(r.repo, versioning)
 					}
 				}
 			}
@@ -1234,6 +1245,7 @@ return m, m.fetchLatestTagCmd(r.repo, versioning)
 
 	case tagMetaMsg:
 		m.tagMeta.latest = msg.latest
+		m.tagMeta.hasReleases = msg.hasReleases
 		if m.tagging && m.tagQuery == "" {
 			for _, svc := range m.cfg.Services {
 				if svc.Repo == m.tagMeta.repo && svc.Versioning == "sequential" {
@@ -1288,14 +1300,18 @@ func nextSequentialVersion(latest string) string {
 	return prefix + strings.Join(parts, ".")
 }
 
-func (m *Model) fetchLatestTagCmd(repo, versioning string) tea.Cmd {
+func (m *Model) fetchTagMetaCmd(repo, versioning string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 		latest, err := m.gh.LatestTag(ctx, repo)
 		if err != nil {
 			return errorMsg(fmt.Sprintf("fetch latest tag: %v", err))
 		}
-		return tagMetaMsg{latest: latest}
+		hasReleases, err := m.gh.RepoHasReleases(ctx, repo)
+		if err != nil {
+			return errorMsg(fmt.Sprintf("check releases: %v", err))
+		}
+		return tagMetaMsg{latest: latest, hasReleases: hasReleases}
 	}
 }
 
@@ -1771,11 +1787,18 @@ func (m Model) renderHelpOverlay() string {
 func (m Model) renderTagInput() string {
 	var b strings.Builder
 
-	b.WriteString(dialogTitle.Render("Create Tag/Release"))
+	action := "Tag"
+	if m.tagMeta.hasReleases {
+		action = "Release"
+	}
+	b.WriteString(dialogTitle.Render("Create " + action))
 	b.WriteString("\n\n")
 
 	if m.tagMeta.latest != "" {
 		b.WriteString(helpKey.Render("Latest: " + m.tagMeta.latest))
+		b.WriteString("\n\n")
+	} else {
+		b.WriteString(helpKey.Render("(no tags yet)"))
 		b.WriteString("\n\n")
 	}
 
@@ -1785,8 +1808,9 @@ func (m Model) renderTagInput() string {
 		cursor = "█"
 	}
 	b.WriteString(helpKey.Render(m.tagQuery + cursor))
+	b.WriteString("  ")
+	b.WriteString(dialogHelp.Render("enter: create  ctrl+o: open in browser  esc: cancel"))
 	b.WriteString("\n\n")
-	b.WriteString(dialogHelp.Render("enter to confirm, esc to cancel"))
 
 	return dialogStyle.Render(b.String())
 }
