@@ -403,7 +403,7 @@ func (m *Model) loadFromCache() {
 			if err := json.Unmarshal([]byte(v.UntaggedCommits), &commits); err == nil {
 				for _, c := range commits {
 					pr := row{
-						title:   fmt.Sprintf("%s %s", c.SHA, c.Message),
+						pending: fmt.Sprintf("%s %s", c.SHA[:7], c.Message),
 						repo:    v.Repo,
 						prodRef: v.ProdRef,
 						depth:   1,
