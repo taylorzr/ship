@@ -71,6 +71,7 @@ var (
 			Width(50)
 	dialogTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
 	dialogHelp  = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	inputStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
 )
 
 func (m *Model) maxVisibleRows() int {
@@ -1303,14 +1304,8 @@ func nextSequentialVersion(latest string) string {
 func (m *Model) fetchTagMetaCmd(repo, versioning string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
-		latest, err := m.gh.LatestTag(ctx, repo)
-		if err != nil {
-			return errorMsg(fmt.Sprintf("fetch latest tag: %v", err))
-		}
-		hasReleases, err := m.gh.RepoHasReleases(ctx, repo)
-		if err != nil {
-			return errorMsg(fmt.Sprintf("check releases: %v", err))
-		}
+		latest, _ := m.gh.LatestTag(ctx, repo)
+		hasReleases, _ := m.gh.RepoHasReleases(ctx, repo)
 		return tagMetaMsg{latest: latest, hasReleases: hasReleases}
 	}
 }
@@ -1807,10 +1802,9 @@ func (m Model) renderTagInput() string {
 	if m.tagQuery == "" {
 		cursor = "█"
 	}
-	b.WriteString(helpKey.Render(m.tagQuery + cursor))
-	b.WriteString("  ")
-	b.WriteString(dialogHelp.Render("enter: create  ctrl+o: open in browser  esc: cancel"))
+	b.WriteString(inputStyle.Render(m.tagQuery + cursor))
 	b.WriteString("\n\n")
+	b.WriteString(dialogHelp.Render("enter: create  ctrl+o: open in browser  esc: cancel"))
 
 	return dialogStyle.Render(b.String())
 }

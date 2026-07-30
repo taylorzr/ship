@@ -637,16 +637,15 @@ func (c *Client) ToggleDraft(ctx context.Context, repo string, number int, isDra
 }
 
 func (c *Client) LatestTag(ctx context.Context, repo string) (string, error) {
-	out, err := exec.CommandContext(ctx, "gh", "tag", "list",
-		"-R", repo,
-		"--sort", "-version:refname",
-		"--limit", "1",
+	out, err := exec.CommandContext(ctx, "gh", "api",
+		fmt.Sprintf("repos/%s/tags?per_page=1", repo),
+		"--jq", ".[0].name",
 	).CombinedOutput()
 	if err != nil {
 		return "", fmt.Errorf("latest tag: %w", err)
 	}
 	tag := strings.TrimSpace(string(out))
-	if tag == "" {
+	if tag == "" || tag == "null" {
 		return "", nil
 	}
 	return tag, nil
