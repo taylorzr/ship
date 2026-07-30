@@ -147,9 +147,9 @@ var keys = keyMap{
 	DraftToggle: key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "toggle draft")),
 	Refresh:     key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
 	Quit:        key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
-	FilterStarred: key.NewBinding(key.WithKeys("*"), key.WithHelp("*", "toggle starred")),
-	SortToggle:    key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "toggle sort")),
-	Search:        key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "filter")),
+	FilterStarred: key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "toggle starred")),
+	SortToggle:    key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "toggle age-sort")),
+	Search:        key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "search")),
 	Diff:          key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "toggle drafts/diff")),
 	Deploy:        key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "ship")),
 	TeamFilter:    key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "toggle team")),
@@ -203,7 +203,7 @@ func New(cfg *config.Config, st *store.Store, ghClient *gh.Client, mockK8sImage 
 	loading := map[string]bool{
 		"My PRs":       false,
 		"To Review":    false,
-		"Releases":     false,
+		"Services":     false,
 		"Dependencies": false,
 	}
 	if len(cfg.GitHub.ReviewTeams) > 0 {
@@ -323,8 +323,8 @@ func (m *Model) loadFromCache() {
 		svcNames[svc.Repo] = svc.Name
 		svcRepos[svc.Repo] = true
 	}
-	so, hd, ss, sn, _, _ = m.sectionProp("Releases")
-	s3 := section{name: "Releases", scrollOffset: so, hideDrafts: hd, showStarred: ss, sortNewest: sn}
+	so, hd, ss, sn, _, _ = m.sectionProp("Services")
+	s3 := section{name: "Services", scrollOffset: so, hideDrafts: hd, showStarred: ss, sortNewest: sn}
 	for _, v := range versions {
 		if !svcRepos[v.Repo] {
 			continue
@@ -776,7 +776,7 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 				shipLog.Printf("Releases: %d services ok (%v)", len(m.cfg.Services), total)
 			}
 		}
-		return refreshDoneMsg{source: "Releases", err: lastErr}
+		return refreshDoneMsg{source: "Services", err: lastErr}
 	}
 }
 
@@ -883,7 +883,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case key.Matches(msg, keys.Diff):
 			switch m.sections[m.sectionIdx].name {
-			case "Releases":
+			case "Services":
 				r := m.currentRow()
 				if r != nil && r.repo != "" && r.prodRef != "" {
 					var url string
@@ -909,7 +909,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			default:
 				if len(m.sections) > m.sectionIdx {
 					s := m.sections[m.sectionIdx]
-					if s.name != "Releases" {
+					if s.name != "Services" {
 						s.hideDrafts = !s.hideDrafts
 						m.sections[m.sectionIdx] = s
 						m.applyFilters()
@@ -925,7 +925,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.applyFilters()
 			}
 		case key.Matches(msg, keys.MergeFilter):
-			if m.sections[m.sectionIdx].name != "Releases" {
+			if m.sections[m.sectionIdx].name != "Services" {
 				s := m.sections[m.sectionIdx]
 				if s.statusFilter == "mergeable" {
 					s.statusFilter = ""
@@ -936,7 +936,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.applyFilters()
 			}
 		case key.Matches(msg, keys.Deploy):
-			if m.sections[m.sectionIdx].name == "Releases" {
+			if m.sections[m.sectionIdx].name == "Services" {
 				r := m.currentRow()
 				if r != nil && r.repo != "" {
 					for _, svc := range m.cfg.Services {
@@ -997,7 +997,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.FilterStarred):
 			if len(m.sections) > m.sectionIdx {
 				s := m.sections[m.sectionIdx]
-				if s.name != "Releases" {
+				if s.name != "Services" {
 					s.showStarred = !s.showStarred
 					m.sections[m.sectionIdx] = s
 					m.applyFilters()
@@ -1007,7 +1007,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.SortToggle):
 			if len(m.sections) > m.sectionIdx {
 				s := m.sections[m.sectionIdx]
-				if s.name != "Releases" {
+				if s.name != "Services" {
 					s.sortNewest = !s.sortNewest
 					m.sections[m.sectionIdx] = s
 					m.applyFilters()
@@ -1132,7 +1132,7 @@ func (m Model) View() string {
 	var globalIdx int
 	var b strings.Builder
 
-	b.WriteString(titleStyle.Render("ship"))
+	b.WriteString(titleStyle.Render("·································🚀"))
 	b.WriteString("\n")
 
 	for i, s := range m.sections {
@@ -1191,7 +1191,7 @@ func (m Model) View() string {
 		if i == m.sectionIdx {
 			var actions string
 			switch s.name {
-			case "Releases":
+			case "Services":
 				actions = helpKey.Render("d:") + " " + helpKey.Render("diff")
 				if r := m.currentRow(); r != nil && r.repo != "" {
 					for _, svc := range m.cfg.Services {
@@ -1212,9 +1212,9 @@ func (m Model) View() string {
 					"  " + helpKey.Render("C:") + " " + helpKey.Render("close") +
 					"  |  " + helpKey.Render("m:") + " " + helpKey.Render("mergeable") +
 					"  " + helpKey.Render("d:") + " " + helpKey.Render("drafts") +
-					"  " + helpKey.Render("*:") + " " + helpKey.Render("starred") +
-					"  " + helpKey.Render("s:") + " " + helpKey.Render("sort") +
-					"  " + helpKey.Render("/:") + " " + helpKey.Render("filter")
+					"  " + helpKey.Render("s:") + " " + helpKey.Render("starred") +
+					"  " + helpKey.Render("a:") + " " + helpKey.Render("age-sort") +
+					"  " + helpKey.Render("/:") + " " + helpKey.Render("search")
 			case "To Review", "Team Review":
 				draftLabel := "draft"
 				if r := m.currentRow(); r != nil && r.draft {
@@ -1230,9 +1230,9 @@ func (m Model) View() string {
 					"  |  " + helpKey.Render("m:") + " " + helpKey.Render("mergeable") +
 					"  " + helpKey.Render("t:") + " " + helpKey.Render(teamLabel) +
 					"  " + helpKey.Render("d:") + " " + helpKey.Render("drafts") +
-					"  " + helpKey.Render("*:") + " " + helpKey.Render("starred") +
-					"  " + helpKey.Render("s:") + " " + helpKey.Render("sort") +
-					"  " + helpKey.Render("/:") + " " + helpKey.Render("filter")
+					"  " + helpKey.Render("s:") + " " + helpKey.Render("starred") +
+					"  " + helpKey.Render("a:") + " " + helpKey.Render("age-sort") +
+					"  " + helpKey.Render("/:") + " " + helpKey.Render("search")
 			}
 			b.WriteString(actions)
 			b.WriteString("\n")
