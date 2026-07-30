@@ -635,3 +635,55 @@ func (c *Client) ToggleDraft(ctx context.Context, repo string, number int, isDra
 	}
 	return nil
 }
+
+func (c *Client) LatestTag(ctx context.Context, repo string) (string, error) {
+	out, err := exec.CommandContext(ctx, "gh", "tag", "list",
+		"-R", repo,
+		"--sort", "-version:refname",
+		"--limit", "1",
+	).CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("latest tag: %w", err)
+	}
+	tag := strings.TrimSpace(string(out))
+	if tag == "" {
+		return "", nil
+	}
+	return tag, nil
+}
+
+func (c *Client) RepoHasReleases(ctx context.Context, repo string) (bool, error) {
+	out, err := exec.CommandContext(ctx, "gh", "api",
+		fmt.Sprintf("repos/%s/releases?per_page=1", repo),
+		"--jq", "length",
+	).CombinedOutput()
+	if err != nil {
+		return false, fmt.Errorf("check releases: %w", err)
+	}
+	return strings.TrimSpace(string(out)) != "0", nil
+}
+
+func (c *Client) CreateRelease(ctx context.Context, repo, tag, sha string) error {
+	out, err := exec.CommandContext(ctx, "gh", "release", "create", tag,
+		"--target", sha,
+		"--generate-notes",
+		"-R", repo,
+	).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("create release: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}
+
+func (c *Client) CreateTag(ctx context.Context, repo, tag, sha string) error {
+	out, err := exec.CommandContext(ctx, "gh", "api",
+		fmt.Sprintf("repos/%s/git/refs", repo),
+		"-X", "POST",
+		"-f", fmt.Sprintf("ref=refs/tags/%s", tag),
+		"-f", fmt.Sprintf("sha=%s", sha),
+	).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("create tag: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return nil
+}

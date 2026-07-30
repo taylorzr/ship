@@ -43,6 +43,7 @@ type ServiceConfig struct {
 	Workload        string `toml:"workload"`
 	VersionStrategy string `toml:"version_strategy"`
 	VersionKey      string `toml:"version_key"`
+	Versioning      string `toml:"versioning"`
 	DeployURL       string `toml:"deploy_url"`
 	Branch          string `toml:"branch"`
 	SkipUntagged    bool   `toml:"skip_untagged"`

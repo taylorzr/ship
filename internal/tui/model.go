@@ -10,6 +10,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -27,6 +28,12 @@ import (
 )
 
 var shipLog *log.Logger
+
+type errorMsg string
+type refreshMsg struct{}
+type tagMetaMsg struct {
+	latest string
+}
 
 func init() {
 	home, _ := os.UserHomeDir()
@@ -100,6 +107,7 @@ type row struct {
 	mergeable string
 	name      string // display name (releases section)
 	pending   string // pending versions (releases section)
+	sha       string // commit SHA
 	updatedAt string // RFC 3339 timestamp
 	depth     int    // nesting level for releases section
 	prodRef   string // prod tag/SHA for compare URLs
@@ -142,6 +150,7 @@ type keyMap struct {
 	AIReview      key.Binding
 	Browse        key.Binding
 	HelpToggle    key.Binding
+	TagAction     key.Binding
 }
 
 var keys = keyMap{
@@ -165,6 +174,7 @@ var keys = keyMap{
 	AIReview:      key.NewBinding(key.WithKeys("A"), key.WithHelp("A", "AI-review")),
 	Browse:        key.NewBinding(key.WithKeys("B"), key.WithHelp("B", "browse on GitHub")),
 	HelpToggle:    key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
+	TagAction:     key.NewBinding(key.WithKeys("T"), key.WithHelp("T", "tag/release")),
 }
 
 type refreshDoneMsg struct {
@@ -202,9 +212,18 @@ type Model struct {
 	sectionIdx    int
 	searching     bool
 	searchQuery   string
+	tagging       bool
+	tagQuery      string
+	tagMeta       tagState
 	showHelp      bool
 	gPending      bool
 	mockK8sImage  string
+}
+
+type tagState struct {
+	repo   string
+	sha    string
+	latest string
 }
 
 func New(cfg *config.Config, st *store.Store, ghClient *gh.Client, mockK8sImage string) Model {
@@ -403,6 +422,7 @@ func (m *Model) loadFromCache() {
 			if err := json.Unmarshal([]byte(v.UntaggedCommits), &commits); err == nil {
 				for _, c := range commits {
 					pr := row{
+						sha:     c.SHA[:7],
 						pending: fmt.Sprintf("%s %s", c.SHA[:7], c.Message),
 						repo:    v.Repo,
 						prodRef: v.ProdRef,
@@ -874,6 +894,31 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if m.tagging {
+			m.gPending = false
+			switch {
+			case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
+				m.tagging = false
+				m.tagQuery = ""
+			case key.Matches(msg, keys.Enter):
+				tag := strings.TrimSpace(m.tagQuery)
+				m.tagging = false
+				m.tagQuery = ""
+				if tag != "" {
+					return m, m.createTagRelease(m.tagMeta.repo, tag, m.tagMeta.sha)
+				}
+			case key.Matches(msg, key.NewBinding(key.WithKeys("backspace"))):
+				if len(m.tagQuery) > 0 {
+					m.tagQuery = m.tagQuery[:len(m.tagQuery)-1]
+				}
+			default:
+				r := []rune(msg.String())
+				if len(r) == 1 && r[0] >= 32 && r[0] <= 126 {
+					m.tagQuery += string(r[0])
+				}
+			}
+			return m, nil
+		}
 		switch {
 		case key.Matches(msg, keys.Quit):
 			return m, tea.Quit
@@ -1055,6 +1100,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case key.Matches(msg, keys.Browse):
 			m.openBrowse()
+		case key.Matches(msg, keys.TagAction):
+			if len(m.sections) > m.sectionIdx {
+				s := m.sections[m.sectionIdx]
+				if s.name == "Services" {
+					r := m.currentRow()
+					if r != nil && r.url == "" && r.sha != "" {
+var versioning string
+for _, svc := range m.cfg.Services {
+	if svc.Repo == r.repo {
+		versioning = svc.Versioning
+		break
+	}
+}
+m.tagging = true
+m.tagQuery = ""
+m.tagMeta = tagState{repo: r.repo, sha: r.sha}
+return m, m.fetchLatestTagCmd(r.repo, versioning)
+					}
+				}
+			}
+			return m, nil
 		case key.Matches(msg, keys.Refresh):
 			m.sectionErrs = map[string]string{}
 			for k := range m.loading {
@@ -1165,6 +1231,17 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.loading[k] = true
 		}
 		return m, m.fullRefreshCmd()
+
+	case tagMetaMsg:
+		m.tagMeta.latest = msg.latest
+		if m.tagging && m.tagQuery == "" {
+			for _, svc := range m.cfg.Services {
+				if svc.Repo == m.tagMeta.repo && svc.Versioning == "sequential" {
+					suggest := nextSequentialVersion(msg.latest)
+					m.tagQuery = suggest
+				}
+			}
+		}
 	}
 
 	return m, nil
@@ -1191,6 +1268,54 @@ func (m *Model) currentRow() *row {
 		remaining -= len(s.rows)
 	}
 	return nil
+}
+
+func nextSequentialVersion(latest string) string {
+	prefix := ""
+	if strings.HasPrefix(strings.ToLower(latest), "v") {
+		prefix = "v"
+	}
+	trimmed := strings.TrimLeft(latest, "vV")
+	parts := strings.Split(trimmed, ".")
+	if len(parts) < 3 {
+		return ""
+	}
+	n, err := strconv.Atoi(parts[len(parts)-1])
+	if err != nil {
+		return ""
+	}
+	parts[len(parts)-1] = strconv.Itoa(n + 1)
+	return prefix + strings.Join(parts, ".")
+}
+
+func (m *Model) fetchLatestTagCmd(repo, versioning string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		latest, err := m.gh.LatestTag(ctx, repo)
+		if err != nil {
+			return errorMsg(fmt.Sprintf("fetch latest tag: %v", err))
+		}
+		return tagMetaMsg{latest: latest}
+	}
+}
+
+func (m *Model) createTagRelease(repo, tag, sha string) tea.Cmd {
+	return func() tea.Msg {
+		ctx := context.Background()
+		hasReleases, err := m.gh.RepoHasReleases(ctx, repo)
+		if err != nil {
+			return errorMsg(fmt.Sprintf("create tag/release: %v", err))
+		}
+		if hasReleases {
+			err = m.gh.CreateRelease(ctx, repo, tag, sha)
+		} else {
+			err = m.gh.CreateTag(ctx, repo, tag, sha)
+		}
+		if err != nil {
+			return errorMsg(err.Error())
+		}
+		return refreshMsg{}
+	}
 }
 
 func (m Model) View() string {
@@ -1426,6 +1551,17 @@ func (m Model) View() string {
 
 	content := b.String()
 
+	if m.tagging {
+		tagDlg := m.renderTagInput()
+		if m.width > 0 && m.height > 0 {
+			content = lipgloss.Place(m.width, m.height,
+				lipgloss.Center, lipgloss.Center,
+				tagDlg)
+		} else {
+			content = strings.Repeat("\n", 5) + tagDlg
+		}
+	}
+
 	if m.showHelp {
 		help := m.renderHelpOverlay()
 		if m.width > 0 && m.height > 0 {
@@ -1614,7 +1750,8 @@ func (m Model) renderHelpOverlay() string {
 				"  " + helpKey.Render("/:") + " " + helpKey.Render("search"))
 		case "Services":
 			b.WriteString(helpKey.Render("B:") + " " + helpKey.Render("browse") +
-				"  " + helpKey.Render("d:") + " " + helpKey.Render("diff"))
+				"  " + helpKey.Render("d:") + " " + helpKey.Render("diff") +
+				"  " + helpKey.Render("T:") + " " + helpKey.Render("tag"))
 			if r := m.currentRow(); r != nil && r.repo != "" {
 				for _, svc := range m.cfg.Services {
 					if svc.Repo == r.repo && svc.DeployURL != "" {
@@ -1628,6 +1765,29 @@ func (m Model) renderHelpOverlay() string {
 
 	b.WriteString("\n\n")
 	b.WriteString(dialogHelp.Render("? or esc to close"))
+	return dialogStyle.Render(b.String())
+}
+
+func (m Model) renderTagInput() string {
+	var b strings.Builder
+
+	b.WriteString(dialogTitle.Render("Create Tag/Release"))
+	b.WriteString("\n\n")
+
+	if m.tagMeta.latest != "" {
+		b.WriteString(helpKey.Render("Latest: " + m.tagMeta.latest))
+		b.WriteString("\n\n")
+	}
+
+	b.WriteString(helpKey.Render("Tag: "))
+	cursor := ""
+	if m.tagQuery == "" {
+		cursor = "█"
+	}
+	b.WriteString(helpKey.Render(m.tagQuery + cursor))
+	b.WriteString("\n\n")
+	b.WriteString(dialogHelp.Render("enter to confirm, esc to cancel"))
+
 	return dialogStyle.Render(b.String())
 }
 
