@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"log"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -22,6 +23,7 @@ import (
 	"github.com/zach/ship/internal/k8s"
 	"github.com/zach/ship/internal/store"
 	"github.com/zach/ship/internal/version"
+	"github.com/zach/ship/internal/ai"
 )
 
 var shipLog *log.Logger
@@ -102,6 +104,9 @@ type row struct {
 	depth     int    // nesting level for releases section
 	prodRef   string // prod tag/SHA for compare URLs
 	role      string // review role ("review-direct" or "review-team")
+	reviewed  bool   // AI review dispatched
+	reviewStale bool // AI review exists but head SHA changed
+	headSha   string // PR head SHA for stale check
 }
 
 type section struct {
@@ -134,6 +139,9 @@ type keyMap struct {
 	Deploy        key.Binding
 	TeamFilter    key.Binding
 	MergeFilter   key.Binding
+	AIReview      key.Binding
+	Browse        key.Binding
+	HelpToggle    key.Binding
 }
 
 var keys = keyMap{
@@ -154,6 +162,9 @@ var keys = keyMap{
 	Deploy:        key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "ship")),
 	TeamFilter:    key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "toggle team")),
 	MergeFilter:   key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "toggle mergeable")),
+	AIReview:      key.NewBinding(key.WithKeys("A"), key.WithHelp("A", "AI-review")),
+	Browse:        key.NewBinding(key.WithKeys("B"), key.WithHelp("B", "browse on GitHub")),
+	HelpToggle:    key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 }
 
 type refreshDoneMsg struct {
@@ -191,6 +202,7 @@ type Model struct {
 	sectionIdx    int
 	searching     bool
 	searchQuery   string
+	showHelp      bool
 	gPending      bool
 	mockK8sImage  string
 }
@@ -293,6 +305,16 @@ func (m *Model) applyFilters() {
 	}
 }
 
+func (m *Model) loadReviewState(r *row) {
+	storedSha, _, _ := m.store.LoadReview(r.repo, r.num)
+	if storedSha != "" {
+		r.reviewed = true
+		if storedSha != r.headSha {
+			r.reviewStale = true
+		}
+	}
+}
+
 func (m *Model) loadFromCache() {
 	var sections []section
 
@@ -310,7 +332,9 @@ func (m *Model) loadFromCache() {
 				draft:  p.IsDraft,
 			updatedAt: p.UpdatedAt,
 			mergeable: p.Mergeable,
+			headSha: p.HeadSHA,
 		}
+		m.loadReviewState(&r)
 		s.allRows = append(s.allRows, r)
 		s.rows = append(s.rows, r)
 		}
@@ -414,7 +438,9 @@ func (m *Model) loadFromCache() {
 			updatedAt: p.UpdatedAt,
 			mergeable: p.Mergeable,
 			role:     "review-direct",
+			headSha: p.HeadSHA,
 		}
+		m.loadReviewState(&r)
 		s2.allRows = append(s2.allRows, r)
 		s2.rows = append(s2.rows, r)
 	}
@@ -435,9 +461,9 @@ func (m *Model) loadFromCache() {
 			updatedAt: p.UpdatedAt,
 			mergeable: p.Mergeable,
 			role:     "review-team",
+			headSha: p.HeadSHA,
 		}
-		s2.allRows = append(s2.allRows, r)
-		s2.rows = append(s2.rows, r)
+		m.loadReviewState(&r)
 	}
 	sections = append(sections, s2)
 
@@ -455,7 +481,9 @@ func (m *Model) loadFromCache() {
 			draft:  p.IsDraft,
 			updatedAt: p.UpdatedAt,
 			mergeable: p.Mergeable,
+			headSha: p.HeadSHA,
 		}
+		m.loadReviewState(&r)
 		s4.allRows = append(s4.allRows, r)
 		s4.rows = append(s4.rows, r)
 	}
@@ -988,6 +1016,45 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.confirm = &confirmAction{action: "draft-toggle", repo: r.repo, num: r.num, title: r.title, draft: r.draft}
 				}
 			}
+		case key.Matches(msg, keys.AIReview):
+			r := m.currentRow()
+			if r != nil && r.num > 0 {
+				bg := context.Background()
+				headSha, err := m.gh.GetHeadSha(bg, r.repo, r.num)
+				if err != nil {
+					m.sectionErrs[m.sections[m.sectionIdx].name] = fmt.Sprintf("AI review: %v", err)
+					break
+				}
+				cmd := m.cfg.AI.ReviewCommand
+				if cmd == "" {
+					cmd = m.cfg.AI.ReviewProvider
+				}
+				if cmd == "" {
+					cmd = "claude"
+				}
+				if err := ai.LaunchReview(r.repo, r.num, cmd); err != nil {
+					m.sectionErrs[m.sections[m.sectionIdx].name] = fmt.Sprintf("AI review: %v", err)
+					break
+				}
+				m.store.SaveReview(r.repo, r.num, headSha)
+				// update row in-place
+				for i := range m.sections {
+					for j := range m.sections[i].allRows {
+						if m.sections[i].allRows[j].num == r.num && m.sections[i].allRows[j].repo == r.repo {
+							m.sections[i].allRows[j].reviewed = true
+							m.sections[i].allRows[j].headSha = headSha
+						}
+					}
+					for j := range m.sections[i].rows {
+						if m.sections[i].rows[j].num == r.num && m.sections[i].rows[j].repo == r.repo {
+							m.sections[i].rows[j].reviewed = true
+							m.sections[i].rows[j].headSha = headSha
+						}
+					}
+				}
+			}
+		case key.Matches(msg, keys.Browse):
+			m.openBrowse()
 		case key.Matches(msg, keys.Refresh):
 			m.sectionErrs = map[string]string{}
 			for k := range m.loading {
@@ -1046,7 +1113,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.searching = true
 			m.searchQuery = ""
 			return m, nil
+		case key.Matches(msg, keys.HelpToggle):
+			m.showHelp = !m.showHelp
+			return m, nil
 		case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
+			if m.showHelp {
+				m.showHelp = false
+				return m, nil
+			}
 			if m.searchQuery != "" {
 				m.searchQuery = ""
 				m.applyFilters()
@@ -1137,6 +1211,13 @@ func (m Model) View() string {
 
 	for i, s := range m.sections {
 		headerText := s.name
+		if len(s.allRows) > 0 && s.allRows[0].num > 0 {
+			if len(s.rows) == len(s.allRows) {
+				headerText += fmt.Sprintf(" (%d)", len(s.rows))
+			} else {
+				headerText += fmt.Sprintf(" (%d/%d)", len(s.rows), len(s.allRows))
+			}
+		}
 		if i == m.sectionIdx {
 			headerText = "▸ " + headerText
 			b.WriteString(sectionStyle.Copy().Foreground(lipgloss.Color("212")).Render(headerText))
@@ -1187,54 +1268,10 @@ func (m Model) View() string {
 			}
 		}
 
-		// section-specific action hints
-		if i == m.sectionIdx {
-			var actions string
-			switch s.name {
-			case "Services":
-				actions = helpKey.Render("d:") + " " + helpKey.Render("diff")
-				if r := m.currentRow(); r != nil && r.repo != "" {
-					for _, svc := range m.cfg.Services {
-						if svc.Repo == r.repo && svc.DeployURL != "" {
-							actions = helpKey.Render("S:") + " " + helpKey.Render("ship") +
-								"  " + actions
-							break
-						}
-					}
-				}
-			case "My PRs", "Dependencies":
-				draftLabel := "draft"
-				if r := m.currentRow(); r != nil && r.draft {
-					draftLabel = "ready"
-				}
-				actions = helpKey.Render("R:") + " " + helpKey.Render(draftLabel) +
-					"  " + helpKey.Render("M:") + " " + helpKey.Render("merge") +
-					"  " + helpKey.Render("C:") + " " + helpKey.Render("close") +
-					"  |  " + helpKey.Render("m:") + " " + helpKey.Render("mergeable") +
-					"  " + helpKey.Render("d:") + " " + helpKey.Render("drafts") +
-					"  " + helpKey.Render("s:") + " " + helpKey.Render("starred") +
-					"  " + helpKey.Render("a:") + " " + helpKey.Render("age-sort") +
-					"  " + helpKey.Render("/:") + " " + helpKey.Render("search")
-			case "To Review", "Team Review":
-				draftLabel := "draft"
-				if r := m.currentRow(); r != nil && r.draft {
-					draftLabel = "ready"
-				}
-				teamLabel := "team"
-				if m.sections[m.sectionIdx].hideTeamReviews {
-					teamLabel = "mine"
-				}
-				actions = helpKey.Render("R:") + " " + helpKey.Render(draftLabel) +
-					"  " + helpKey.Render("M:") + " " + helpKey.Render("merge") +
-					"  " + helpKey.Render("C:") + " " + helpKey.Render("close") +
-					"  |  " + helpKey.Render("m:") + " " + helpKey.Render("mergeable") +
-					"  " + helpKey.Render("t:") + " " + helpKey.Render(teamLabel) +
-					"  " + helpKey.Render("d:") + " " + helpKey.Render("drafts") +
-					"  " + helpKey.Render("s:") + " " + helpKey.Render("starred") +
-					"  " + helpKey.Render("a:") + " " + helpKey.Render("age-sort") +
-					"  " + helpKey.Render("/:") + " " + helpKey.Render("search")
-			}
-			b.WriteString(actions)
+		// empty section indicator (PR sections only)
+		if len(s.rows) == 0 && !m.loading[s.name] && s.name != "Services" && s.name != "Releases" {
+			b.WriteString("  ")
+			b.WriteString(helpKey.Render("- no results -"))
 			b.WriteString("\n")
 		}
 
@@ -1255,7 +1292,7 @@ func (m Model) View() string {
 				titleWidth = 1
 			}
 			header := fmt.Sprintf("%s%s  %s  %s  %s",
-				padWidth("CI Rev", 8),
+				padWidth("CI Rev", 10),
 				padWidth("Repo", repoWidth),
 				padWidth("#", 6),
 				padWidth("Title", titleWidth),
@@ -1387,7 +1424,20 @@ func (m Model) View() string {
 	b.WriteString("\n")
 	b.WriteString(m.viewHelp())
 
-	return b.String()
+	content := b.String()
+
+	if m.showHelp {
+		help := m.renderHelpOverlay()
+		if m.width > 0 && m.height > 0 {
+			content = lipgloss.Place(m.width, m.height,
+				lipgloss.Center, lipgloss.Center,
+				help)
+		} else {
+			content = strings.Repeat("\n", 5) + help
+		}
+	}
+
+	return content
 }
 
 func truncateWidth(s string, max int) string {
@@ -1448,6 +1498,13 @@ func relativeTime(s string) string {
 }
 
 func renderRow(r row, selected bool, repoWidth, maxWidth int) string {
+	aiIcon := ""
+	if r.reviewed && !r.reviewStale {
+		aiIcon = "✦"
+	} else if r.reviewed && r.reviewStale {
+		aiIcon = "✧"
+	}
+
 	icon := ciIcon(r.ci)
 
 	rev := ""
@@ -1457,7 +1514,11 @@ func renderRow(r row, selected bool, repoWidth, maxWidth int) string {
 		rev = "·"
 	}
 
-	left := icon + "  " + rev
+	left := aiIcon
+	if left != "" {
+		left += " "
+	}
+	left += icon + "  " + rev
 
 	const ageWidth = 6
 
@@ -1474,7 +1535,7 @@ func renderRow(r row, selected bool, repoWidth, maxWidth int) string {
 			titleWidth = 1
 		}
 		line = fmt.Sprintf("%s%s  #%-5d  %s  %s",
-			padWidth(left, 8), padWidth(repo, repoWidth), r.num, padWidth(truncateWidth(title, titleWidth), titleWidth), padWidth(ts, ageWidth))
+			padWidth(left, 10), padWidth(repo, repoWidth), r.num, padWidth(truncateWidth(title, titleWidth), titleWidth), padWidth(ts, ageWidth))
 	} else {
 		line = r.title
 		if maxWidth > 0 {
@@ -1489,16 +1550,85 @@ func renderRow(r row, selected bool, repoWidth, maxWidth int) string {
 }
 
 func (m Model) viewHelp() string {
-	line := helpKey.Render("j/k/tab/⇧+tab:") + " " + helpKey.Render("nav") +
+	line := helpKey.Render("ship")
+	if !m.lastRefreshed.IsZero() {
+		line += helpKey.Render(" (refresh in " + refreshCountdown(m.lastRefreshed, m.cfg.RefreshInterval) + ")")
+	}
+	line += "  " + helpKey.Render("?:") + " " + helpKey.Render("help")
+	return line
+}
+
+func (m Model) renderHelpOverlay() string {
+	var b strings.Builder
+
+	b.WriteString(dialogTitle.Render("Keys"))
+	b.WriteString("\n\n")
+
+	nav := helpKey.Render("j/k/tab/⇧+tab:") + " " + helpKey.Render("nav") +
 		"  " + helpKey.Render("gg:") + " " + helpKey.Render("top") +
 		"  " + helpKey.Render("G:") + " " + helpKey.Render("bottom") +
-		"  |  " + helpKey.Render("enter:") + " " + helpKey.Render("open") +
-		"  " + helpKey.Render("r:") + " " + helpKey.Render("refresh")
-	if !m.lastRefreshed.IsZero() {
-		line += helpKey.Render(" (in " + refreshCountdown(m.lastRefreshed, m.cfg.RefreshInterval) + ")")
+		"  " + helpKey.Render("enter:") + " " + helpKey.Render("open") +
+		"  " + helpKey.Render("B:") + " " + helpKey.Render("browse") +
+		"  " + helpKey.Render("r:") + " " + helpKey.Render("refresh") +
+		"  " + helpKey.Render("q:") + " " + helpKey.Render("quit")
+	b.WriteString(nav)
+	b.WriteString("\n\n")
+
+	if len(m.sections) > m.sectionIdx {
+		s := m.sections[m.sectionIdx]
+		switch s.name {
+		case "My PRs", "Dependencies":
+			draftLabel := "draft"
+			if r := m.currentRow(); r != nil && r.draft {
+				draftLabel = "ready"
+			}
+			b.WriteString(helpKey.Render("actions >") + " " + helpKey.Render("R:") + " " + helpKey.Render(draftLabel) +
+				"  " + helpKey.Render("M:") + " " + helpKey.Render("merge") +
+				"  " + helpKey.Render("C:") + " " + helpKey.Render("close") +
+				"  " + helpKey.Render("A:") + " " + helpKey.Render("AI-review"))
+			b.WriteString("\n")
+			b.WriteString(helpKey.Render("filters >") + " " + helpKey.Render("m:") + " " + helpKey.Render("mergeable") +
+				"  " + helpKey.Render("d:") + " " + helpKey.Render("drafts") +
+				"  " + helpKey.Render("s:") + " " + helpKey.Render("starred") +
+				"  " + helpKey.Render("a:") + " " + helpKey.Render("age-sort") +
+				"  " + helpKey.Render("/:") + " " + helpKey.Render("search"))
+		case "To Review", "Team Review":
+			draftLabel := "draft"
+			if r := m.currentRow(); r != nil && r.draft {
+				draftLabel = "ready"
+			}
+			teamLabel := "team"
+			if s.hideTeamReviews {
+				teamLabel = "mine"
+			}
+			b.WriteString(helpKey.Render("actions >") + " " + helpKey.Render("R:") + " " + helpKey.Render(draftLabel) +
+				"  " + helpKey.Render("M:") + " " + helpKey.Render("merge") +
+				"  " + helpKey.Render("C:") + " " + helpKey.Render("close") +
+				"  " + helpKey.Render("A:") + " " + helpKey.Render("AI-review"))
+			b.WriteString("\n")
+			b.WriteString(helpKey.Render("filters >") + " " + helpKey.Render("m:") + " " + helpKey.Render("mergeable") +
+				"  " + helpKey.Render("t:") + " " + helpKey.Render(teamLabel) +
+				"  " + helpKey.Render("d:") + " " + helpKey.Render("drafts") +
+				"  " + helpKey.Render("s:") + " " + helpKey.Render("starred") +
+				"  " + helpKey.Render("a:") + " " + helpKey.Render("age-sort") +
+				"  " + helpKey.Render("/:") + " " + helpKey.Render("search"))
+		case "Services":
+			b.WriteString(helpKey.Render("B:") + " " + helpKey.Render("browse") +
+				"  " + helpKey.Render("d:") + " " + helpKey.Render("diff"))
+			if r := m.currentRow(); r != nil && r.repo != "" {
+				for _, svc := range m.cfg.Services {
+					if svc.Repo == r.repo && svc.DeployURL != "" {
+						b.WriteString("  " + helpKey.Render("S:") + " " + helpKey.Render("ship"))
+						break
+					}
+				}
+			}
+		}
 	}
-	line += "  " + helpKey.Render("q:") + " " + helpKey.Render("quit")
-	return line
+
+	b.WriteString("\n\n")
+	b.WriteString(dialogHelp.Render("? or esc to close"))
+	return dialogStyle.Render(b.String())
 }
 
 func (m Model) fullRefreshCmd() tea.Cmd {
@@ -1562,6 +1692,7 @@ func toCached(p gh.PR, role string) store.CachedPR {
 		Mergeable:      p.Mergeable,
 		UpdatedAt:      p.UpdatedAt,
 		IsDraft:        p.IsDraft,
+		HeadSHA:        p.HeadRefOid,
 	}
 }
 
@@ -1578,6 +1709,57 @@ func openBrowser(url string) {
 	if cmd != nil {
 		cmd.Start()
 	}
+}
+
+func (m Model) openBrowse() {
+	if len(m.sections) == 0 {
+		return
+	}
+	s := m.sections[m.sectionIdx]
+	q := s.browseQuery(m.cfg)
+	if q == "" {
+		return
+	}
+	u := fmt.Sprintf("https://github.com/issues?q=%s", url.QueryEscape(q))
+	openBrowser(u)
+}
+
+func (s section) browseQuery(cfg *config.Config) string {
+	var parts []string
+	switch s.name {
+	case "My PRs":
+		parts = append(parts, "is:open is:pr author:@me archived:false")
+		for _, o := range cfg.GitHub.Owners {
+			parts = append(parts, "org:"+o)
+		}
+	case "To Review":
+		parts = append(parts, "is:open is:pr user-review-requested:@me")
+		for _, o := range cfg.GitHub.Owners {
+			parts = append(parts, "org:"+o)
+		}
+	case "Team Review":
+		parts = append(parts, "is:open is:pr")
+		for _, t := range cfg.GitHub.ReviewTeams {
+			parts = append(parts, "team-review-requested:"+t)
+		}
+	case "Dependencies":
+		parts = append(parts, "is:open is:pr")
+		for _, r := range cfg.StarredRepos() {
+			parts = append(parts, "repo:"+r)
+		}
+		for _, a := range cfg.GitHub.DepAuthors {
+			parts = append(parts, "author:"+a)
+		}
+	default:
+		return ""
+	}
+	if s.hideDrafts {
+		parts = append(parts, "-is:draft")
+	}
+	if s.statusFilter == "mergeable" {
+		parts = append(parts, "review:approved status:success")
+	}
+	return strings.Join(parts, " ")
 }
 
 func refreshCountdown(t time.Time, interval int) string {

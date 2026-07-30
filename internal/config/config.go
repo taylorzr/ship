@@ -27,6 +27,7 @@ type GitHubConfig struct {
 type AIConfig struct {
 	ReviewProvider string `toml:"review_provider"`
 	ReviewModel    string `toml:"review_model"`
+	ReviewCommand  string `toml:"review_command"`
 }
 
 type RepoConfig struct {

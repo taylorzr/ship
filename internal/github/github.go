@@ -24,6 +24,7 @@ type PR struct {
 	Mergeable      string
 	UpdatedAt      string
 	IsDraft        bool
+	HeadRefOid     string
 }
 
 type Client struct {
@@ -79,6 +80,7 @@ type prNode struct {
 		ReviewDecision string
 		Mergeable      githubv4.MergeableState
 		UpdatedAt      githubv4.DateTime
+		HeadRefOid     string
 		Repository     struct{ NameWithOwner string }
 		Commits        struct {
 			Nodes []struct {
@@ -149,6 +151,7 @@ func (c *Client) search(ctx context.Context, query string) ([]PR, error) {
 					Mergeable:      string(pr.Mergeable),
 					UpdatedAt:      pr.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 					IsDraft:        pr.IsDraft,
+					HeadRefOid:     pr.HeadRefOid,
 				})
 			}
 
@@ -306,6 +309,15 @@ func (c *Client) DepPRs(ctx context.Context, repos []string, authors []string) (
 		all = append(all, prs...)
 	}
 	return all, nil
+}
+
+func (c *Client) GetHeadSha(ctx context.Context, repo string, number int) (string, error) {
+	out, err := exec.CommandContext(ctx, "gh", "pr", "view", fmt.Sprintf("%d", number),
+		"-R", repo, "--json", "headRefOid", "--jq", ".headRefOid").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("get head sha: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	return strings.TrimSpace(string(out)), nil
 }
 
 type CompareResult struct {
