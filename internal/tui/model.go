@@ -200,18 +200,21 @@ func New(cfg *config.Config, st *store.Store, ghClient *gh.Client, mockK8sImage 
 	s.Spinner = spinner.Ellipsis
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
 
+	loading := map[string]bool{
+		"My PRs":       false,
+		"To Review":    false,
+		"Releases":     false,
+		"Dependencies": false,
+	}
+	if len(cfg.GitHub.ReviewTeams) > 0 {
+		loading["Team Review"] = false
+	}
 	m := Model{
-		cfg:   cfg,
-		store: st,
-		gh:    ghClient,
-		spin:  s,
-		loading: map[string]bool{
-			"My PRs":        false,
-			"To Review":     false,
-			"Releases":      false,
-			"Dependencies":  false,
-			"Team Review":   false,
-		},
+		cfg:         cfg,
+		store:       st,
+		gh:          ghClient,
+		spin:        s,
+		loading:     loading,
 		sectionErrs: map[string]string{},
 		mockK8sImage: mockK8sImage,
 	}
