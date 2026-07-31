@@ -178,6 +178,9 @@ var keys = keyMap{
 type refreshDoneMsg struct {
 	source string
 	err    error
+	// retryAfterLogin asks Update to re-run this source once: an auto-login
+	// completed mid-refresh too late for some services to recover inline.
+	retryAfterLogin bool
 }
 
 type confirmAction struct {
@@ -742,6 +745,7 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 			shipLog.Printf("refreshing Releases (%d services)", len(m.cfg.Services))
 		}
 		start := time.Now()
+		loginBefore := k8s.LastLogin()
 
 		type svcResult struct {
 			Repo            string
@@ -857,7 +861,13 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 				shipLog.Printf("Releases: %d services ok (%v)", len(m.cfg.Services), total)
 			}
 		}
-		return refreshDoneMsg{source: "Services", err: lastErr}
+		// If a k8s auto-login completed during this cycle, some services may
+		// have failed before their credentials were refreshed — re-run once.
+		retry := lastErr != nil && k8s.LastLogin().After(loginBefore)
+		if retry && shipLog != nil {
+			shipLog.Printf("Services: re-refreshing after auto-login")
+		}
+		return refreshDoneMsg{source: "Services", err: lastErr, retryAfterLogin: retry}
 	}
 }
 
@@ -1255,6 +1265,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			delete(m.sectionErrs, msg.source)
 		}
 		m.loadFromCache()
+		if msg.retryAfterLogin {
+			m.loading[msg.source] = true
+			delete(m.sectionErrs, msg.source)
+			return m, m.refreshReleases(context.Background())
+		}
 		if m.allDone() {
 			m.markRefreshed()
 		}

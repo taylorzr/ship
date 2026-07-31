@@ -129,6 +129,14 @@ var (
 	lastLogin time.Time
 )
 
+// LastLogin returns the time of the last successful auto-login, or the zero
+// time if none has happened.
+func LastLogin() time.Time {
+	loginMu.Lock()
+	defer loginMu.Unlock()
+	return lastLogin
+}
+
 func relogin(loginCmd string) error {
 	loginMu.Lock()
 	defer loginMu.Unlock()
