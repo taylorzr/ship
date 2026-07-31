@@ -288,17 +288,22 @@ func (c *Client) DepPRs(ctx context.Context, repos, owners, teams, authors []str
 		authorQ.WriteString(a)
 	}
 	// GitHub can't OR different qualifier types in one query, so each scope
-	// is a separate search and the results are unioned.
+	// is a separate search and the results are unioned. When teams are
+	// configured, skip the org-wide owner search — it returns too many
+	// results across the entire org, and team-review-requested already
+	// provides the right scoping.
 	var queries []string
 	for _, repo := range repos {
 		queries = append(queries, fmt.Sprintf("is:open is:pr repo:%s%s", repo, authorQ.String()))
 	}
-	for _, o := range owners {
-		qualifier := " org:" + o
-		if c.OwnerType(ctx, o) == "user" {
-			qualifier = " user:" + o
+	if len(teams) == 0 {
+		for _, o := range owners {
+			qualifier := " org:" + o
+			if c.OwnerType(ctx, o) == "user" {
+				qualifier = " user:" + o
+			}
+			queries = append(queries, fmt.Sprintf("is:open is:pr%s%s", qualifier, authorQ.String()))
 		}
-		queries = append(queries, fmt.Sprintf("is:open is:pr%s%s", qualifier, authorQ.String()))
 	}
 	for _, t := range teams {
 		queries = append(queries, fmt.Sprintf("is:open is:pr team-review-requested:%s%s", t, authorQ.String()))

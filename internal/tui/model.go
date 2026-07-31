@@ -2056,6 +2056,10 @@ func (s section) browseQuery(cfg *config.Config, ghClient *gh.Client) string {
 			if g := orGroup("repo", cfg.StarredRepos()); g != "" {
 				parts = append(parts, g)
 			}
+		} else if len(cfg.GitHub.Teams) > 0 {
+			if g := orGroup("team-review-requested", cfg.GitHub.Teams); g != "" {
+				parts = append(parts, g)
+			}
 		} else {
 			if g := ownerOrGroup(cfg, ghClient); g != "" {
 				parts = append(parts, g)
