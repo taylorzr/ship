@@ -668,9 +668,12 @@ func (c *Client) UntaggedFirstParent(ctx context.Context, repo, prodSHA, branch 
 		if !ok {
 			break
 		}
-		if !tagged[cur] {
-			untagged = append(untagged, cm)
+		// Stop at a tagged commit: everything below it is an ancestor of the
+		// tag and already covered by it.
+		if tagged[cur] {
+			break
 		}
+		untagged = append(untagged, cm)
 		if len(cm.Parents) > 0 {
 			cur = cm.Parents[0]
 		} else {
