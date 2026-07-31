@@ -1981,23 +1981,50 @@ func (m Model) openBrowse() {
 	openBrowser(u)
 }
 
-func (s section) browseQuery(cfg *config.Config, gh *gh.Client) string {
-	var parts []string
+func orJoin(parts []string) string {
+	switch len(parts) {
+	case 0:
+		return ""
+	case 1:
+		return parts[0]
+	default:
+		return "(" + strings.Join(parts, " OR ") + ")"
+	}
+}
+
+func orGroup(qualifier string, values []string) string {
+	parts := make([]string, len(values))
+	for i, v := range values {
+		parts[i] = qualifier + ":" + v
+	}
+	return orJoin(parts)
+}
+
+func ownerOrGroup(cfg *config.Config, ghClient *gh.Client) string {
 	ctx := context.Background()
+	var parts []string
+	for _, o := range cfg.GitHub.Owners {
+		if ghClient.OwnerType(ctx, o) == "user" {
+			parts = append(parts, "user:"+o)
+		} else {
+			parts = append(parts, "org:"+o)
+		}
+	}
+	return orJoin(parts)
+}
+
+func (s section) browseQuery(cfg *config.Config, ghClient *gh.Client) string {
+	var parts []string
 	switch s.name {
 	case "My PRs":
 		parts = append(parts, "is:open is:pr author:@me archived:false")
 		if s.showStarred {
-			for _, r := range cfg.StarredRepos() {
-				parts = append(parts, "repo:"+r)
+			if g := orGroup("repo", cfg.StarredRepos()); g != "" {
+				parts = append(parts, g)
 			}
 		} else {
-			for _, o := range cfg.GitHub.Owners {
-				if gh.OwnerType(ctx, o) == "user" {
-					parts = append(parts, "user:"+o)
-				} else {
-					parts = append(parts, "org:"+o)
-				}
+			if g := ownerOrGroup(cfg, ghClient); g != "" {
+				parts = append(parts, g)
 			}
 		}
 	case "To Review":
@@ -2005,39 +2032,37 @@ func (s section) browseQuery(cfg *config.Config, gh *gh.Client) string {
 			parts = append(parts, "is:open is:pr user-review-requested:@me")
 		} else {
 			parts = append(parts, "is:open is:pr")
-			for _, t := range cfg.GitHub.Teams {
-				parts = append(parts, "team-review-requested:"+t)
+			if g := orGroup("team-review-requested", cfg.GitHub.Teams); g != "" {
+				parts = append(parts, g)
 			}
 		}
-		for _, o := range cfg.GitHub.Owners {
-			if gh.OwnerType(ctx, o) == "user" {
-				parts = append(parts, "user:"+o)
-			} else {
-				parts = append(parts, "org:"+o)
+		if s.showStarred {
+			if g := orGroup("repo", cfg.StarredRepos()); g != "" {
+				parts = append(parts, g)
+			}
+		} else {
+			if g := ownerOrGroup(cfg, ghClient); g != "" {
+				parts = append(parts, g)
 			}
 		}
 	case "Team Review":
 		parts = append(parts, "is:open is:pr")
-		for _, t := range cfg.GitHub.Teams {
-			parts = append(parts, "team-review-requested:"+t)
+		if g := orGroup("team-review-requested", cfg.GitHub.Teams); g != "" {
+			parts = append(parts, g)
 		}
 	case "Dependencies":
 		parts = append(parts, "is:open is:pr")
 		if s.showStarred {
-			for _, r := range cfg.StarredRepos() {
-				parts = append(parts, "repo:"+r)
+			if g := orGroup("repo", cfg.StarredRepos()); g != "" {
+				parts = append(parts, g)
 			}
 		} else {
-			for _, o := range cfg.GitHub.Owners {
-				if gh.OwnerType(ctx, o) == "user" {
-					parts = append(parts, "user:"+o)
-				} else {
-					parts = append(parts, "org:"+o)
-				}
+			if g := ownerOrGroup(cfg, ghClient); g != "" {
+				parts = append(parts, g)
 			}
 		}
-		for _, a := range cfg.GitHub.DepAuthors {
-			parts = append(parts, "author:"+a)
+		if g := orGroup("author", cfg.GitHub.DepAuthors); g != "" {
+			parts = append(parts, g)
 		}
 	default:
 		return ""
