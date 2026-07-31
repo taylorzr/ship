@@ -77,6 +77,7 @@ ship/
 ```toml
 [github]
 owners = ["fanduel"]                      # scope PR search to these owners/orgs (user: qualifier)
+teams  = ["fanduel/podium"]               # team-review-requested scope: team review section + dep PRs
 
 [k8s]
 login_command = "aws sso login"           # run to re-auth when k8s requests fail with expired creds

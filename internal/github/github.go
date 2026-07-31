@@ -281,35 +281,41 @@ func (c *Client) AllReviewRequested(ctx context.Context) ([]PR, error) {
 	return c.search(ctx, fmt.Sprintf("is:open is:pr review-requested:%s", user))
 }
 
-func (c *Client) DepPRs(ctx context.Context, repos []string, owners []string, authors []string) ([]PR, error) {
-	if len(repos) == 0 && len(owners) == 0 {
-		return nil, nil
-	}
+func (c *Client) DepPRs(ctx context.Context, repos, owners, teams, authors []string) ([]PR, error) {
 	var authorQ strings.Builder
 	for _, a := range authors {
 		authorQ.WriteString(" author:")
 		authorQ.WriteString(a)
 	}
-	var all []PR
-	if len(repos) > 0 {
-		for _, repo := range repos {
-			prs, err := c.search(ctx, fmt.Sprintf("is:open is:pr repo:%s%s", repo, authorQ.String()))
-			if err != nil {
-				return nil, err
-			}
-			all = append(all, prs...)
+	// GitHub can't OR different qualifier types in one query, so each scope
+	// is a separate search and the results are unioned.
+	var queries []string
+	for _, repo := range repos {
+		queries = append(queries, fmt.Sprintf("is:open is:pr repo:%s%s", repo, authorQ.String()))
+	}
+	for _, o := range owners {
+		qualifier := " org:" + o
+		if c.OwnerType(ctx, o) == "user" {
+			qualifier = " user:" + o
 		}
-	} else {
-		for _, o := range owners {
-			qualifier := " org:" + o
-			if c.OwnerType(ctx, o) == "user" {
-				qualifier = " user:" + o
+		queries = append(queries, fmt.Sprintf("is:open is:pr%s%s", qualifier, authorQ.String()))
+	}
+	for _, t := range teams {
+		queries = append(queries, fmt.Sprintf("is:open is:pr team-review-requested:%s%s", t, authorQ.String()))
+	}
+	seen := make(map[string]bool)
+	var all []PR
+	for _, q := range queries {
+		prs, err := c.search(ctx, q)
+		if err != nil {
+			return nil, err
+		}
+		for _, p := range prs {
+			key := fmt.Sprintf("%s#%d", p.Repo, p.Number)
+			if !seen[key] {
+				seen[key] = true
+				all = append(all, p)
 			}
-			prs, err := c.search(ctx, fmt.Sprintf("is:open is:pr%s%s", qualifier, authorQ.String()))
-			if err != nil {
-				return nil, err
-			}
-			all = append(all, prs...)
 		}
 	}
 	return all, nil

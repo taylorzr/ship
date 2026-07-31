@@ -246,7 +246,7 @@ func New(cfg *config.Config, st *store.Store, ghClient *gh.Client, mockK8sImages
 		"Services":     false,
 		"Dependencies": false,
 	}
-	if len(cfg.GitHub.ReviewTeams) > 0 {
+	if len(cfg.GitHub.Teams) > 0 {
 		loading["Team Review"] = false
 	}
 	m := Model{
@@ -622,7 +622,7 @@ func (m Model) sectionCommands(ctx context.Context) []tea.Cmd {
 		m.refreshDeps(ctx),
 		m.refreshReleases(ctx),
 	}
-	if len(m.cfg.GitHub.ReviewTeams) > 0 {
+	if len(m.cfg.GitHub.Teams) > 0 {
 		cmds = append(cmds, m.refreshTeamReview(ctx))
 	}
 	return cmds
@@ -686,7 +686,7 @@ func (m Model) refreshTeamReview(ctx context.Context) tea.Cmd {
 			shipLog.Printf("refreshing Team Review")
 		}
 		start := time.Now()
-		prs, err := m.gh.TeamReviewRequested(ctx, m.cfg.GitHub.ReviewTeams)
+		prs, err := m.gh.TeamReviewRequested(ctx, m.cfg.GitHub.Teams)
 		if shipLog != nil {
 			dur := time.Since(start).Truncate(time.Millisecond)
 			if err != nil {
@@ -709,9 +709,9 @@ func (m Model) refreshTeamReview(ctx context.Context) tea.Cmd {
 func (m Model) refreshDeps(ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
 		starred := m.cfg.StarredRepos()
-		if len(starred) == 0 && len(m.cfg.GitHub.Owners) == 0 {
+		if len(starred) == 0 && len(m.cfg.GitHub.Owners) == 0 && len(m.cfg.GitHub.Teams) == 0 {
 			if shipLog != nil {
-				shipLog.Printf("Dependencies: skipped (no starred repos or owners)")
+				shipLog.Printf("Dependencies: skipped (no starred repos, owners, or teams)")
 			}
 			return refreshDoneMsg{source: "Dependencies"}
 		}
@@ -719,7 +719,7 @@ func (m Model) refreshDeps(ctx context.Context) tea.Cmd {
 			shipLog.Printf("refreshing Dependencies")
 		}
 		start := time.Now()
-		deps, err := m.gh.DepPRs(ctx, starred, m.cfg.GitHub.Owners, m.cfg.GitHub.DepAuthors)
+		deps, err := m.gh.DepPRs(ctx, starred, m.cfg.GitHub.Owners, m.cfg.GitHub.Teams, m.cfg.GitHub.DepAuthors)
 		if shipLog != nil {
 			dur := time.Since(start).Truncate(time.Millisecond)
 			if err != nil {
@@ -1987,11 +1987,17 @@ func (s section) browseQuery(cfg *config.Config, gh *gh.Client) string {
 	switch s.name {
 	case "My PRs":
 		parts = append(parts, "is:open is:pr author:@me archived:false")
-		for _, o := range cfg.GitHub.Owners {
-			if gh.OwnerType(ctx, o) == "user" {
-				parts = append(parts, "user:"+o)
-			} else {
-				parts = append(parts, "org:"+o)
+		if s.showStarred {
+			for _, r := range cfg.StarredRepos() {
+				parts = append(parts, "repo:"+r)
+			}
+		} else {
+			for _, o := range cfg.GitHub.Owners {
+				if gh.OwnerType(ctx, o) == "user" {
+					parts = append(parts, "user:"+o)
+				} else {
+					parts = append(parts, "org:"+o)
+				}
 			}
 		}
 	case "To Review":
@@ -1999,7 +2005,7 @@ func (s section) browseQuery(cfg *config.Config, gh *gh.Client) string {
 			parts = append(parts, "is:open is:pr user-review-requested:@me")
 		} else {
 			parts = append(parts, "is:open is:pr")
-			for _, t := range cfg.GitHub.ReviewTeams {
+			for _, t := range cfg.GitHub.Teams {
 				parts = append(parts, "team-review-requested:"+t)
 			}
 		}
@@ -2012,7 +2018,7 @@ func (s section) browseQuery(cfg *config.Config, gh *gh.Client) string {
 		}
 	case "Team Review":
 		parts = append(parts, "is:open is:pr")
-		for _, t := range cfg.GitHub.ReviewTeams {
+		for _, t := range cfg.GitHub.Teams {
 			parts = append(parts, "team-review-requested:"+t)
 		}
 	case "Dependencies":
@@ -2021,12 +2027,13 @@ func (s section) browseQuery(cfg *config.Config, gh *gh.Client) string {
 			for _, r := range cfg.StarredRepos() {
 				parts = append(parts, "repo:"+r)
 			}
-		} else if len(cfg.GitHub.Owners) > 0 {
-			o := cfg.GitHub.Owners[0]
-			if gh.OwnerType(ctx, o) == "user" {
-				parts = append(parts, "user:"+o)
-			} else {
-				parts = append(parts, "org:"+o)
+		} else {
+			for _, o := range cfg.GitHub.Owners {
+				if gh.OwnerType(ctx, o) == "user" {
+					parts = append(parts, "user:"+o)
+				} else {
+					parts = append(parts, "org:"+o)
+				}
 			}
 		}
 		for _, a := range cfg.GitHub.DepAuthors {

@@ -23,9 +23,9 @@ type K8sConfig struct {
 }
 
 type GitHubConfig struct {
-	Owners      []string `toml:"owners"`
-	DepAuthors  []string `toml:"dep_authors"`
-	ReviewTeams []string `toml:"review_teams"`
+	Owners     []string `toml:"owners"`
+	Teams      []string `toml:"teams"`
+	DepAuthors []string `toml:"dep_authors"`
 }
 
 type AIConfig struct {
