@@ -1541,9 +1541,9 @@ func (m Model) View() string {
 		} else {
 			b.WriteString(sectionStyle.Render(headerText))
 		}
-		if s.draftFilter == "" && s.name != "Services" {
+		if s.draftFilter == "draft" && s.name != "Services" {
 			b.WriteString("  ")
-			b.WriteString(helpKey.Render("[draft]"))
+			b.WriteString(helpKey.Render("[no draft]"))
 		}
 		if s.showStarred && s.name != "Services" {
 			b.WriteString("  ")
@@ -1724,7 +1724,8 @@ func (m Model) View() string {
 						sep,
 						padWidth(truncateWidth(pending, maxPen), maxPen))
 				} else {
-					line = fmt.Sprintf("%s%s%s%s%s",
+					line = fmt.Sprintf("%s%s%s%s%s%s",
+						"    ",
 						padWidth("", maxName),
 						sep,
 						padWidth("", maxCur),
@@ -1777,6 +1778,10 @@ func (m Model) View() string {
 		} else {
 			content = strings.Repeat("\n", 5) + help
 		}
+	}
+
+	if m.width > 0 && m.height > 0 && m.confirm == nil && !m.tagging && !m.showHelp {
+		content = lipgloss.NewStyle().MaxHeight(m.height).Render(content)
 	}
 
 	return content
