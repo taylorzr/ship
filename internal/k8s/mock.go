@@ -6,19 +6,25 @@ import (
 )
 
 type MockClient struct {
-	Image string
+	Images map[string]string
 }
 
-func NewMock(image string) *MockClient {
-	return &MockClient{Image: image}
+func NewMock(images map[string]string) *MockClient {
+	return &MockClient{Images: images}
 }
 
 func (m *MockClient) GetDeployment(ctx context.Context, context, namespace, name string) (*Deployment, error) {
-	if m.Image == "" {
-		return nil, fmt.Errorf("mock: no image configured")
+	if len(m.Images) == 0 {
+		return nil, fmt.Errorf("mock: no images configured")
+	}
+	image, ok := m.Images[name]
+	if !ok {
+		if image, ok = m.Images["*"]; !ok {
+			return nil, fmt.Errorf("mock: no image for deployment %q", name)
+		}
 	}
 	return &Deployment{
-		Image:     m.Image,
+		Image:     image,
 		Container: name,
 	}, nil
 }

@@ -38,14 +38,14 @@ var releasesCmd = &cobra.Command{
 	RunE:  runReleases,
 }
 
-var mockK8sImage string
+var mockK8sImages map[string]string
 var releasesRepo string
 
 func init() {
 	rootCmd.AddCommand(countCmd)
 	rootCmd.AddCommand(releasesCmd)
-	rootCmd.Flags().StringVar(&mockK8sImage, "mock-k8s", "", "mock k8s with this image (e.g. repo/app:v10.1.0)")
-	releasesCmd.Flags().StringVar(&mockK8sImage, "mock-k8s", "", "mock k8s with this image (e.g. repo/app:v10.1.0)")
+	rootCmd.Flags().StringToStringVar(&mockK8sImages, "mock-k8s", nil, "mock k8s per service (e.g. svc1=repo/app:v10.1.0,svc2=repo/other:v2.0.0)")
+	releasesCmd.Flags().StringToStringVar(&mockK8sImages, "mock-k8s", nil, "mock k8s per service (e.g. svc1=repo/app:v10.1.0,svc2=repo/other:v2.0.0)")
 	releasesCmd.Flags().StringVar(&releasesRepo, "repo", "", "filter to a specific repo (e.g. taylorzr/kitty-meow)")
 }
 
@@ -74,7 +74,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 
 	ghClient := gh.NewClient(token, cfg.GitHub.ExcludeOwners)
 
-	m := tui.New(cfg, st, ghClient, mockK8sImage)
+	m := tui.New(cfg, st, ghClient, mockK8sImages)
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("tui: %w", err)
@@ -162,12 +162,6 @@ func runReleases(cmd *cobra.Command, args []string) error {
 	ghClient := gh.NewClient(token, cfg.GitHub.ExcludeOwners)
 	ctx := context.Background()
 
-	var mockK8s *k8s.MockClient
-	if mockK8sImage != "" {
-		mockK8s = k8s.NewMock(mockK8sImage)
-		fmt.Printf("(using mock k8s — image: %s)\n\n", mockK8sImage)
-	}
-
 	if len(cfg.Services) == 0 {
 		fmt.Println("no services configured — add [[service]] to ~/.config/ship/config.toml")
 		return nil
@@ -178,8 +172,20 @@ func runReleases(cmd *cobra.Command, args []string) error {
 			continue
 		}
 		var svcK8s k8s.Client
-		if mockK8s != nil {
-			svcK8s = mockK8s
+		if len(mockK8sImages) > 0 {
+			img, ok := mockK8sImages[svc.Name]
+			if !ok {
+				img, ok = mockK8sImages[svc.Repo]
+			}
+			if !ok {
+				img, ok = mockK8sImages["*"]
+			}
+			if !ok {
+				fmt.Printf("── %s ──\n  ✗ mock: no image for service %q (key by name or repo)\n\n", svc.Repo, svc.Name)
+				continue
+			}
+			svcK8s = k8s.NewMock(map[string]string{"*": img})
+			fmt.Printf("(using mock k8s — service: %s, image: %s)\n\n", svc.Name, img)
 		} else {
 			svcCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 			rc, err := k8s.NewRealClient(svcCtx, "", svc.Context)
@@ -214,7 +220,11 @@ func printVersion(r *version.Result) {
 	if len(r.PendingTags) > 0 {
 		names := make([]string, len(r.PendingTags))
 		for i, t := range r.PendingTags {
-			names[i] = t.Name
+			if t.Title != "" && t.Title != t.Name {
+				names[i] = fmt.Sprintf("%s (%s)", t.Name, t.Title)
+			} else {
+				names[i] = t.Name
+			}
 		}
 		fmt.Printf(" · pending %s", strings.Join(names, ", "))
 	}

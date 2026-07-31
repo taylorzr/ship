@@ -215,7 +215,7 @@ type Model struct {
 	tagMeta       tagState
 	showHelp      bool
 	gPending      bool
-	mockK8sImage  string
+	mockK8sImages map[string]string
 }
 
 type tagState struct {
@@ -232,7 +232,7 @@ type tagMetaMsg struct {
 	hasReleases bool
 }
 
-func New(cfg *config.Config, st *store.Store, ghClient *gh.Client, mockK8sImage string) Model {
+func New(cfg *config.Config, st *store.Store, ghClient *gh.Client, mockK8sImages map[string]string) Model {
 	s := spinner.New()
 	s.Spinner = spinner.Ellipsis
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
@@ -253,7 +253,7 @@ func New(cfg *config.Config, st *store.Store, ghClient *gh.Client, mockK8sImage 
 		spin:        s,
 		loading:     loading,
 		sectionErrs: map[string]string{},
-		mockK8sImage: mockK8sImage,
+		mockK8sImages: mockK8sImages,
 	}
 	m.loadFromCache()
 	return m
@@ -405,12 +405,20 @@ func (m *Model) loadFromCache() {
 		s3.allRows = append(s3.allRows, r)
 		s3.rows = append(s3.rows, r)
 		if v.PendingTags != "" && v.Error == "" {
-			for _, tag := range strings.Split(v.PendingTags, ", ") {
-				if tag == "" {
+			for _, entry := range strings.Split(v.PendingTags, ", ") {
+				if entry == "" {
 					continue
 				}
+				tag, title := entry, ""
+				if parts := strings.SplitN(entry, "|", 2); len(parts) == 2 {
+					tag, title = parts[0], parts[1]
+				}
+				pending := tag
+				if title != "" {
+					pending = tag + ": " + title
+				}
 				pr := row{
-					pending: tag,
+					pending: pending,
 					repo:    v.Repo,
 					prodRef: v.ProdRef,
 					url:     fmt.Sprintf("https://github.com/%s/releases/tag/%s", v.Repo, tag),
@@ -429,7 +437,7 @@ func (m *Model) loadFromCache() {
 				for _, c := range commits {
 					pr := row{
 						sha:     c.SHA[:7],
-						pending: fmt.Sprintf("%s %s", c.SHA[:7], c.Message),
+						pending: fmt.Sprintf("%s: %s", c.SHA[:7], c.Message),
 						repo:    v.Repo,
 						prodRef: v.ProdRef,
 						depth:   1,
@@ -555,6 +563,8 @@ func (m *Model) advanceSection(dir int) {
 	}
 	if visibleRows(m.sections[m.sectionIdx]) > 0 {
 		m.cursor = m.sectionOffset(m.sectionIdx) + m.sections[m.sectionIdx].scrollOffset
+	} else {
+		m.cursor = -1
 	}
 }
 
@@ -696,9 +706,9 @@ func (m Model) refreshTeamReview(ctx context.Context) tea.Cmd {
 func (m Model) refreshDeps(ctx context.Context) tea.Cmd {
 	return func() tea.Msg {
 		starred := m.cfg.StarredRepos()
-		if len(starred) == 0 {
+		if len(starred) == 0 && len(m.cfg.GitHub.Owners) == 0 {
 			if shipLog != nil {
-				shipLog.Printf("Dependencies: skipped (no starred repos)")
+				shipLog.Printf("Dependencies: skipped (no starred repos or owners)")
 			}
 			return refreshDoneMsg{source: "Dependencies"}
 		}
@@ -706,7 +716,7 @@ func (m Model) refreshDeps(ctx context.Context) tea.Cmd {
 			shipLog.Printf("refreshing Dependencies")
 		}
 		start := time.Now()
-		deps, err := m.gh.DepPRs(ctx, starred, m.cfg.GitHub.DepAuthors)
+		deps, err := m.gh.DepPRs(ctx, starred, m.cfg.GitHub.Owners, m.cfg.GitHub.DepAuthors)
 		if shipLog != nil {
 			dur := time.Since(start).Truncate(time.Millisecond)
 			if err != nil {
@@ -755,8 +765,19 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 
 				svcStart := time.Now()
 				var rc k8s.Client
-				if m.mockK8sImage != "" {
-					rc = k8s.NewMock(m.mockK8sImage)
+				if len(m.mockK8sImages) > 0 {
+					img, ok := m.mockK8sImages[svc.Name]
+					if !ok {
+						img, ok = m.mockK8sImages[svc.Repo]
+					}
+					if !ok {
+						img, ok = m.mockK8sImages["*"]
+					}
+					if !ok {
+						results <- svcResult{Repo: svc.Repo, Error: fmt.Sprintf("mock: no image for service %q (key by name or repo)", svc.Name)}
+						return
+					}
+					rc = k8s.NewMock(map[string]string{"*": img})
 				} else {
 					var err error
 					rc, err = k8s.NewRealClient(svcCtx, "", svc.Context)
@@ -771,7 +792,11 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 					if i > 0 {
 						pending += ", "
 					}
-					pending += t.Name
+					if t.Title != "" && t.Title != t.Name {
+						pending += t.Name + "|" + t.Title
+					} else {
+						pending += t.Name
+					}
 				}
 				untagged := ""
 				if len(r.UntaggedCommits) > 0 {
@@ -985,11 +1010,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							}
 						}
 						if branch == "" {
-							branch = "main"
+							branch = m.gh.DefaultBranch(context.Background(), r.repo)
 						}
 						url = fmt.Sprintf("https://github.com/%s/compare/%s..%s", r.repo, r.prodRef, branch)
 					} else {
-						url = fmt.Sprintf("https://github.com/%s/compare/%s..%s", r.repo, r.prodRef, r.pending)
+						compareRef := r.pending
+						if idx := strings.Index(compareRef, ": "); idx != -1 {
+							compareRef = compareRef[:idx]
+						}
+						url = fmt.Sprintf("https://github.com/%s/compare/%s..%s", r.repo, r.prodRef, compareRef)
 					}
 					if url != "" {
 						openBrowser(url)
@@ -1131,7 +1160,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 							}
 						}
 						if branch == "" {
-							branch = "main"
+							branch = m.gh.DefaultBranch(context.Background(), r.repo)
 						}
 						m.tagging = true
 						m.tagQuery = ""
@@ -1533,14 +1562,19 @@ func (m Model) View() string {
 
 			for i := visStart; i < visEnd; i++ {
 				r := s.rows[i]
+				isSelected := globalIdx+i == m.cursor
 				var line string
 				if r.depth == 0 {
+					pending := r.pending
+					if !isSelected && (strings.HasPrefix(pending, "+") || pending == "-") {
+						pending = helpKey.Render(pending)
+					}
 					line = fmt.Sprintf("%s%s%s%s%s",
 						padWidth(truncateWidth(r.name, maxName), maxName),
 						sep,
 						padWidth(truncateWidth(r.title, maxCur), maxCur),
 						sep,
-						padWidth(truncateWidth(r.pending, maxPen), maxPen))
+						padWidth(truncateWidth(pending, maxPen), maxPen))
 				} else {
 					line = fmt.Sprintf("%s%s%s%s%s",
 						padWidth("", maxName),
@@ -1552,7 +1586,7 @@ func (m Model) View() string {
 				if m.width > 0 {
 					line = truncateWidth(line, m.width)
 				}
-				if globalIdx+i == m.cursor {
+				if isSelected {
 					b.WriteString(selectedStyle.Render(line))
 				} else {
 					b.WriteString(rowStyle.Render(line))
@@ -1718,68 +1752,80 @@ func (m Model) viewHelp() string {
 	return line
 }
 
+const helpKeyWidth = 13
+
+func helpKeyEntry(key, desc string) string {
+	padded := key + strings.Repeat(" ", helpKeyWidth-len(key))
+	return "  " + helpKey.Render(padded) + " " + helpKey.Render(desc) + "\n"
+}
+
 func (m Model) renderHelpOverlay() string {
 	var b strings.Builder
 
 	b.WriteString(dialogTitle.Render("Keys"))
 	b.WriteString("\n\n")
 
-	nav := helpKey.Render("j/k/tab/⇧+tab:") + " " + helpKey.Render("nav") +
-		"  " + helpKey.Render("gg:") + " " + helpKey.Render("top") +
-		"  " + helpKey.Render("G:") + " " + helpKey.Render("bottom") +
-		"  " + helpKey.Render("enter:") + " " + helpKey.Render("open") +
-		"  " + helpKey.Render("B:") + " " + helpKey.Render("browse") +
-		"  " + helpKey.Render("r:") + " " + helpKey.Render("refresh") +
-		"  " + helpKey.Render("q:") + " " + helpKey.Render("quit")
-	b.WriteString(nav)
-	b.WriteString("\n\n")
+	b.WriteString(helpKey.Render("nav"))
+	b.WriteString("\n")
+	b.WriteString(helpKeyEntry("j/k", "move up/down"))
+	b.WriteString(helpKeyEntry("tab/shift+tab", "next/prev section"))
+	b.WriteString(helpKeyEntry("gg/G", "top/bottom"))
+	b.WriteString(helpKeyEntry("r", "refresh"))
+	b.WriteString(helpKeyEntry("q", "quit"))
+	b.WriteString("\n")
 
 	if len(m.sections) > m.sectionIdx {
 		s := m.sections[m.sectionIdx]
 		switch s.name {
 		case "My PRs", "Dependencies":
-			draftLabel := "draft"
-			if r := m.currentRow(); r != nil && r.draft {
-				draftLabel = "ready"
-			}
-			b.WriteString(helpKey.Render("actions >") + " " + helpKey.Render("R:") + " " + helpKey.Render(draftLabel) +
-				"  " + helpKey.Render("M:") + " " + helpKey.Render("merge") +
-				"  " + helpKey.Render("C:") + " " + helpKey.Render("close") +
-				"  " + helpKey.Render("A:") + " " + helpKey.Render("AI-review"))
+			b.WriteString(helpKey.Render("actions"))
 			b.WriteString("\n")
-			b.WriteString(helpKey.Render("filters >") + " " + helpKey.Render("m:") + " " + helpKey.Render("mergeable") +
-				"  " + helpKey.Render("d:") + " " + helpKey.Render("drafts") +
-				"  " + helpKey.Render("s:") + " " + helpKey.Render("starred") +
-				"  " + helpKey.Render("a:") + " " + helpKey.Render("age-sort") +
-				"  " + helpKey.Render("/:") + " " + helpKey.Render("search"))
+			b.WriteString(helpKeyEntry("enter", "open in browser"))
+			b.WriteString(helpKeyEntry("R", "toggle pr ready/draft"))
+			b.WriteString(helpKeyEntry("M", "merge pr"))
+			b.WriteString(helpKeyEntry("C", "close pr"))
+			b.WriteString(helpKeyEntry("A", "ai code review"))
+			b.WriteString(helpKeyEntry("B", "browse on github"))
+			b.WriteString("\n")
+			b.WriteString(helpKey.Render("filters"))
+			b.WriteString("\n")
+			b.WriteString(helpKeyEntry("m", "toggle mergeable"))
+			b.WriteString(helpKeyEntry("d", "toggle drafts"))
+			b.WriteString(helpKeyEntry("s", "toggle starred"))
+			b.WriteString(helpKeyEntry("a", "toggle age sort"))
+			b.WriteString(helpKeyEntry("/", "search"))
 		case "To Review", "Team Review":
-			draftLabel := "draft"
-			if r := m.currentRow(); r != nil && r.draft {
-				draftLabel = "ready"
-			}
-			teamLabel := "team"
+			teamLabel := "show team"
 			if s.hideTeamReviews {
-				teamLabel = "mine"
+				teamLabel = "show mine only"
 			}
-			b.WriteString(helpKey.Render("actions >") + " " + helpKey.Render("R:") + " " + helpKey.Render(draftLabel) +
-				"  " + helpKey.Render("M:") + " " + helpKey.Render("merge") +
-				"  " + helpKey.Render("C:") + " " + helpKey.Render("close") +
-				"  " + helpKey.Render("A:") + " " + helpKey.Render("AI-review"))
+			b.WriteString(helpKey.Render("actions"))
 			b.WriteString("\n")
-			b.WriteString(helpKey.Render("filters >") + " " + helpKey.Render("m:") + " " + helpKey.Render("mergeable") +
-				"  " + helpKey.Render("t:") + " " + helpKey.Render(teamLabel) +
-				"  " + helpKey.Render("d:") + " " + helpKey.Render("drafts") +
-				"  " + helpKey.Render("s:") + " " + helpKey.Render("starred") +
-				"  " + helpKey.Render("a:") + " " + helpKey.Render("age-sort") +
-				"  " + helpKey.Render("/:") + " " + helpKey.Render("search"))
+			b.WriteString(helpKeyEntry("enter", "open in browser"))
+			b.WriteString(helpKeyEntry("R", "toggle pr ready/draft"))
+			b.WriteString(helpKeyEntry("M", "merge pr"))
+			b.WriteString(helpKeyEntry("C", "close pr"))
+			b.WriteString(helpKeyEntry("A", "ai code review"))
+			b.WriteString(helpKeyEntry("B", "browse on github"))
+			b.WriteString("\n")
+			b.WriteString(helpKey.Render("filters"))
+			b.WriteString("\n")
+			b.WriteString(helpKeyEntry("m", "toggle mergeable"))
+			b.WriteString(helpKeyEntry("t", teamLabel))
+			b.WriteString(helpKeyEntry("d", "toggle drafts"))
+			b.WriteString(helpKeyEntry("s", "toggle starred"))
+			b.WriteString(helpKeyEntry("a", "toggle age sort"))
+			b.WriteString(helpKeyEntry("/", "search"))
 		case "Services":
-			b.WriteString(helpKey.Render("B:") + " " + helpKey.Render("browse") +
-				"  " + helpKey.Render("d:") + " " + helpKey.Render("diff") +
-				"  " + helpKey.Render("T:") + " " + helpKey.Render("tag"))
+			b.WriteString(helpKey.Render("actions"))
+			b.WriteString("\n")
+			b.WriteString(helpKeyEntry("enter", "open in browser"))
+			b.WriteString(helpKeyEntry("d", "open diff in browser"))
+			b.WriteString(helpKeyEntry("T", "create tag/release"))
 			if r := m.currentRow(); r != nil && r.repo != "" {
 				for _, svc := range m.cfg.Services {
 					if svc.Repo == r.repo && svc.DeployURL != "" {
-						b.WriteString("  " + helpKey.Render("S:") + " " + helpKey.Render("ship"))
+						b.WriteString(helpKeyEntry("S", "open deploy"))
 						break
 					}
 				}
@@ -1816,11 +1862,13 @@ func (m Model) renderTagInput() string {
 	b.WriteString(inputStyle.Render("Tag: "))
 	b.WriteString(inputStyle.Render(m.tagQuery + "█"))
 	b.WriteString("\n\n")
-	b.WriteString(dialogHelp.Render("enter: create  ctrl+o: open in browser  esc: cancel"))
 	if m.tagMeta.hasReleases {
-		b.WriteString("\n")
 		b.WriteString(dialogHelp.Render("release notes will be generated"))
+		b.WriteString("\n\n")
+		b.WriteString(dialogHelp.Render(strings.Repeat("─", 30)))
+		b.WriteString("\n\n")
 	}
+	b.WriteString(dialogHelp.Render("enter: create  ctrl+o: open in browser  esc: cancel"))
 
 	return dialogStyle.Render(b.String())
 }
@@ -1924,7 +1972,10 @@ func (s section) browseQuery(cfg *config.Config, gh *gh.Client) string {
 	switch s.name {
 	case "My PRs":
 		parts = append(parts, "is:open is:pr author:@me archived:false")
-		for _, o := range cfg.GitHub.Owners {
+		for i, o := range cfg.GitHub.Owners {
+			if i > 0 {
+				parts = append(parts, "OR")
+			}
 			if gh.OwnerType(ctx, o) == "user" {
 				parts = append(parts, "user:"+o)
 			} else {
@@ -1940,7 +1991,10 @@ func (s section) browseQuery(cfg *config.Config, gh *gh.Client) string {
 				parts = append(parts, "team-review-requested:"+t)
 			}
 		}
-		for _, o := range cfg.GitHub.Owners {
+		for i, o := range cfg.GitHub.Owners {
+			if i > 0 {
+				parts = append(parts, "OR")
+			}
 			if gh.OwnerType(ctx, o) == "user" {
 				parts = append(parts, "user:"+o)
 			} else {
@@ -1955,11 +2009,28 @@ func (s section) browseQuery(cfg *config.Config, gh *gh.Client) string {
 	case "Dependencies":
 		parts = append(parts, "is:open is:pr")
 		if s.showStarred {
-			for _, r := range cfg.StarredRepos() {
+			for i, r := range cfg.StarredRepos() {
+				if i > 0 {
+					parts = append(parts, "OR")
+				}
 				parts = append(parts, "repo:"+r)
 			}
+		} else {
+			for i, o := range cfg.GitHub.Owners {
+				if i > 0 {
+					parts = append(parts, "OR")
+				}
+				if gh.OwnerType(ctx, o) == "user" {
+					parts = append(parts, "user:"+o)
+				} else {
+					parts = append(parts, "org:"+o)
+				}
+			}
 		}
-		for _, a := range cfg.GitHub.DepAuthors {
+		for i, a := range cfg.GitHub.DepAuthors {
+			if i > 0 {
+				parts = append(parts, "OR")
+			}
 			parts = append(parts, "author:"+a)
 		}
 	default:

@@ -229,16 +229,37 @@ func resolveCI(commits struct {
 	return "success"
 }
 
-func ownerFilter(owners []string) string {
+func (c *Client) ownerFilter(ctx context.Context, owners []string) string {
 	if len(owners) == 0 {
 		return ""
 	}
 	var b strings.Builder
-	for _, o := range owners {
-		b.WriteString(" user:")
+	for i, o := range owners {
+		if i > 0 {
+			b.WriteString(" OR")
+		}
+		if c.OwnerType(ctx, o) == "user" {
+			b.WriteString(" user:")
+		} else {
+			b.WriteString(" org:")
+		}
 		b.WriteString(o)
 	}
+	user, err := c.User(ctx)
+	if err == nil && !contains(owners, user) {
+		b.WriteString(" OR user:")
+		b.WriteString(user)
+	}
 	return b.String()
+}
+
+func contains(ss []string, s string) bool {
+	for _, v := range ss {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Client) excludeFilter() string {
@@ -255,7 +276,7 @@ func (c *Client) MyPRs(ctx context.Context, owners []string) ([]PR, error) {
 	if err != nil {
 		return nil, err
 	}
-	return c.search(ctx, fmt.Sprintf("is:open is:pr author:%s archived:false%s%s", user, ownerFilter(owners), c.excludeFilter()))
+	return c.search(ctx, fmt.Sprintf("is:open is:pr author:%s archived:false%s%s", user, c.ownerFilter(ctx, owners), c.excludeFilter()))
 }
 
 func (c *Client) ReviewRequested(ctx context.Context, owners []string) ([]PR, error) {
@@ -263,7 +284,7 @@ func (c *Client) ReviewRequested(ctx context.Context, owners []string) ([]PR, er
 	if err != nil {
 		return nil, err
 	}
-	return c.search(ctx, fmt.Sprintf("is:open is:pr user-review-requested:%s%s%s", user, ownerFilter(owners), c.excludeFilter()))
+	return c.search(ctx, fmt.Sprintf("is:open is:pr user-review-requested:%s%s%s", user, c.ownerFilter(ctx, owners), c.excludeFilter()))
 }
 
 func (c *Client) TeamReviewRequested(ctx context.Context, teams []string) ([]PR, error) {
@@ -288,25 +309,36 @@ func (c *Client) AllReviewRequested(ctx context.Context) ([]PR, error) {
 	return c.search(ctx, fmt.Sprintf("is:open is:pr review-requested:%s%s", user, c.excludeFilter()))
 }
 
-func (c *Client) DepPRs(ctx context.Context, repos []string, authors []string) ([]PR, error) {
-	if len(repos) == 0 {
+func (c *Client) DepPRs(ctx context.Context, repos []string, owners []string, authors []string) ([]PR, error) {
+	if len(repos) == 0 && len(owners) == 0 {
 		return nil, nil
 	}
 	var authorQ strings.Builder
-	for i, a := range authors {
-		if i > 0 {
-			authorQ.WriteString(" ")
-		}
-		authorQ.WriteString("author:")
+	for _, a := range authors {
+		authorQ.WriteString(" author:")
 		authorQ.WriteString(a)
 	}
 	var all []PR
-	for _, repo := range repos {
-		prs, err := c.search(ctx, fmt.Sprintf("is:open is:pr repo:%s %s", repo, authorQ.String()))
-		if err != nil {
-			return nil, err
+	if len(repos) > 0 {
+		for _, repo := range repos {
+			prs, err := c.search(ctx, fmt.Sprintf("is:open is:pr repo:%s%s", repo, authorQ.String()))
+			if err != nil {
+				return nil, err
+			}
+			all = append(all, prs...)
 		}
-		all = append(all, prs...)
+	} else {
+		for _, o := range owners {
+			qualifier := " org:" + o
+			if c.OwnerType(ctx, o) == "user" {
+				qualifier = " user:" + o
+			}
+			prs, err := c.search(ctx, fmt.Sprintf("is:open is:pr%s%s", qualifier, authorQ.String()))
+			if err != nil {
+				return nil, err
+			}
+			all = append(all, prs...)
+		}
 	}
 	return all, nil
 }
@@ -383,6 +415,14 @@ func (c *Client) ResolveRef(ctx context.Context, repo, ref string) (string, erro
 	return strings.TrimSpace(string(out)), nil
 }
 
+func (c *Client) DefaultBranch(ctx context.Context, repo string) string {
+	out, err := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("repos/%s", repo), "--jq", ".default_branch").CombinedOutput()
+	if err != nil {
+		return "main"
+	}
+	return strings.TrimSpace(string(out))
+}
+
 func (c *Client) ListTags(ctx context.Context, repo string) ([]TagInfo, error) {
 	out, err := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("repos/%s/git/refs/tags?per_page=100", repo)).CombinedOutput()
 	if err != nil {
@@ -429,8 +469,8 @@ func (c *Client) ListTagsReachableFrom(ctx context.Context, repo, branch string)
 }
 
 type PendingTag struct {
-	Name string
-	SHA  string
+	Name  string
+	Title string
 }
 
 func (c *Client) PendingTags(ctx context.Context, repo, prodSHA, branch, source, prodTag string) ([]PendingTag, error) {
@@ -462,6 +502,7 @@ func (c *Client) PendingTags(ctx context.Context, repo, prodSHA, branch, source,
 func (c *Client) pendingTagsFromReleases(ctx context.Context, repo, prodSHA, prodTag string) ([]PendingTag, bool, error) {
 	type ghRelease struct {
 		TagName    string `json:"tag_name"`
+		Name       string `json:"name"`
 		Prerelease bool   `json:"prerelease"`
 		CreatedAt  string `json:"created_at"`
 	}
@@ -517,7 +558,7 @@ func (c *Client) pendingTagsFromReleases(ctx context.Context, repo, prodSHA, pro
 					continue
 				}
 				if t.After(prodTime) {
-					pending = append(pending, PendingTag{Name: rel.TagName})
+					pending = append(pending, PendingTag{Name: rel.TagName, Title: rel.Name})
 				}
 			}
 			return pending, true, nil
