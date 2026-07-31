@@ -10,11 +10,16 @@ import (
 
 type Config struct {
 	GitHub          GitHubConfig   `toml:"github"`
+	K8s             K8sConfig      `toml:"k8s"`
 	RefreshInterval int            `toml:"refresh_interval"`
 	AI              AIConfig       `toml:"ai"`
 	Repos           []RepoConfig   `toml:"repo"`
 	Services        []ServiceConfig `toml:"service"`
 	Jira            []JiraConfig   `toml:"jira"`
+}
+
+type K8sConfig struct {
+	LoginCommand string `toml:"login_command"`
 }
 
 type GitHubConfig struct {

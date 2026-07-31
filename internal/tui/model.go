@@ -780,7 +780,7 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 					rc = k8s.NewMock(map[string]string{"*": img})
 				} else {
 					var err error
-					rc, err = k8s.NewRealClient(svcCtx, "", svc.Context)
+					rc, err = k8s.NewRealClient(svcCtx, "", svc.Context, m.cfg.K8s.LoginCommand)
 					if err != nil {
 						results <- svcResult{Repo: svc.Repo, Error: fmt.Sprintf("k8s: %v", err)}
 						return

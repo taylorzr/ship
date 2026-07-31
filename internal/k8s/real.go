@@ -3,8 +3,12 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"os/exec"
 	"strings"
+	"sync"
+	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
@@ -13,9 +17,10 @@ import (
 type RealClient struct {
 	clientset kubernetes.Interface
 	context   string
+	loginCmd  string
 }
 
-func NewRealClient(ctx context.Context, kubeconfig, context string) (*RealClient, error) {
+func NewRealClient(ctx context.Context, kubeconfig, context, loginCmd string) (*RealClient, error) {
 	type result struct {
 		client *RealClient
 		err    error
@@ -56,7 +61,7 @@ func NewRealClient(ctx context.Context, kubeconfig, context string) (*RealClient
 			ch <- result{nil, fmt.Errorf("kubernetes client for %q: %w", actualCtx, err)}
 			return
 		}
-		ch <- result{&RealClient{clientset: clientset, context: actualCtx}, nil}
+		ch <- result{&RealClient{clientset: clientset, context: actualCtx, loginCmd: loginCmd}, nil}
 	}()
 
 	select {
@@ -68,7 +73,14 @@ func NewRealClient(ctx context.Context, kubeconfig, context string) (*RealClient
 }
 
 func (c *RealClient) GetDeployment(ctx context.Context, context, namespace, name string) (*Deployment, error) {
-	dep, err := c.clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+	dep, err := c.getDeployment(ctx, namespace, name)
+	if err != nil && c.loginCmd != "" && isAuthErr(err) {
+		if lerr := relogin(c.loginCmd); lerr != nil {
+			err = fmt.Errorf("%w (login failed: %v)", err, lerr)
+		} else {
+			dep, err = c.getDeployment(ctx, namespace, name)
+		}
+	}
 	if err != nil {
 		msg := fmt.Sprintf("k8s %s: get deployment %s/%s", c.context, namespace, name)
 		if strings.Contains(err.Error(), "not found") {
@@ -77,6 +89,14 @@ func (c *RealClient) GetDeployment(ctx context.Context, context, namespace, name
 			msg += " — token may be expired or missing RBAC permissions"
 		}
 		return nil, fmt.Errorf("%s: %w", msg, err)
+	}
+	return dep, nil
+}
+
+func (c *RealClient) getDeployment(ctx context.Context, namespace, name string) (*Deployment, error) {
+	dep, err := c.clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
 	}
 
 	if len(dep.Spec.Template.Spec.Containers) == 0 {
@@ -88,4 +108,48 @@ func (c *RealClient) GetDeployment(ctx context.Context, context, namespace, name
 		Image:     image,
 		Container: dep.Spec.Template.Spec.Containers[0].Name,
 	}, nil
+}
+
+// isAuthErr reports whether err looks like an expired/invalid credential.
+// Besides plain 401s, exec credential plugin failures (e.g. `aws eks
+// get-token` with an expired SSO token) surface as transport errors.
+func isAuthErr(err error) bool {
+	if apierrors.IsUnauthorized(err) {
+		return true
+	}
+	msg := err.Error()
+	return strings.Contains(msg, "Unauthorized") || strings.Contains(msg, "getting credentials")
+}
+
+// loginMu serializes login attempts across the per-service clients created
+// during a refresh, and lastLogin lets concurrent callers that arrive right
+// after a successful login skip straight to retrying their request.
+var (
+	loginMu   sync.Mutex
+	lastLogin time.Time
+)
+
+func relogin(loginCmd string) error {
+	loginMu.Lock()
+	defer loginMu.Unlock()
+
+	if time.Since(lastLogin) < time.Minute {
+		return nil
+	}
+
+	parts := strings.Fields(loginCmd)
+	if len(parts) == 0 {
+		return fmt.Errorf("k8s: login_command is empty")
+	}
+
+	// Deliberately not tied to the caller's short request context — an
+	// interactive login (browser SSO) can take minutes.
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
+	out, err := exec.CommandContext(ctx, parts[0], parts[1:]...).CombinedOutput()
+	if err != nil {
+		return fmt.Errorf("k8s login (%s): %s: %w", loginCmd, strings.TrimSpace(string(out)), err)
+	}
+	lastLogin = time.Now()
+	return nil
 }

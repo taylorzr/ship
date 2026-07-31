@@ -188,7 +188,7 @@ func runReleases(cmd *cobra.Command, args []string) error {
 			fmt.Printf("(using mock k8s — service: %s, image: %s)\n\n", svc.Name, img)
 		} else {
 			svcCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-			rc, err := k8s.NewRealClient(svcCtx, "", svc.Context)
+			rc, err := k8s.NewRealClient(svcCtx, "", svc.Context, cfg.K8s.LoginCommand)
 			cancel()
 			if err != nil {
 				fmt.Printf("── %s ──\n  ✗ k8s: %v\n\n", svc.Repo, err)

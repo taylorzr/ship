@@ -78,6 +78,9 @@ ship/
 [github]
 owners = ["fanduel"]                      # scope PR search to these owners/orgs (user: qualifier)
 
+[k8s]
+login_command = "aws sso login"           # run to re-auth when k8s requests fail with expired creds
+
 [ai]
 review_provider = "claude-cli"            # claude-cli | api
 review_model    = "opus"                  # claude CLI model alias; "sonnet" for cheaper
