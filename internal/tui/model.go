@@ -1972,10 +1972,7 @@ func (s section) browseQuery(cfg *config.Config, gh *gh.Client) string {
 	switch s.name {
 	case "My PRs":
 		parts = append(parts, "is:open is:pr author:@me archived:false")
-		for i, o := range cfg.GitHub.Owners {
-			if i > 0 {
-				parts = append(parts, "OR")
-			}
+		for _, o := range cfg.GitHub.Owners {
 			if gh.OwnerType(ctx, o) == "user" {
 				parts = append(parts, "user:"+o)
 			} else {
@@ -1991,10 +1988,7 @@ func (s section) browseQuery(cfg *config.Config, gh *gh.Client) string {
 				parts = append(parts, "team-review-requested:"+t)
 			}
 		}
-		for i, o := range cfg.GitHub.Owners {
-			if i > 0 {
-				parts = append(parts, "OR")
-			}
+		for _, o := range cfg.GitHub.Owners {
 			if gh.OwnerType(ctx, o) == "user" {
 				parts = append(parts, "user:"+o)
 			} else {
@@ -2009,28 +2003,18 @@ func (s section) browseQuery(cfg *config.Config, gh *gh.Client) string {
 	case "Dependencies":
 		parts = append(parts, "is:open is:pr")
 		if s.showStarred {
-			for i, r := range cfg.StarredRepos() {
-				if i > 0 {
-					parts = append(parts, "OR")
-				}
+			for _, r := range cfg.StarredRepos() {
 				parts = append(parts, "repo:"+r)
 			}
-		} else {
-			for i, o := range cfg.GitHub.Owners {
-				if i > 0 {
-					parts = append(parts, "OR")
-				}
-				if gh.OwnerType(ctx, o) == "user" {
-					parts = append(parts, "user:"+o)
-				} else {
-					parts = append(parts, "org:"+o)
-				}
+		} else if len(cfg.GitHub.Owners) > 0 {
+			o := cfg.GitHub.Owners[0]
+			if gh.OwnerType(ctx, o) == "user" {
+				parts = append(parts, "user:"+o)
+			} else {
+				parts = append(parts, "org:"+o)
 			}
 		}
-		for i, a := range cfg.GitHub.DepAuthors {
-			if i > 0 {
-				parts = append(parts, "OR")
-			}
+		for _, a := range cfg.GitHub.DepAuthors {
 			parts = append(parts, "author:"+a)
 		}
 	default:

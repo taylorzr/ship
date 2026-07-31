@@ -72,7 +72,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("gh auth: %w", err)
 	}
 
-	ghClient := gh.NewClient(token, cfg.GitHub.ExcludeOwners)
+	ghClient := gh.NewClient(token)
 
 	m := tui.New(cfg, st, ghClient, mockK8sImages)
 	p := tea.NewProgram(m, tea.WithAltScreen())
@@ -159,7 +159,7 @@ func runReleases(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("gh auth: %w", err)
 	}
 
-	ghClient := gh.NewClient(token, cfg.GitHub.ExcludeOwners)
+	ghClient := gh.NewClient(token)
 	ctx := context.Background()
 
 	if len(cfg.Services) == 0 {
