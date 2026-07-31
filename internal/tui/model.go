@@ -120,7 +120,7 @@ type section struct {
 	rows            []row
 	allRows         []row
 	scrollOffset    int
-	hideDrafts      bool
+	draftFilter     string // "" or "draft"
 	showStarred     bool
 	sortNewest      bool
 	hideTeamReviews bool
@@ -135,8 +135,9 @@ type keyMap struct {
 	Enter       key.Binding
 	Merge       key.Binding
 	Close       key.Binding
-	DraftToggle key.Binding
-	Refresh     key.Binding
+	DraftToggle  key.Binding
+	RefreshItem  key.Binding
+	Refresh      key.Binding
 	Quit        key.Binding
 	FilterStarred key.Binding
 	SortToggle    key.Binding
@@ -159,13 +160,14 @@ var keys = keyMap{
 	Enter:       key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open")),
 	Merge:       key.NewBinding(key.WithKeys("M"), key.WithHelp("M", "merge")),
 	Close:       key.NewBinding(key.WithKeys("C"), key.WithHelp("C", "close")),
-	DraftToggle: key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "toggle draft")),
-	Refresh:     key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh")),
+	DraftToggle:  key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "toggle pr draft")),
+	RefreshItem:  key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh item")),
+	Refresh:      key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "refresh all")),
 	Quit:        key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 	FilterStarred: key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "toggle starred")),
 	SortToggle:    key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "toggle age-sort")),
 	Search:        key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "search")),
-	Diff:          key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "toggle drafts/diff")),
+	Diff:          key.NewBinding(key.WithKeys("d"), key.WithHelp("d", "filter drafts/diff")),
 	Deploy:        key.NewBinding(key.WithKeys("S"), key.WithHelp("S", "ship")),
 	TeamFilter:    key.NewBinding(key.WithKeys("t"), key.WithHelp("t", "toggle team")),
 	MergeFilter:   key.NewBinding(key.WithKeys("m"), key.WithHelp("m", "toggle mergeable")),
@@ -219,6 +221,7 @@ type Model struct {
 	showHelp      bool
 	gPending      bool
 	mockK8sImages map[string]string
+	refreshingItem struct { repo string; num int }
 }
 
 type tagState struct {
@@ -262,13 +265,13 @@ func New(cfg *config.Config, st *store.Store, ghClient *gh.Client, mockK8sImages
 	return m
 }
 
-func (m *Model) sectionProp(name string) (offset int, hideDrafts, showStarred, sortNewest, hideTeamReviews bool, statusFilter string) {
+func (m *Model) sectionProp(name string) (offset int, draftFilter string, showStarred, sortNewest, hideTeamReviews bool, statusFilter string) {
 	for _, s := range m.sections {
 		if s.name == name {
-			return s.scrollOffset, s.hideDrafts, s.showStarred, s.sortNewest, s.hideTeamReviews, s.statusFilter
+			return s.scrollOffset, s.draftFilter, s.showStarred, s.sortNewest, s.hideTeamReviews, s.statusFilter
 		}
 	}
-	return 0, false, len(m.cfg.StarredRepos()) > 0, true, false, ""
+	return 0, "", len(m.cfg.StarredRepos()) > 0, true, false, ""
 }
 
 func (m *Model) applyFilters() {
@@ -284,14 +287,14 @@ func (m *Model) applyFilters() {
 		if i != m.sectionIdx {
 			sectionQ = ""
 		}
-		if m.sections[i].hideDrafts || sectionQ != "" || m.sections[i].showStarred || m.sections[i].hideTeamReviews || m.sections[i].statusFilter != "" {
+		if m.sections[i].draftFilter != "" || sectionQ != "" || m.sections[i].showStarred || m.sections[i].hideTeamReviews || m.sections[i].statusFilter != "" {
 			var filtered []row
 			allRows := m.sections[i].allRows
 			if !m.sections[i].sortNewest {
 				allRows = reversed(allRows)
 			}
 			for _, r := range allRows {
-				if m.sections[i].hideDrafts && r.draft {
+				if m.sections[i].draftFilter == "draft" && m.sections[i].name != "Services" && r.draft {
 					continue
 				}
 				if m.sections[i].statusFilter == "mergeable" && (r.ci != "success" || r.review != "APPROVED") {
@@ -347,8 +350,8 @@ func (m *Model) loadFromCache() {
 	var sections []section
 
 	prs, _ := m.store.CachedPRs("mine")
-	so, hd, ss, sn, _, _ := m.sectionProp("My PRs")
-	s := section{name: "My PRs", scrollOffset: so, hideDrafts: hd, showStarred: ss, sortNewest: sn}
+	so, df, ss, sn, _, _ := m.sectionProp("My PRs")
+	s := section{name: "My PRs", scrollOffset: so, draftFilter: df, showStarred: ss, sortNewest: sn}
 	for _, p := range prs {
 		r := row{
 				title:  p.Title,
@@ -375,8 +378,8 @@ func (m *Model) loadFromCache() {
 		svcNames[svc.Repo] = svc.Name
 		svcRepos[svc.Repo] = true
 	}
-	so, hd, ss, sn, _, _ = m.sectionProp("Services")
-	s3 := section{name: "Services", scrollOffset: so, hideDrafts: hd, showStarred: ss, sortNewest: sn}
+	so, df, ss, sn, _, _ = m.sectionProp("Services")
+	s3 := section{name: "Services", scrollOffset: so, draftFilter: df, showStarred: ss, sortNewest: sn}
 	for _, v := range versions {
 		if !svcRepos[v.Repo] {
 			continue
@@ -453,11 +456,11 @@ func (m *Model) loadFromCache() {
 	}
 	sections = append(sections, s3)
 
-	so, hd, ss, sn, htr, sf := m.sectionProp("To Review")
+	so, df, ss, sn, htr, sf := m.sectionProp("To Review")
 	dir, _ := m.store.CachedPRs("review-direct")
 	team, _ := m.store.CachedPRs("review-team")
 	seen := map[string]bool{}
-	s2 := section{name: "To Review", scrollOffset: so, hideDrafts: hd, showStarred: ss, sortNewest: sn, hideTeamReviews: htr, statusFilter: sf}
+	s2 := section{name: "To Review", scrollOffset: so, draftFilter: df, showStarred: ss, sortNewest: sn, hideTeamReviews: htr, statusFilter: sf}
 	for _, p := range dir {
 		key := fmt.Sprintf("%s#%d", p.Repo, p.Number)
 		if seen[key] {
@@ -507,8 +510,8 @@ func (m *Model) loadFromCache() {
 	sections = append(sections, s2)
 
 	deps, _ := m.store.CachedPRs("dep")
-	so, hd, ss, sn, _, _ = m.sectionProp("Dependencies")
-	s4 := section{name: "Dependencies", scrollOffset: so, hideDrafts: hd, showStarred: ss, sortNewest: sn}
+	so, df, ss, sn, _, _ = m.sectionProp("Dependencies")
+	s4 := section{name: "Dependencies", scrollOffset: so, draftFilter: df, showStarred: ss, sortNewest: sn}
 	for _, p := range deps {
 		r := row{
 			title:  p.Title,
@@ -737,6 +740,116 @@ func (m Model) refreshDeps(ctx context.Context) tea.Cmd {
 		}
 		return refreshDoneMsg{source: "Dependencies", err: err}
 	}
+}
+
+func (m Model) refreshItemCmd(ctx context.Context) tea.Cmd {
+	s := m.sections[m.sectionIdx]
+	r := m.currentRow()
+	return func() tea.Msg {
+		if r == nil || r.repo == "" {
+			return refreshDoneMsg{source: s.name, err: fmt.Errorf("no item selected")}
+		}
+		if s.name == "Services" {
+			var svc *config.ServiceConfig
+			for i := range m.cfg.Services {
+				if m.cfg.Services[i].Repo == r.repo {
+					svc = &m.cfg.Services[i]
+					break
+				}
+			}
+			if svc == nil {
+				return refreshDoneMsg{source: s.name, err: fmt.Errorf("service not found: %s", r.repo)}
+			}
+			svcCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+			defer cancel()
+			var rc k8s.Client
+			if len(m.mockK8sImages) > 0 {
+				img, ok := m.mockK8sImages[svc.Name]
+				if !ok {
+					img, ok = m.mockK8sImages[svc.Repo]
+				}
+				if !ok {
+					img, ok = m.mockK8sImages["*"]
+				}
+				if !ok {
+					return refreshDoneMsg{source: s.name, err: fmt.Errorf("mock: no image for service %q", svc.Name)}
+				}
+				rc = k8s.NewMock(map[string]string{"*": img})
+			} else {
+				var err error
+				rc, err = k8s.NewRealClient(svcCtx, "", svc.Context, m.cfg.K8s.LoginCommand)
+				if err != nil {
+					return refreshDoneMsg{source: s.name, err: err}
+				}
+			}
+			v := version.Resolve(svcCtx, rc, m.gh, *svc)
+			pending := ""
+			for i, t := range v.PendingTags {
+				if i > 0 {
+					pending += ", "
+				}
+				if t.Title != "" && t.Title != t.Name {
+					pending += t.Name + "|" + t.Title
+				} else {
+					pending += t.Name
+				}
+			}
+			untagged := ""
+			if len(v.UntaggedCommits) > 0 {
+				var buf strings.Builder
+				buf.WriteByte('[')
+				for i, c := range v.UntaggedCommits {
+					if i > 0 {
+						buf.WriteByte(',')
+					}
+					fmt.Fprintf(&buf, `{"sha":%q,"message":%q}`, c.SHA[:7], c.Message)
+				}
+				buf.WriteByte(']')
+				untagged = buf.String()
+			}
+			if shipLog != nil {
+				shipLog.Printf("Services: re-resolved %s", svc.Repo)
+			}
+			m.store.SaveVersion(store.CachedVersion{
+				Repo:            v.Service.Repo,
+				ProdRef:         v.ProdRef,
+				ProdSHA:         v.ProdSHA,
+				AheadBy:         v.AheadBy,
+				PendingTags:     pending,
+				UntaggedCommits: untagged,
+				Error:           v.Error,
+			})
+			return refreshDoneMsg{source: s.name, err: nil}
+		}
+		pr, err := m.gh.GetPR(ctx, r.repo, r.num)
+		if err != nil {
+			return refreshDoneMsg{source: s.name, err: err}
+		}
+		if shipLog != nil {
+			shipLog.Printf("refreshed %s#%d", r.repo, r.num)
+		}
+		role := r.role
+		if role == "" {
+			role = s.nameToRole()
+		}
+		if err := m.store.SavePR(toCached(*pr, role)); err != nil {
+			return refreshDoneMsg{source: s.name, err: err}
+		}
+		return refreshDoneMsg{source: s.name, err: nil}
+	}
+}
+
+// section.nameToRole maps a section name to the store role for that section.
+func (s section) nameToRole() string {
+	switch s.name {
+	case "My PRs":
+		return "mine"
+	case "To Review", "Team Review":
+		return "review-direct"
+	case "Dependencies":
+		return "dep"
+	}
+	return ""
 }
 
 func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
@@ -1038,13 +1151,23 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				if len(m.sections) > m.sectionIdx {
 					s := m.sections[m.sectionIdx]
 					if s.name != "Services" {
-						s.hideDrafts = !s.hideDrafts
+						if s.draftFilter == "draft" {
+							s.draftFilter = ""
+						} else {
+							s.draftFilter = "draft"
+						}
 						m.sections[m.sectionIdx] = s
 						m.applyFilters()
 					}
 				}
 				return m, nil
 			}
+		case key.Matches(msg, keys.RefreshItem):
+			if r := m.currentRow(); r != nil && r.repo != "" {
+				m.refreshingItem = struct{ repo string; num int }{repo: r.repo, num: r.num}
+				return m, m.refreshItemCmd(context.Background())
+			}
+			return m, nil
 		case key.Matches(msg, keys.TeamFilter):
 			if m.sections[m.sectionIdx].name == "To Review" {
 				s := m.sections[m.sectionIdx]
@@ -1062,6 +1185,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 				m.sections[m.sectionIdx] = s
 				m.applyFilters()
+			}
+		case key.Matches(msg, keys.DraftToggle):
+			if m.sections[m.sectionIdx].name == "My PRs" || m.sections[m.sectionIdx].name == "Dependencies" {
+				r := m.currentRow()
+				if r != nil && r.num > 0 {
+					m.confirm = &confirmAction{action: "draft-toggle", repo: r.repo, num: r.num, title: r.title, draft: r.draft}
+				}
 			}
 		case key.Matches(msg, keys.Deploy):
 			if m.sections[m.sectionIdx].name == "Services" {
@@ -1107,13 +1237,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				r := m.currentRow()
 				if r != nil && r.num > 0 {
 					m.confirm = &confirmAction{action: "close", repo: r.repo, num: r.num, title: r.title}
-				}
-			}
-		case key.Matches(msg, keys.DraftToggle):
-			if m.sections[m.sectionIdx].name == "My PRs" || m.sections[m.sectionIdx].name == "Dependencies" {
-				r := m.currentRow()
-				if r != nil && r.num > 0 {
-					m.confirm = &confirmAction{action: "draft-toggle", repo: r.repo, num: r.num, title: r.title, draft: r.draft}
 				}
 			}
 		case key.Matches(msg, keys.AIReview):
@@ -1256,6 +1379,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case refreshDoneMsg:
 		m.loading[msg.source] = false
+		m.refreshingItem = struct{ repo string; num int }{}
 		if msg.err != nil {
 			if shipLog != nil {
 				shipLog.Printf("%s: %v", msg.source, msg.err)
@@ -1417,9 +1541,9 @@ func (m Model) View() string {
 		} else {
 			b.WriteString(sectionStyle.Render(headerText))
 		}
-		if s.hideDrafts {
+		if s.draftFilter == "" && s.name != "Services" {
 			b.WriteString("  ")
-			b.WriteString(helpKey.Render("[no drafts]"))
+			b.WriteString(helpKey.Render("[draft]"))
 		}
 		if s.showStarred && s.name != "Services" {
 			b.WriteString("  ")
@@ -1506,7 +1630,9 @@ func (m Model) View() string {
 
 			for i := visStart; i < visEnd; i++ {
 				r := s.rows[i]
-				line := renderRow(r, globalIdx+i == m.cursor, repoWidth, m.width)
+				line := renderRow(r, globalIdx+i == m.cursor,
+					m.refreshingItem.repo == r.repo && m.refreshingItem.num == r.num,
+					m.spin.View(), repoWidth, m.width)
 				b.WriteString(line)
 				b.WriteString("\n")
 			}
@@ -1555,7 +1681,8 @@ func (m Model) View() string {
 				}
 			}
 			sep := "  "
-			header := fmt.Sprintf("%s%s%s%s%s",
+			header := fmt.Sprintf("%s%s%s%s%s%s",
+				"    ",
 				padWidth("Name", maxName),
 				sep,
 				padWidth("Current", maxCur),
@@ -1578,13 +1705,19 @@ func (m Model) View() string {
 			for i := visStart; i < visEnd; i++ {
 				r := s.rows[i]
 				isSelected := globalIdx+i == m.cursor
+				isRefreshing := m.refreshingItem.repo == r.repo && m.refreshingItem.num == r.num
 				var line string
 				if r.depth == 0 {
 					pending := r.pending
 					if !isSelected && (strings.HasPrefix(pending, "+") || pending == "-") {
 						pending = helpKey.Render(pending)
 					}
-					line = fmt.Sprintf("%s%s%s%s%s",
+					loadCol := "    "
+					if isRefreshing {
+						loadCol = padWidth(m.spin.View(), 4)
+					}
+					line = fmt.Sprintf("%s%s%s%s%s%s",
+						loadCol,
 						padWidth(truncateWidth(r.name, maxName), maxName),
 						sep,
 						padWidth(truncateWidth(r.title, maxCur), maxCur),
@@ -1706,9 +1839,11 @@ func relativeTime(s string) string {
 	}
 }
 
-func renderRow(r row, selected bool, repoWidth, maxWidth int) string {
+func renderRow(r row, selected bool, refreshing bool, refreshIcon string, repoWidth, maxWidth int) string {
 	aiIcon := ""
-	if r.reviewed && !r.reviewStale {
+	if refreshing {
+		aiIcon = refreshIcon
+	} else if r.reviewed && !r.reviewStale {
 		aiIcon = "✦"
 	} else if r.reviewed && r.reviewStale {
 		aiIcon = "✧"
@@ -1723,11 +1858,7 @@ func renderRow(r row, selected bool, repoWidth, maxWidth int) string {
 		rev = "·"
 	}
 
-	left := aiIcon
-	if left != "" {
-		left += " "
-	}
-	left += icon + "  " + rev
+	left := padWidth(aiIcon, 4) + icon + "  " + rev
 
 	const ageWidth = 6
 
@@ -1785,7 +1916,6 @@ func (m Model) renderHelpOverlay() string {
 	b.WriteString(helpKeyEntry("j/k", "move up/down"))
 	b.WriteString(helpKeyEntry("tab/shift+tab", "next/prev section"))
 	b.WriteString(helpKeyEntry("gg/G", "top/bottom"))
-	b.WriteString(helpKeyEntry("r", "refresh"))
 	b.WriteString(helpKeyEntry("q", "quit"))
 	b.WriteString("\n")
 
@@ -1796,16 +1926,18 @@ func (m Model) renderHelpOverlay() string {
 			b.WriteString(helpKey.Render("actions"))
 			b.WriteString("\n")
 			b.WriteString(helpKeyEntry("enter", "open in browser"))
-			b.WriteString(helpKeyEntry("R", "toggle pr ready/draft"))
+			b.WriteString(helpKeyEntry("r", "refresh item"))
+			b.WriteString(helpKeyEntry("R", "refresh all"))
 			b.WriteString(helpKeyEntry("M", "merge pr"))
 			b.WriteString(helpKeyEntry("C", "close pr"))
+			b.WriteString(helpKeyEntry("D", "toggle pr draft"))
 			b.WriteString(helpKeyEntry("A", "ai code review"))
 			b.WriteString(helpKeyEntry("B", "browse on github"))
 			b.WriteString("\n")
 			b.WriteString(helpKey.Render("filters"))
 			b.WriteString("\n")
 			b.WriteString(helpKeyEntry("m", "toggle mergeable"))
-			b.WriteString(helpKeyEntry("d", "toggle drafts"))
+			b.WriteString(helpKeyEntry("d", "filter drafts"))
 			b.WriteString(helpKeyEntry("s", "toggle starred"))
 			b.WriteString(helpKeyEntry("a", "toggle age sort"))
 			b.WriteString(helpKeyEntry("/", "search"))
@@ -1817,9 +1949,11 @@ func (m Model) renderHelpOverlay() string {
 			b.WriteString(helpKey.Render("actions"))
 			b.WriteString("\n")
 			b.WriteString(helpKeyEntry("enter", "open in browser"))
-			b.WriteString(helpKeyEntry("R", "toggle pr ready/draft"))
+			b.WriteString(helpKeyEntry("r", "refresh item"))
+			b.WriteString(helpKeyEntry("R", "refresh all"))
 			b.WriteString(helpKeyEntry("M", "merge pr"))
 			b.WriteString(helpKeyEntry("C", "close pr"))
+			b.WriteString(helpKeyEntry("D", "toggle pr draft"))
 			b.WriteString(helpKeyEntry("A", "ai code review"))
 			b.WriteString(helpKeyEntry("B", "browse on github"))
 			b.WriteString("\n")
@@ -1827,7 +1961,7 @@ func (m Model) renderHelpOverlay() string {
 			b.WriteString("\n")
 			b.WriteString(helpKeyEntry("m", "toggle mergeable"))
 			b.WriteString(helpKeyEntry("t", teamLabel))
-			b.WriteString(helpKeyEntry("d", "toggle drafts"))
+			b.WriteString(helpKeyEntry("d", "filter drafts"))
 			b.WriteString(helpKeyEntry("s", "toggle starred"))
 			b.WriteString(helpKeyEntry("a", "toggle age sort"))
 			b.WriteString(helpKeyEntry("/", "search"))
@@ -1835,6 +1969,8 @@ func (m Model) renderHelpOverlay() string {
 			b.WriteString(helpKey.Render("actions"))
 			b.WriteString("\n")
 			b.WriteString(helpKeyEntry("enter", "open in browser"))
+			b.WriteString(helpKeyEntry("r", "refresh item"))
+			b.WriteString(helpKeyEntry("R", "refresh all"))
 			b.WriteString(helpKeyEntry("d", "open diff in browser"))
 			b.WriteString(helpKeyEntry("T", "create tag/release"))
 			if r := m.currentRow(); r != nil && r.repo != "" {
@@ -2071,7 +2207,7 @@ func (s section) browseQuery(cfg *config.Config, ghClient *gh.Client) string {
 	default:
 		return ""
 	}
-	if s.hideDrafts {
+	if s.draftFilter == "draft" && s.name != "Services" {
 		parts = append(parts, "-is:draft")
 	}
 	if s.statusFilter == "mergeable" {

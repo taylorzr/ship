@@ -108,6 +108,37 @@ type searchResult struct {
 	} `graphql:"search(query: $query, type: ISSUE, first: $first, after: $after)"`
 }
 
+type getPRResult struct {
+	Repository struct {
+		PullRequest struct {
+			Number         int
+			Title          string
+			URL            string
+			IsDraft        bool
+			Author         struct{ Login string }
+			ReviewDecision string
+			Mergeable      githubv4.MergeableState
+			UpdatedAt      githubv4.DateTime
+			HeadRefOid     string
+			Repository     struct{ NameWithOwner string }
+			Commits        struct {
+				Nodes []struct {
+					Commit struct {
+						StatusCheckRollup struct {
+							Contexts struct {
+								Nodes []struct {
+									checkNode
+									statusNode
+								}
+							} `graphql:"contexts(last: 20)"`
+						}
+					}
+				}
+			} `graphql:"commits(last: 1)"`
+		} `graphql:"pullRequest(number: $number)"`
+	} `graphql:"repository(owner: $owner, name: $name)"`
+}
+
 func (c *Client) search(ctx context.Context, query string) ([]PR, error) {
 	var lastErr error
 	backoff := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
@@ -279,6 +310,41 @@ func (c *Client) AllReviewRequested(ctx context.Context) ([]PR, error) {
 		return nil, err
 	}
 	return c.search(ctx, fmt.Sprintf("is:open is:pr review-requested:%s", user))
+}
+
+// GetPR fetches a single pull request by repo and number, returning the same
+// shape as the search results so it can be written to the store.
+func (c *Client) GetPR(ctx context.Context, repo string, number int) (*PR, error) {
+	parts := strings.SplitN(repo, "/", 2)
+	if len(parts) != 2 {
+		return nil, fmt.Errorf("invalid repo %q", repo)
+	}
+	var q getPRResult
+	variables := map[string]any{
+		"owner":  githubv4.String(parts[0]),
+		"name":   githubv4.String(parts[1]),
+		"number": githubv4.Int(number),
+	}
+	if err := c.gql.Query(ctx, &q, variables); err != nil {
+		return nil, err
+	}
+	pr := q.Repository.PullRequest
+	if pr.Number == 0 {
+		return nil, fmt.Errorf("PR #%d not found in %s", number, repo)
+	}
+	return &PR{
+		Number:         pr.Number,
+		Repo:           pr.Repository.NameWithOwner,
+		Title:          pr.Title,
+		Author:         pr.Author.Login,
+		URL:            pr.URL,
+		ReviewDecision: string(pr.ReviewDecision),
+		CIState:        resolveCI(pr.Commits),
+		Mergeable:      string(pr.Mergeable),
+		UpdatedAt:      pr.UpdatedAt.Format("2006-01-02T15:04:05Z"),
+		IsDraft:        pr.IsDraft,
+		HeadRefOid:     pr.HeadRefOid,
+	}, nil
 }
 
 func (c *Client) DepPRs(ctx context.Context, repos, owners, teams, authors []string) ([]PR, error) {

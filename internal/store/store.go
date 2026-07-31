@@ -199,6 +199,15 @@ func (s *Store) SavePRs(prs []CachedPR, role string) error {
 	return tx.Commit()
 }
 
+func (s *Store) SavePR(pr CachedPR) error {
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO pr
+		(number, repo, title, author, role, url, review_decision, ci_state, mergeable, updated_at, is_draft, head_sha)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		pr.Number, pr.Repo, pr.Title, pr.Author, pr.Role,
+		pr.URL, pr.ReviewDecision, pr.CIState, pr.Mergeable, pr.UpdatedAt, pr.IsDraft, pr.HeadSHA)
+	return err
+}
+
 func (s *Store) CachedPRs(role string) ([]CachedPR, error) {
 	var where string
 	var args []any
