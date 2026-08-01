@@ -1055,7 +1055,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
 				m.confirm = nil
 			case key.Matches(msg, keys.Enter):
-				if m.confirm.action == "merge-draft-error" || m.confirm.action == "merge-conflict-error" {
+				if m.confirm.action == "merge-draft-error" || m.confirm.action == "merge-conflict-error" || m.confirm.action == "deploy-error" {
 					m.confirm = nil
 					break
 				}
@@ -1244,11 +1244,16 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if m.sections[m.sectionIdx].name == "Services" {
 				r := m.currentRow()
 				if r != nil && r.repo != "" {
+					found := false
 					for _, svc := range m.cfg.Services {
 						if svc.Repo == r.repo && svc.DeployURL != "" {
 							openBrowser(svc.DeployURL)
+							found = true
 							break
 						}
+					}
+					if !found {
+						m.confirm = &confirmAction{action: "deploy-error", title: r.title, repo: r.repo}
 					}
 				}
 			}
@@ -2100,100 +2105,113 @@ func helpKeyEntry(key, desc string) string {
 	return "  " + helpKey.Render(padded) + " " + helpKey.Render(desc) + "\n"
 }
 
-func (m Model) renderHelpOverlay() string {
+func helpSection(title string, entries [][2]string) string {
 	var b strings.Builder
-
-	b.WriteString(dialogTitle.Render("Keys"))
-	b.WriteString("\n\n")
-
-	b.WriteString(helpKey.Render("nav"))
+	b.WriteString(helpKey.Render(title))
 	b.WriteString("\n")
-	b.WriteString(helpKeyEntry("j/k", "move up/down"))
-	b.WriteString(helpKeyEntry("tab/shift+tab", "next/prev section"))
-	b.WriteString(helpKeyEntry("gg/G", "top/bottom"))
-	b.WriteString(helpKeyEntry("q", "quit"))
-	b.WriteString("\n")
+	for _, e := range entries {
+		b.WriteString(helpKeyEntry(e[0], e[1]))
+	}
+	return b.String()
+}
 
+func (m Model) renderHelpOverlay() string {
+	nav := helpSection("nav", [][2]string{
+		{"j/k", "move up/down"},
+		{"tab/shift+tab", "next/prev section"},
+		{"gg/G", "top/bottom"},
+		{"q", "quit"},
+	})
+
+	var actions, filters, legend string
 	if len(m.sections) > m.sectionIdx {
 		s := m.sections[m.sectionIdx]
 		switch s.name {
 		case "My PRs", "Dependencies":
-			b.WriteString(helpKey.Render("actions"))
-			b.WriteString("\n")
-			b.WriteString(helpKeyEntry("enter", "open in browser"))
-			b.WriteString(helpKeyEntry("r", "refresh item"))
-			b.WriteString(helpKeyEntry("R", "refresh all"))
-			b.WriteString(helpKeyEntry("M", "merge pr"))
-			b.WriteString(helpKeyEntry("C", "close pr"))
-			b.WriteString(helpKeyEntry("D", "toggle pr draft"))
-			b.WriteString(helpKeyEntry("A", "ai code review"))
-			b.WriteString(helpKeyEntry("B", "browse on github"))
-			b.WriteString("\n")
-			b.WriteString(helpKey.Render("filters"))
-			b.WriteString("\n")
-			b.WriteString(helpKeyEntry("m", "toggle mergeable"))
-			b.WriteString(helpKeyEntry("d", "filter drafts"))
-			b.WriteString(helpKeyEntry("s", "toggle starred"))
-			b.WriteString(helpKeyEntry("a", "toggle age sort"))
-			b.WriteString(helpKeyEntry("/", "search"))
-			b.WriteString("\n")
-			b.WriteString(helpKey.Render("legend"))
-			b.WriteString("\n")
-			b.WriteString(helpKeyEntry("↑", "up to date"))
-			b.WriteString(helpKeyEntry("↓", "branch behind base (backmerge)"))
-			b.WriteString(helpKeyEntry("≠", "merge conflict"))
+			actions = helpSection("actions", [][2]string{
+				{"enter", "open in browser"},
+				{"r", "refresh item"},
+				{"R", "refresh all"},
+				{"M", "merge pr"},
+				{"C", "close pr"},
+				{"D", "toggle pr draft"},
+				{"A", "ai code review"},
+				{"B", "browse on github"},
+			})
+			filters = helpSection("filters", [][2]string{
+				{"m", "toggle mergeable"},
+				{"d", "toggle drafts"},
+				{"s", "toggle starred"},
+				{"a", "toggle age sort"},
+				{"/", "search"},
+			})
+			legend = helpSection("legend", [][2]string{
+				{"↑", "up to date"},
+				{"↓", "branch behind base (backmerge)"},
+				{"≠", "merge conflict"},
+			})
 		case "To Review", "Team Review":
 			teamLabel := "show team"
 			if s.hideTeamReviews {
 				teamLabel = "show mine only"
 			}
-			b.WriteString(helpKey.Render("actions"))
-			b.WriteString("\n")
-			b.WriteString(helpKeyEntry("enter", "open in browser"))
-			b.WriteString(helpKeyEntry("r", "refresh item"))
-			b.WriteString(helpKeyEntry("R", "refresh all"))
-			b.WriteString(helpKeyEntry("M", "merge pr"))
-			b.WriteString(helpKeyEntry("C", "close pr"))
-			b.WriteString(helpKeyEntry("D", "toggle pr draft"))
-			b.WriteString(helpKeyEntry("A", "ai code review"))
-			b.WriteString(helpKeyEntry("B", "browse on github"))
-			b.WriteString("\n")
-			b.WriteString(helpKey.Render("filters"))
-			b.WriteString("\n")
-			b.WriteString(helpKeyEntry("m", "toggle mergeable"))
-			b.WriteString(helpKeyEntry("t", teamLabel))
-			b.WriteString(helpKeyEntry("d", "filter drafts"))
-			b.WriteString(helpKeyEntry("s", "toggle starred"))
-			b.WriteString(helpKeyEntry("a", "toggle age sort"))
-			b.WriteString(helpKeyEntry("/", "search"))
-			b.WriteString("\n")
-			b.WriteString(helpKey.Render("legend"))
-			b.WriteString("\n")
-			b.WriteString(helpKeyEntry("↑", "up to date"))
-			b.WriteString(helpKeyEntry("↓", "branch behind base (backmerge)"))
-			b.WriteString(helpKeyEntry("≠", "merge conflict"))
+			actions = helpSection("actions", [][2]string{
+				{"enter", "open in browser"},
+				{"r", "refresh item"},
+				{"R", "refresh all"},
+				{"M", "merge pr"},
+				{"C", "close pr"},
+				{"D", "toggle pr draft"},
+				{"A", "ai code review"},
+				{"B", "browse on github"},
+			})
+			filters = helpSection("filters", [][2]string{
+				{"m", "toggle mergeable"},
+				{"t", teamLabel},
+				{"d", "toggle drafts"},
+				{"s", "toggle starred"},
+				{"a", "toggle age sort"},
+				{"/", "search"},
+			})
+			legend = helpSection("legend", [][2]string{
+				{"↑", "up to date"},
+				{"↓", "branch behind base (backmerge)"},
+				{"≠", "merge conflict"},
+			})
 		case "Services":
-			b.WriteString(helpKey.Render("actions"))
-			b.WriteString("\n")
-			b.WriteString(helpKeyEntry("enter", "open in browser"))
-			b.WriteString(helpKeyEntry("r", "refresh item"))
-			b.WriteString(helpKeyEntry("R", "refresh all"))
-			b.WriteString(helpKeyEntry("d", "open diff in browser"))
-			b.WriteString(helpKeyEntry("T", "create tag/release"))
+			svcEntries := [][2]string{
+				{"enter", "open in browser"},
+				{"r", "refresh item"},
+				{"R", "refresh all"},
+				{"d", "open diff in browser"},
+				{"T", "create tag/release"},
+			}
 			if r := m.currentRow(); r != nil && r.repo != "" {
 				for _, svc := range m.cfg.Services {
 					if svc.Repo == r.repo && svc.DeployURL != "" {
-						b.WriteString(helpKeyEntry("S", "open deploy"))
+						svcEntries = append(svcEntries, [2]string{"S", "open deploy"})
 						break
 					}
 				}
 			}
+			actions = helpSection("actions", svcEntries)
 		}
 	}
 
-	b.WriteString("\n\n")
-	b.WriteString(dialogHelp.Render("? or esc to close"))
-	return dialogStyle.Render(b.String())
+	left := nav
+	if filters != "" {
+		left += "\n" + filters
+	}
+	right := actions
+	if legend != "" {
+		right += "\n" + legend
+	}
+	if right != "" {
+		left = lipgloss.NewStyle().PaddingRight(6).Render(left)
+		left = lipgloss.JoinHorizontal(lipgloss.Top, left, right)
+	}
+
+	return dialogStyle.Width(0).Render(dialogTitle.Render("Keys") + "\n\n" + left + "\n\n" + dialogHelp.Render("? or esc to close"))
 }
 
 func (m Model) renderTagInput() string {
@@ -2463,6 +2481,13 @@ func (m Model) renderConfirm() string {
 		b.WriteString(dialogTitle.Render("Can't merge — conflicts"))
 		b.WriteString("\n\n")
 		b.WriteString("This PR has merge conflicts that need to be resolved first.")
+		b.WriteString("\n\n")
+		b.WriteString(dialogHelp.Render("esc to dismiss"))
+		return dialogStyle.Render(b.String())
+	case "deploy-error":
+		b.WriteString(dialogTitle.Render("No deploy URL"))
+		b.WriteString("\n\n")
+		b.WriteString(fmt.Sprintf("%s has no deploy_url configured.", c.repo))
 		b.WriteString("\n\n")
 		b.WriteString(dialogHelp.Render("esc to dismiss"))
 		return dialogStyle.Render(b.String())
