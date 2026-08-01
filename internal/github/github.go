@@ -692,7 +692,8 @@ func (c *Client) UntaggedFirstParent(ctx context.Context, repo, prodSHA, branch 
 func (c *Client) MergePR(ctx context.Context, repo string, number int) error {
 	out, err := exec.CommandContext(ctx, "gh", "api",
 		fmt.Sprintf("repos/%s/pulls/%d/merge", repo, number),
-		"-f", "merge_method=squash",
+		"-X", "PUT",
+		"-F", "merge_method=squash",
 	).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("merge PR #%d: %s: %w", number, strings.TrimSpace(string(out)), err)

@@ -208,6 +208,11 @@ func (s *Store) SavePR(pr CachedPR) error {
 	return err
 }
 
+func (s *Store) DeletePR(repo string, number int) error {
+	_, err := s.db.Exec(`DELETE FROM pr WHERE repo = ? AND number = ?`, repo, number)
+	return err
+}
+
 func (s *Store) CachedPRs(role string) ([]CachedPR, error) {
 	var where string
 	var args []any

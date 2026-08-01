@@ -195,9 +195,10 @@ type confirmAction struct {
 }
 
 type actionDoneMsg struct {
-	repo string
-	num  int
-	err  error
+	action string
+	repo   string
+	num    int
+	err    error
 }
 
 type Model struct {
@@ -346,6 +347,15 @@ func (m *Model) loadReviewState(r *row) {
 			r.reviewStale = true
 		}
 	}
+}
+
+func removeRow(rows []row, repo string, num int) []row {
+	for i := range rows {
+		if rows[i].repo == repo && rows[i].num == num {
+			return append(rows[:i], rows[i+1:]...)
+		}
+	}
+	return rows
 }
 
 func (m *Model) loadFromCache() {
@@ -1421,9 +1431,27 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
-		if msg.repo != "" && msg.num > 0 {
-			m.refreshingItem = struct{ repo string; num int }{repo: msg.repo, num: msg.num}
-			return m, m.refreshItemCmd(context.Background())
+		switch msg.action {
+		case "merge", "close":
+			// PR is no longer open — remove from store and in-memory rows.
+			if msg.repo != "" && msg.num > 0 {
+				_ = m.store.DeletePR(msg.repo, msg.num)
+				for i := range m.sections {
+					m.sections[i].allRows = removeRow(m.sections[i].allRows, msg.repo, msg.num)
+					m.sections[i].rows = removeRow(m.sections[i].rows, msg.repo, msg.num)
+				}
+				m.recalcTotal()
+				if m.cursor >= m.total {
+					m.cursor = m.total - 1
+				}
+				m.loadFromCache()
+			}
+			return m, nil
+		case "draft-toggle":
+			if msg.repo != "" && msg.num > 0 {
+				m.refreshingItem = struct{ repo string; num int }{repo: msg.repo, num: msg.num}
+				return m, m.refreshItemCmd(context.Background())
+			}
 		}
 		return m, m.fullRefreshCmd()
 
@@ -2054,7 +2082,7 @@ func (m Model) execAction(action, repo string, num int, draft bool) tea.Cmd {
 		case "draft-toggle":
 			err = m.gh.ToggleDraft(ctx, repo, num, draft)
 		}
-		return actionDoneMsg{repo: repo, num: num, err: err}
+		return actionDoneMsg{action: action, repo: repo, num: num, err: err}
 	}
 }
 
