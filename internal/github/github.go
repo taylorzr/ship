@@ -540,26 +540,53 @@ type PendingTag struct {
 	Title string
 }
 
-func (c *Client) PendingTags(ctx context.Context, repo, prodSHA, branch, source, prodTag string) ([]PendingTag, error) {
-	if source == "tags" {
-		return c.pendingTagsFromGit(ctx, repo, prodSHA)
-	}
+func (c *Client) PendingTags(ctx context.Context, repo, prodSHA, branch, source, prodTag string, ahead []CommitSummary) ([]PendingTag, error) {
+	var pending []PendingTag
+	var err error
 
-	pending, releasesExist, err := c.pendingTagsFromReleases(ctx, repo, prodSHA, prodTag)
-	if err != nil {
-		if source == "" {
+	if source == "tags" {
+		pending, err = c.pendingTagsFromGit(ctx, repo, prodSHA)
+	} else {
+		var releasesExist bool
+		pending, releasesExist, err = c.pendingTagsFromReleases(ctx, repo, prodSHA, prodTag)
+		if err != nil && source == "" {
 			tag, tagErr := c.pendingTagsFromGit(ctx, repo, prodSHA)
 			if tagErr == nil && len(tag) > 0 {
-				return tag, nil
+				pending = tag
+				err = nil
+			}
+		} else if err == nil && source == "" && !releasesExist {
+			tag, tagErr := c.pendingTagsFromGit(ctx, repo, prodSHA)
+			if tagErr == nil && len(tag) > 0 {
+				pending = tag
 			}
 		}
+	}
+	if err != nil {
 		return nil, err
 	}
 
-	if source == "" && !releasesExist {
-		tag, tagErr := c.pendingTagsFromGit(ctx, repo, prodSHA)
-		if tagErr == nil && len(tag) > 0 {
-			return tag, nil
+	// The releases list API is eventually consistent and can briefly miss a
+	// just-created release, while git refs are updated immediately. Reconcile:
+	// any tag pointing directly at a commit ahead of prod that isn't already
+	// listed must be pending.
+	if tags, tagErr := c.ListTags(ctx, repo); tagErr == nil && len(tags) > 0 {
+		aheadSet := make(map[string]bool, len(ahead))
+		for _, cm := range ahead {
+			aheadSet[cm.SHA] = true
+		}
+		have := make(map[string]bool, len(pending))
+		for _, p := range pending {
+			have[p.Name] = true
+		}
+		for _, t := range tags {
+			if have[t.Name] {
+				continue
+			}
+			if aheadSet[t.SHA] {
+				pending = append(pending, PendingTag{Name: t.Name})
+				have[t.Name] = true
+			}
 		}
 	}
 
@@ -771,17 +798,21 @@ func (c *Client) RepoHasReleases(ctx context.Context, repo string) (bool, error)
 	return strings.TrimSpace(string(out)) != "0", nil
 }
 
+func logToFile(format string, args ...any) {
+	home, _ := os.UserHomeDir()
+	if f, err := os.OpenFile(filepath.Join(home, ".config", "ship", "ship.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+		fmt.Fprintf(f, format, args...)
+		f.Close()
+	}
+}
+
 func (c *Client) CreateRelease(ctx context.Context, repo, tag, sha string) error {
 	full, err := c.ResolveCommit(ctx, repo, sha)
 	if err != nil {
 		return err
 	}
 	args := []string{"release", "create", tag, "--target", full, "--generate-notes", "-R", repo}
-	fmt.Fprintf(os.Stderr, "CreateRelease: gh %s (input sha=%s, resolved sha=%s)\n", strings.Join(args, " "), sha, full)
-	if logFile, err := os.OpenFile(filepath.Join(os.Getenv("HOME"), ".config", "ship", "ship.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
-		fmt.Fprintf(logFile, "CreateRelease: gh %s (input sha=%s, resolved sha=%s)\n", strings.Join(args, " "), sha, full)
-		logFile.Close()
-	}
+	logToFile("CreateRelease: gh %s (input sha=%s, resolved sha=%s)\n", strings.Join(args, " "), sha, full)
 	out, err := exec.CommandContext(ctx, "gh", args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("create release: %s: %w", strings.TrimSpace(string(out)), err)
@@ -798,11 +829,7 @@ func (c *Client) CreateTag(ctx context.Context, repo, tag, sha string) error {
 		"-F", fmt.Sprintf("ref=refs/tags/%s", tag),
 		"-F", fmt.Sprintf("sha=%s", full),
 	}
-	fmt.Fprintf(os.Stderr, "CreateTag: gh %s (input sha=%s, resolved sha=%s)\n", strings.Join(args, " "), sha, full)
-	if logFile, err := os.OpenFile(filepath.Join(os.Getenv("HOME"), ".config", "ship", "ship.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
-		fmt.Fprintf(logFile, "CreateTag: gh %s (input sha=%s, resolved sha=%s)\n", strings.Join(args, " "), sha, full)
-		logFile.Close()
-	}
+	logToFile("CreateTag: gh %s (input sha=%s, resolved sha=%s)\n", strings.Join(args, " "), sha, full)
 	out, err := exec.CommandContext(ctx, "gh", args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("create tag: %s: %w", strings.TrimSpace(string(out)), err)

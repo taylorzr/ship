@@ -63,7 +63,7 @@ func Resolve(ctx context.Context, k8sClient k8s.Client, ghClient *gh.Client, svc
 	r.AheadBy = compare.AheadBy
 	r.Commits = compare.Commits
 
-	pending, err := ghClient.PendingTags(ctx, svc.Repo, r.ProdSHA, branch, svc.ReleaseSource, r.ProdTag)
+	pending, err := ghClient.PendingTags(ctx, svc.Repo, r.ProdSHA, branch, svc.ReleaseSource, r.ProdTag, compare.Commits)
 	if err != nil {
 		// non-fatal, just no pending tags
 		return r
