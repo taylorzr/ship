@@ -24,6 +24,7 @@ type PR struct {
 	ReviewDecision string
 	CIState        string
 	Mergeable      string
+	MergeState     string // "BEHIND" when head is behind base (needs backmerge)
 	State          string // "OPEN", "CLOSED", "MERGED"
 	UpdatedAt      string
 	IsDraft        bool
@@ -82,6 +83,7 @@ type prNode struct {
 		Author         struct{ Login string }
 		ReviewDecision string
 		Mergeable      githubv4.MergeableState
+		MergeStateStatus githubv4.MergeStateStatus
 		UpdatedAt      githubv4.DateTime
 		HeadRefOid     string
 		Repository     struct{ NameWithOwner string }
@@ -123,6 +125,7 @@ type getPRResult struct {
 			Author         struct{ Login string }
 			ReviewDecision string
 			Mergeable      githubv4.MergeableState
+			MergeStateStatus githubv4.MergeStateStatus
 			UpdatedAt      githubv4.DateTime
 			HeadRefOid     string
 			Repository     struct{ NameWithOwner string }
@@ -184,6 +187,7 @@ func (c *Client) search(ctx context.Context, query string) ([]PR, error) {
 					ReviewDecision: string(pr.ReviewDecision),
 					CIState:        ciState,
 					Mergeable:      string(pr.Mergeable),
+					MergeState:     string(pr.MergeStateStatus),
 					State:          string(pr.State),
 					UpdatedAt:      pr.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 					IsDraft:        pr.IsDraft,
@@ -347,6 +351,7 @@ func (c *Client) GetPR(ctx context.Context, repo string, number int) (*PR, error
 		ReviewDecision: string(pr.ReviewDecision),
 		CIState:        resolveCI(pr.Commits),
 		Mergeable:      string(pr.Mergeable),
+		MergeState:     string(pr.MergeStateStatus),
 		State:          string(pr.State),
 		UpdatedAt:      pr.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 		IsDraft:        pr.IsDraft,

@@ -158,6 +158,13 @@ func (s *Store) migrate() error {
 		s.db.Exec(`ALTER TABLE pr ADD COLUMN head_sha TEXT DEFAULT ''`)
 	}
 
+	// migrate: add merge_state column if missing
+	var hasMergeState bool
+	err = s.db.QueryRow(`SELECT COUNT(*) > 0 FROM pragma_table_info('pr') WHERE name = 'merge_state'`).Scan(&hasMergeState)
+	if err == nil && !hasMergeState {
+		s.db.Exec(`ALTER TABLE pr ADD COLUMN merge_state TEXT DEFAULT ''`)
+	}
+
 	return nil
 }
 
@@ -171,6 +178,7 @@ type CachedPR struct {
 	ReviewDecision string
 	CIState        string
 	Mergeable      string
+	MergeState     string
 	UpdatedAt      string
 	IsDraft        bool
 	HeadSHA        string
@@ -189,8 +197,8 @@ func (s *Store) SavePRs(prs []CachedPR, role string) error {
 	}
 
 	stmt, err := tx.Prepare(`INSERT OR REPLACE INTO pr
-		(number, repo, title, author, role, url, review_decision, ci_state, mergeable, updated_at, is_draft, head_sha)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
+		(number, repo, title, author, role, url, review_decision, ci_state, mergeable, merge_state, updated_at, is_draft, head_sha)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`)
 	if err != nil {
 		return err
 	}
@@ -198,7 +206,7 @@ func (s *Store) SavePRs(prs []CachedPR, role string) error {
 
 	for _, p := range prs {
 		if _, err := stmt.Exec(p.Number, p.Repo, p.Title, p.Author, p.Role,
-			p.URL, p.ReviewDecision, p.CIState, p.Mergeable, p.UpdatedAt, p.IsDraft, p.HeadSHA); err != nil {
+			p.URL, p.ReviewDecision, p.CIState, p.Mergeable, p.MergeState, p.UpdatedAt, p.IsDraft, p.HeadSHA); err != nil {
 			return err
 		}
 	}
@@ -207,10 +215,10 @@ func (s *Store) SavePRs(prs []CachedPR, role string) error {
 
 func (s *Store) SavePR(pr CachedPR) error {
 	_, err := s.db.Exec(`INSERT OR REPLACE INTO pr
-		(number, repo, title, author, role, url, review_decision, ci_state, mergeable, updated_at, is_draft, head_sha)
-		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+		(number, repo, title, author, role, url, review_decision, ci_state, mergeable, merge_state, updated_at, is_draft, head_sha)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
 		pr.Number, pr.Repo, pr.Title, pr.Author, pr.Role,
-		pr.URL, pr.ReviewDecision, pr.CIState, pr.Mergeable, pr.UpdatedAt, pr.IsDraft, pr.HeadSHA)
+		pr.URL, pr.ReviewDecision, pr.CIState, pr.Mergeable, pr.MergeState, pr.UpdatedAt, pr.IsDraft, pr.HeadSHA)
 	return err
 }
 
@@ -226,7 +234,7 @@ func (s *Store) CachedPRs(role string) ([]CachedPR, error) {
 		where = "WHERE role = ?"
 		args = append(args, role)
 	}
-	rows, err := s.db.Query(`SELECT number, repo, title, author, role, url, review_decision, ci_state, mergeable, updated_at, is_draft, COALESCE(head_sha, '') FROM pr `+where+` ORDER BY updated_at DESC`, args...)
+	rows, err := s.db.Query(`SELECT number, repo, title, author, role, url, review_decision, ci_state, mergeable, COALESCE(merge_state, ''), updated_at, is_draft, COALESCE(head_sha, '') FROM pr `+where+` ORDER BY updated_at DESC`, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -236,7 +244,7 @@ func (s *Store) CachedPRs(role string) ([]CachedPR, error) {
 	for rows.Next() {
 		var p CachedPR
 		if err := rows.Scan(&p.Number, &p.Repo, &p.Title, &p.Author, &p.Role,
-			&p.URL, &p.ReviewDecision, &p.CIState, &p.Mergeable, &p.UpdatedAt, &p.IsDraft, &p.HeadSHA); err != nil {
+			&p.URL, &p.ReviewDecision, &p.CIState, &p.Mergeable, &p.MergeState, &p.UpdatedAt, &p.IsDraft, &p.HeadSHA); err != nil {
 			return nil, err
 		}
 		out = append(out, p)

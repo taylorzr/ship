@@ -52,18 +52,16 @@ var (
 			Foreground(lipgloss.Color("86")).
 			MarginTop(1)
 
-	rowStyle = lipgloss.NewStyle().
-			PaddingLeft(2)
+	rowStyle = lipgloss.NewStyle()
 
 	selectedStyle = lipgloss.NewStyle().
-			PaddingLeft(2).
 			Reverse(true).
 			Bold(true)
 
 	helpKey = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	headerStyle = lipgloss.NewStyle().PaddingLeft(2).Foreground(lipgloss.Color("244"))
-	errorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196")).PaddingLeft(2)
-	overflowStyle = lipgloss.NewStyle().PaddingLeft(2).Foreground(lipgloss.Color("241"))
+	headerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	errorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	overflowStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	dialogStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("205")).
@@ -114,6 +112,7 @@ type row struct {
 	reviewStale bool // AI review exists but head SHA changed
 	headSha   string // PR head SHA for stale check
 	contributors string // version contributors (releases section)
+	mergeState string // PR merge state; "BEHIND" = needs backmerge
 }
 
 type section struct {
@@ -376,6 +375,7 @@ func (m *Model) loadFromCache() {
 				draft:  p.IsDraft,
 			updatedAt: p.UpdatedAt,
 			mergeable: p.Mergeable,
+			mergeState: p.MergeState,
 			headSha: p.HeadSHA,
 		}
 		m.loadReviewState(&r)
@@ -502,6 +502,7 @@ func (m *Model) loadFromCache() {
 			draft:  p.IsDraft,
 			updatedAt: p.UpdatedAt,
 			mergeable: p.Mergeable,
+			mergeState: p.MergeState,
 			role:     "review-direct",
 			headSha: p.HeadSHA,
 		}
@@ -525,6 +526,7 @@ func (m *Model) loadFromCache() {
 			draft:  p.IsDraft,
 			updatedAt: p.UpdatedAt,
 			mergeable: p.Mergeable,
+			mergeState: p.MergeState,
 			role:     "review-team",
 			headSha: p.HeadSHA,
 		}
@@ -548,6 +550,7 @@ func (m *Model) loadFromCache() {
 			draft:  p.IsDraft,
 			updatedAt: p.UpdatedAt,
 			mergeable: p.Mergeable,
+			mergeState: p.MergeState,
 			headSha: p.HeadSHA,
 		}
 		m.loadReviewState(&r)
@@ -1668,7 +1671,6 @@ func (m Model) View() string {
 
 		// empty section indicator (PR sections only)
 		if len(s.rows) == 0 && !m.loading[s.name] && s.name != "Services" && s.name != "Releases" {
-			b.WriteString("  ")
 			b.WriteString(helpKey.Render("- no results -"))
 			b.WriteString("\n")
 		}
@@ -1685,12 +1687,13 @@ func (m Model) View() string {
 					repoWidth = 50
 				}
 			}
-			titleWidth := m.width - repoWidth - 28
+			titleWidth := m.width - repoWidth - 33
 			if titleWidth < 1 {
 				titleWidth = 1
 			}
-			header := fmt.Sprintf("%s%s  %s  %s  %s",
-				padWidth("CI Rev", 10),
+			header := fmt.Sprintf("%s%s%s  %s  %s  %s",
+				"    CI Re ",
+				padWidth("Up", 5),
 				padWidth("Repo", repoWidth),
 				padWidth("#", 6),
 				padWidth("Title", titleWidth),
@@ -1705,7 +1708,7 @@ func (m Model) View() string {
 			}
 
 			if visStart > 0 {
-				b.WriteString(overflowStyle.Render(fmt.Sprintf("↑ %d more above", visStart)))
+				b.WriteString(overflowStyle.Render(fmt.Sprintf("    ↑ %d more above", visStart)))
 				b.WriteString("\n")
 			}
 
@@ -1720,7 +1723,7 @@ func (m Model) View() string {
 
 			remaining := len(s.rows) - visEnd
 			if remaining > 0 {
-				b.WriteString(overflowStyle.Render(fmt.Sprintf("↓ %d more below", remaining)))
+				b.WriteString(overflowStyle.Render(fmt.Sprintf("    ↓ %d more below", remaining)))
 				b.WriteString("\n")
 			}
 
@@ -1788,7 +1791,7 @@ func (m Model) View() string {
 			}
 
 			if visStart > 0 {
-				b.WriteString(overflowStyle.Render(fmt.Sprintf("↑ %d more above", visStart)))
+				b.WriteString(overflowStyle.Render(fmt.Sprintf("    ↑ %d more above", visStart)))
 				b.WriteString("\n")
 			}
 
@@ -1839,7 +1842,7 @@ func (m Model) View() string {
 
 			remaining := len(s.rows) - visEnd
 			if remaining > 0 {
-				b.WriteString(overflowStyle.Render(fmt.Sprintf("↓ %d more below", remaining)))
+				b.WriteString(overflowStyle.Render(fmt.Sprintf("    ↓ %d more below", remaining)))
 				b.WriteString("\n")
 			}
 
@@ -2040,6 +2043,16 @@ func renderRow(r row, selected bool, refreshing bool, refreshIcon string, repoWi
 		rev = "·"
 	}
 
+	sync := " "
+	switch {
+	case r.mergeable == "CONFLICTING" || r.mergeState == "DIRTY":
+		sync = "≠"
+	case r.mergeState == "BEHIND":
+		sync = "↓"
+	case r.mergeState == "CLEAN" || r.mergeState == "UNSTABLE":
+		sync = "↑"
+	}
+
 	left := padWidth(aiIcon, 4) + icon + "  " + rev
 
 	const ageWidth = 6
@@ -2052,12 +2065,12 @@ func renderRow(r row, selected bool, refreshing bool, refreshIcon string, repoWi
 		}
 		ts := relativeTime(r.updatedAt)
 		repo := truncateWidth(r.repo, repoWidth)
-		titleWidth := maxWidth - repoWidth - 28
+		titleWidth := maxWidth - repoWidth - 33
 		if titleWidth < 1 {
 			titleWidth = 1
 		}
-		line = fmt.Sprintf("%s%s  #%-5d  %s  %s",
-			padWidth(left, 10), padWidth(repo, repoWidth), r.num, padWidth(truncateWidth(title, titleWidth), titleWidth), padWidth(ts, ageWidth))
+		line = fmt.Sprintf("%s%s%s  #%-5d  %s  %s",
+			padWidth(left, 10), padWidth(sync, 5), padWidth(repo, repoWidth), r.num, padWidth(truncateWidth(title, titleWidth), titleWidth), padWidth(ts, ageWidth))
 	} else {
 		line = r.title
 		if maxWidth > 0 {
@@ -2123,6 +2136,12 @@ func (m Model) renderHelpOverlay() string {
 			b.WriteString(helpKeyEntry("s", "toggle starred"))
 			b.WriteString(helpKeyEntry("a", "toggle age sort"))
 			b.WriteString(helpKeyEntry("/", "search"))
+			b.WriteString("\n")
+			b.WriteString(helpKey.Render("legend"))
+			b.WriteString("\n")
+			b.WriteString(helpKeyEntry("↑", "up to date"))
+			b.WriteString(helpKeyEntry("↓", "branch behind base (backmerge)"))
+			b.WriteString(helpKeyEntry("≠", "merge conflict"))
 		case "To Review", "Team Review":
 			teamLabel := "show team"
 			if s.hideTeamReviews {
@@ -2147,6 +2166,12 @@ func (m Model) renderHelpOverlay() string {
 			b.WriteString(helpKeyEntry("s", "toggle starred"))
 			b.WriteString(helpKeyEntry("a", "toggle age sort"))
 			b.WriteString(helpKeyEntry("/", "search"))
+			b.WriteString("\n")
+			b.WriteString(helpKey.Render("legend"))
+			b.WriteString("\n")
+			b.WriteString(helpKeyEntry("↑", "up to date"))
+			b.WriteString(helpKeyEntry("↓", "branch behind base (backmerge)"))
+			b.WriteString(helpKeyEntry("≠", "merge conflict"))
 		case "Services":
 			b.WriteString(helpKey.Render("actions"))
 			b.WriteString("\n")
@@ -2277,6 +2302,7 @@ func toCached(p gh.PR, role string) store.CachedPR {
 		ReviewDecision: p.ReviewDecision,
 		CIState:        p.CIState,
 		Mergeable:      p.Mergeable,
+		MergeState:     p.MergeState,
 		UpdatedAt:      p.UpdatedAt,
 		IsDraft:        p.IsDraft,
 		HeadSHA:        p.HeadRefOid,
