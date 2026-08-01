@@ -754,6 +754,81 @@ func (m Model) refreshDeps(ctx context.Context) tea.Cmd {
 	}
 }
 
+func (m Model) refreshServiceCmd(ctx context.Context, repo string) tea.Cmd {
+	return func() tea.Msg {
+		var svc *config.ServiceConfig
+		for i := range m.cfg.Services {
+			if m.cfg.Services[i].Repo == repo {
+				svc = &m.cfg.Services[i]
+				break
+			}
+		}
+		if svc == nil {
+			return refreshDoneMsg{source: "Services", err: fmt.Errorf("service not found: %s", repo)}
+		}
+		svcCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+		defer cancel()
+		var rc k8s.Client
+		if len(m.mockK8sImages) > 0 {
+			img, ok := m.mockK8sImages[svc.Name]
+			if !ok {
+				img, ok = m.mockK8sImages[svc.Repo]
+			}
+			if !ok {
+				img, ok = m.mockK8sImages["*"]
+			}
+			if !ok {
+				return refreshDoneMsg{source: "Services", err: fmt.Errorf("mock: no image for service %q", svc.Name)}
+			}
+			rc = k8s.NewMock(map[string]string{"*": img})
+		} else {
+			var err error
+			rc, err = k8s.NewRealClient(svcCtx, "", svc.Context, m.cfg.K8s.LoginCommand)
+			if err != nil {
+				return refreshDoneMsg{source: "Services", err: err}
+			}
+		}
+		v := version.Resolve(svcCtx, rc, m.gh, *svc)
+		pending := ""
+		for i, t := range v.PendingTags {
+			if i > 0 {
+				pending += ", "
+			}
+			if t.Title != "" && t.Title != t.Name {
+				pending += t.Name + "|" + t.Title
+			} else {
+				pending += t.Name
+			}
+		}
+		untagged := ""
+		if len(v.UntaggedCommits) > 0 {
+			var buf strings.Builder
+			buf.WriteByte('[')
+			for i, c := range v.UntaggedCommits {
+				if i > 0 {
+					buf.WriteByte(',')
+				}
+				fmt.Fprintf(&buf, `{"sha":%q,"message":%q}`, c.SHA[:7], c.Message)
+			}
+			buf.WriteByte(']')
+			untagged = buf.String()
+		}
+		if shipLog != nil {
+			shipLog.Printf("Services: re-resolved %s", svc.Repo)
+		}
+		m.store.SaveVersion(store.CachedVersion{
+			Repo:            v.Service.Repo,
+			ProdRef:         v.ProdRef,
+			ProdSHA:         v.ProdSHA,
+			AheadBy:         v.AheadBy,
+			PendingTags:     pending,
+			UntaggedCommits: untagged,
+			Error:           v.Error,
+		})
+		return refreshDoneMsg{source: "Services", err: nil}
+	}
+}
+
 func (m Model) refreshItemCmd(ctx context.Context) tea.Cmd {
 	s := m.sections[m.sectionIdx]
 	r := m.currentRow()
@@ -1467,6 +1542,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				}
 			}
 		}
+
+	case tagCreatedMsg:
+		m.refreshingItem = struct{ repo string; num int }{repo: msg.repo, num: 0}
+		return m, m.refreshServiceCmd(context.Background(), msg.repo)
 	}
 
 	return m, nil
@@ -1526,6 +1605,10 @@ func (m *Model) fetchTagMetaCmd(repo, versioning string) tea.Cmd {
 	}
 }
 
+type tagCreatedMsg struct {
+	repo string
+}
+
 func (m *Model) createTagRelease(repo, tag, sha, branch string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
@@ -1541,7 +1624,7 @@ func (m *Model) createTagRelease(repo, tag, sha, branch string) tea.Cmd {
 		if err != nil {
 			return errorMsg(err.Error())
 		}
-		return refreshMsg{}
+		return tagCreatedMsg{repo: repo}
 	}
 }
 
