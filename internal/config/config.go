@@ -23,9 +23,10 @@ type K8sConfig struct {
 }
 
 type GitHubConfig struct {
-	Owners     []string `toml:"owners"`
-	Teams      []string `toml:"teams"`
-	DepAuthors []string `toml:"dep_authors"`
+	Owners            []string `toml:"owners"`
+	Teams             []string `toml:"teams"`
+	DepAuthors        []string `toml:"dep_authors"`
+	IgnoreContributors []string `toml:"ignore_contributors"`
 }
 
 type AIConfig struct {
@@ -71,7 +72,8 @@ func Load(path string) (*Config, error) {
 	cfg := &Config{
 		RefreshInterval: 300,
 		GitHub: GitHubConfig{
-			DepAuthors: []string{"app/renovate", "app/dependabot"},
+			DepAuthors:        []string{"app/renovate", "app/dependabot"},
+			IgnoreContributors: []string{"github-actions[bot]", "dependabot[bot]", "renovate[bot]"},
 		},
 		AI: AIConfig{
 			ReviewProvider: "claude-cli",

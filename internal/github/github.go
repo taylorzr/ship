@@ -414,10 +414,90 @@ type CompareResult struct {
 }
 
 type CommitSummary struct {
-	SHA     string
-	Message string
-	Author  string
-	Parents []string
+	SHA          string
+	Message      string
+	Author       string
+	Parents      []string
+	Contributors []string // unique commit authors covered by this version
+}
+
+// VersionContributors returns the unique commit authors that make up a version
+// starting at startSHA. A tag or merge commit spans multiple commits, so the
+// walk follows all parents down to the previous tagged commit (or prodSHA),
+// collecting every author in that range. stopSHA (optional) hard-stops the walk
+// without including it, used to delimit consecutive untagged commits.
+//
+// Commits provided in the commits slice are used as-is; commits outside it
+// (e.g. tags pointing at a non-default branch) are fetched on demand.
+func (c *Client) VersionContributors(ctx context.Context, repo, startSHA, stopSHA, prodSHA string, commits []CommitSummary, tagged map[string]bool) []string {
+	if startSHA == "" || startSHA == prodSHA {
+		return nil
+	}
+	bySHA := make(map[string]CommitSummary, len(commits))
+	for _, cm := range commits {
+		bySHA[cm.SHA] = cm
+	}
+	var out []string
+	seen := make(map[string]bool)
+	var walk func(string)
+	walk = func(cur string) {
+		if cur == "" || cur == stopSHA || cur == prodSHA || seen[cur] {
+			return
+		}
+		seen[cur] = true
+		cm, ok := bySHA[cur]
+		if !ok {
+			fetched, err := c.commitSummary(ctx, repo, cur)
+			if err != nil {
+				return
+			}
+			cm = fetched
+		}
+		if cur != startSHA && tagged[cur] {
+			return // previous version boundary
+		}
+		if cm.Author != "" && !contains(out, cm.Author) {
+			out = append(out, cm.Author)
+		}
+		for _, p := range cm.Parents {
+			walk(p)
+		}
+	}
+	walk(startSHA)
+	return out
+}
+
+// commitSummary fetches a single commit's summary (author + parents) from the
+// GitHub API. Used by VersionContributors for commits outside the prod-to-branch
+// compare range.
+func (c *Client) commitSummary(ctx context.Context, repo, sha string) (CommitSummary, error) {
+	out, err := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("repos/%s/commits/%s", repo, sha), "--jq", "{sha, parents: [.parents[].sha], author: (.author.login // \"\"), name: (.commit.author.name // \"\")}").CombinedOutput()
+	if err != nil {
+		return CommitSummary{}, fmt.Errorf("gh api commit: %s: %w", strings.TrimSpace(string(out)), err)
+	}
+	var resp struct {
+		SHA     string   `json:"sha"`
+		Parents []string `json:"parents"`
+		Author  string   `json:"author"`
+		Name    string   `json:"name"`
+	}
+	if err := json.Unmarshal(out, &resp); err != nil {
+		return CommitSummary{}, fmt.Errorf("parse commit: %w", err)
+	}
+	return CommitSummary{
+		SHA:     resp.SHA,
+		Author:  resp.Author,
+		Parents: resp.Parents,
+	}, nil
+}
+
+func contains(list []string, s string) bool {
+	for _, v := range list {
+		if v == s {
+			return true
+		}
+	}
+	return false
 }
 
 func (c *Client) Compare(ctx context.Context, repo, base, head string) (*CompareResult, error) {
@@ -438,6 +518,9 @@ func (c *Client) Compare(ctx context.Context, repo, base, head string) (*Compare
 					Name string `json:"name"`
 				} `json:"author"`
 			} `json:"commit"`
+			Author struct {
+				Login string `json:"login"`
+			} `json:"author"`
 		} `json:"commits"`
 	}
 	if err := json.Unmarshal(out, &resp); err != nil {
@@ -448,7 +531,12 @@ func (c *Client) Compare(ctx context.Context, repo, base, head string) (*Compare
 		cs := CommitSummary{
 			SHA:     c.SHA,
 			Message: strings.Split(c.Commit.Message, "\n")[0],
-			Author:  c.Commit.Author.Name,
+		}
+		// Prefer the GitHub login so contributors match release authors
+		// (also logins); fall back to the commit author name.
+		cs.Author = c.Author.Login
+		if cs.Author == "" {
+			cs.Author = c.Commit.Author.Name
 		}
 		for _, p := range c.Parents {
 			cs.Parents = append(cs.Parents, p.SHA)
@@ -536,8 +624,10 @@ func (c *Client) ListTagsReachableFrom(ctx context.Context, repo, branch string)
 }
 
 type PendingTag struct {
-	Name  string
-	Title string
+	Name          string
+	Title         string
+	ReleaseAuthor string
+	Contributors  []string
 }
 
 func (c *Client) PendingTags(ctx context.Context, repo, prodSHA, branch, source, prodTag string, ahead []CommitSummary) ([]PendingTag, error) {
@@ -570,7 +660,9 @@ func (c *Client) PendingTags(ctx context.Context, repo, prodSHA, branch, source,
 	// just-created release, while git refs are updated immediately. Reconcile:
 	// any tag pointing directly at a commit ahead of prod that isn't already
 	// listed must be pending.
-	if tags, tagErr := c.ListTags(ctx, repo); tagErr == nil && len(tags) > 0 {
+	var tags []TagInfo
+	if list, tagErr := c.ListTags(ctx, repo); tagErr == nil && len(list) > 0 {
+		tags = list
 		aheadSet := make(map[string]bool, len(ahead))
 		for _, cm := range ahead {
 			aheadSet[cm.SHA] = true
@@ -590,6 +682,24 @@ func (c *Client) PendingTags(ctx context.Context, repo, prodSHA, branch, source,
 		}
 	}
 
+	// Attach contributors: each pending tag is a version spanning its own
+	// commits down to the previous tagged commit.
+	if len(tags) > 0 {
+		tagged := make(map[string]bool, len(tags))
+		tagSHA := make(map[string]string, len(tags))
+		for _, t := range tags {
+			tagged[t.SHA] = true
+			tagSHA[t.Name] = t.SHA
+		}
+		for i := range pending {
+			sha, ok := tagSHA[pending[i].Name]
+			if !ok {
+				continue
+			}
+			pending[i].Contributors = c.VersionContributors(ctx, repo, sha, "", prodSHA, ahead, tagged)
+		}
+	}
+
 	return pending, nil
 }
 
@@ -599,6 +709,9 @@ func (c *Client) pendingTagsFromReleases(ctx context.Context, repo, prodSHA, pro
 		Name       string `json:"name"`
 		Prerelease bool   `json:"prerelease"`
 		CreatedAt  string `json:"created_at"`
+		Author     struct {
+			Login string `json:"login"`
+		} `json:"author"`
 	}
 
 	var allReleases []ghRelease
@@ -652,7 +765,7 @@ func (c *Client) pendingTagsFromReleases(ctx context.Context, repo, prodSHA, pro
 					continue
 				}
 				if t.After(prodTime) {
-					pending = append(pending, PendingTag{Name: rel.TagName, Title: rel.Name})
+					pending = append(pending, PendingTag{Name: rel.TagName, Title: rel.Name, ReleaseAuthor: rel.Author.Login})
 				}
 			}
 			return pending, true, nil
@@ -724,6 +837,17 @@ func (c *Client) UntaggedFirstParent(ctx context.Context, repo, prodSHA, branch 
 		} else {
 			break
 		}
+	}
+
+	// Attach contributors per commit: each merge/squash commit is its own
+	// version, spanning its ancestors down to the next untagged commit, the
+	// previous tag, or prod.
+	for i := range untagged {
+		stop := ""
+		if i+1 < len(untagged) {
+			stop = untagged[i+1].SHA
+		}
+		untagged[i].Contributors = c.VersionContributors(ctx, repo, untagged[i].SHA, stop, prodSHA, commits, tagged)
 	}
 
 	return untagged, nil

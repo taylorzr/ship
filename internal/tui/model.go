@@ -113,6 +113,7 @@ type row struct {
 	reviewed  bool   // AI review dispatched
 	reviewStale bool // AI review exists but head SHA changed
 	headSha   string // PR head SHA for stale check
+	contributors string // version contributors (releases section)
 }
 
 type section struct {
@@ -424,6 +425,13 @@ func (m *Model) loadFromCache() {
 		s3.allRows = append(s3.allRows, r)
 		s3.rows = append(s3.rows, r)
 		if v.PendingTags != "" && v.Error == "" {
+			contribs := map[string]struct {
+				ReleaseAuthor string   `json:"release_author"`
+				Contributors  []string `json:"contributors"`
+			}{}
+			if v.PendingContribs != "" {
+				json.Unmarshal([]byte(v.PendingContribs), &contribs)
+			}
 			for _, entry := range strings.Split(v.PendingTags, ", ") {
 				if entry == "" {
 					continue
@@ -437,11 +445,12 @@ func (m *Model) loadFromCache() {
 					pending = tag + ": " + title
 				}
 				pr := row{
-					pending: pending,
-					repo:    v.Repo,
-					prodRef: v.ProdRef,
-					url:     fmt.Sprintf("https://github.com/%s/releases/tag/%s", v.Repo, tag),
-					depth:   1,
+					pending:      pending,
+					repo:         v.Repo,
+					prodRef:      v.ProdRef,
+					url:          fmt.Sprintf("https://github.com/%s/releases/tag/%s", v.Repo, tag),
+					depth:        1,
+					contributors: m.formatContributors(contribs[tag].ReleaseAuthor, contribs[tag].Contributors),
 				}
 				s3.allRows = append(s3.allRows, pr)
 				s3.rows = append(s3.rows, pr)
@@ -449,17 +458,20 @@ func (m *Model) loadFromCache() {
 		}
 		if v.UntaggedCommits != "" && v.Error == "" {
 			var commits []struct {
-				SHA     string `json:"sha"`
-				Message string `json:"message"`
+				SHA          string   `json:"sha"`
+				Message      string   `json:"message"`
+				Author       string   `json:"author"`
+				Contributors []string `json:"contributors"`
 			}
 			if err := json.Unmarshal([]byte(v.UntaggedCommits), &commits); err == nil {
 				for _, c := range commits {
 					pr := row{
-						sha:     c.SHA,
-						pending: fmt.Sprintf("%s: %s", c.SHA[:7], c.Message),
-						repo:    v.Repo,
-						prodRef: v.ProdRef,
-						depth:   1,
+						sha:          c.SHA,
+						pending:      fmt.Sprintf("%s: %s", c.SHA[:7], c.Message),
+						repo:         v.Repo,
+						prodRef:      v.ProdRef,
+						depth:        1,
+						contributors: m.formatContributors("", c.Contributors),
 					}
 					s3.allRows = append(s3.allRows, pr)
 					s3.rows = append(s3.rows, pr)
@@ -790,30 +802,8 @@ func (m Model) refreshServiceCmd(ctx context.Context, repo string) tea.Cmd {
 			}
 		}
 		v := version.Resolve(svcCtx, rc, m.gh, *svc)
-		pending := ""
-		for i, t := range v.PendingTags {
-			if i > 0 {
-				pending += ", "
-			}
-			if t.Title != "" && t.Title != t.Name {
-				pending += t.Name + "|" + t.Title
-			} else {
-				pending += t.Name
-			}
-		}
-		untagged := ""
-		if len(v.UntaggedCommits) > 0 {
-			var buf strings.Builder
-			buf.WriteByte('[')
-			for i, c := range v.UntaggedCommits {
-				if i > 0 {
-					buf.WriteByte(',')
-				}
-				fmt.Fprintf(&buf, `{"sha":%q,"message":%q}`, c.SHA, c.Message)
-			}
-			buf.WriteByte(']')
-			untagged = buf.String()
-		}
+		pending, contribs := serializePendingTags(v.PendingTags)
+		untagged := serializeUntaggedCommits(v.UntaggedCommits)
 		if shipLog != nil {
 			shipLog.Printf("Services: re-resolved %s", svc.Repo)
 		}
@@ -823,6 +813,7 @@ func (m Model) refreshServiceCmd(ctx context.Context, repo string) tea.Cmd {
 			ProdSHA:         v.ProdSHA,
 			AheadBy:         v.AheadBy,
 			PendingTags:     pending,
+			PendingContribs: contribs,
 			UntaggedCommits: untagged,
 			Error:           v.Error,
 		})
@@ -871,30 +862,8 @@ func (m Model) refreshItemCmd(ctx context.Context) tea.Cmd {
 				}
 			}
 			v := version.Resolve(svcCtx, rc, m.gh, *svc)
-			pending := ""
-			for i, t := range v.PendingTags {
-				if i > 0 {
-					pending += ", "
-				}
-				if t.Title != "" && t.Title != t.Name {
-					pending += t.Name + "|" + t.Title
-				} else {
-					pending += t.Name
-				}
-			}
-			untagged := ""
-			if len(v.UntaggedCommits) > 0 {
-				var buf strings.Builder
-				buf.WriteByte('[')
-				for i, c := range v.UntaggedCommits {
-					if i > 0 {
-						buf.WriteByte(',')
-					}
-					fmt.Fprintf(&buf, `{"sha":%q,"message":%q}`, c.SHA, c.Message)
-				}
-				buf.WriteByte(']')
-				untagged = buf.String()
-			}
+			pending, contribs := serializePendingTags(v.PendingTags)
+			untagged := serializeUntaggedCommits(v.UntaggedCommits)
 			if shipLog != nil {
 				shipLog.Printf("Services: re-resolved %s", svc.Repo)
 			}
@@ -904,6 +873,7 @@ func (m Model) refreshItemCmd(ctx context.Context) tea.Cmd {
 				ProdSHA:         v.ProdSHA,
 				AheadBy:         v.AheadBy,
 				PendingTags:     pending,
+				PendingContribs: contribs,
 				UntaggedCommits: untagged,
 				Error:           v.Error,
 			})
@@ -954,6 +924,7 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 			ProdSHA         string
 			AheadBy         int
 			PendingTags     string
+			PendingContribs string
 			UntaggedCommits string
 			Error           string
 		}
@@ -992,30 +963,8 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 					}
 				}
 				r := version.Resolve(svcCtx, rc, m.gh, svc)
-				pending := ""
-				for i, t := range r.PendingTags {
-					if i > 0 {
-						pending += ", "
-					}
-					if t.Title != "" && t.Title != t.Name {
-						pending += t.Name + "|" + t.Title
-					} else {
-						pending += t.Name
-					}
-				}
-				untagged := ""
-				if len(r.UntaggedCommits) > 0 {
-					var buf strings.Builder
-					buf.WriteByte('[')
-					for i, c := range r.UntaggedCommits {
-						if i > 0 {
-							buf.WriteByte(',')
-						}
-						fmt.Fprintf(&buf, `{"sha":%q,"message":%q}`, c.SHA, c.Message)
-					}
-					buf.WriteByte(']')
-					untagged = buf.String()
-				}
+				pending, contribs := serializePendingTags(r.PendingTags)
+				untagged := serializeUntaggedCommits(r.UntaggedCommits)
 				if shipLog != nil {
 					dur := time.Since(svcStart).Truncate(time.Millisecond)
 					if r.Error != "" {
@@ -1030,6 +979,7 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 					ProdSHA:         r.ProdSHA,
 					AheadBy:         r.AheadBy,
 					PendingTags:     pending,
+					PendingContribs: contribs,
 					UntaggedCommits: untagged,
 					Error:           r.Error,
 				}
@@ -1047,6 +997,7 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 				ProdSHA:         res.ProdSHA,
 				AheadBy:         res.AheadBy,
 				PendingTags:     res.PendingTags,
+				PendingContribs: res.PendingContribs,
 				UntaggedCommits: res.UntaggedCommits,
 				Error:           res.Error,
 			})
@@ -1779,6 +1730,7 @@ func (m Model) View() string {
 			maxName := 4  // "Name"
 			maxCur := 7   // "Current"
 			maxPen := 7   // "Pending"
+			maxCon := 11  // "Contributors"
 			for _, r := range s.rows {
 				if r.depth == 0 {
 					if w := lipgloss.Width(r.name); w > maxName {
@@ -1791,6 +1743,9 @@ func (m Model) View() string {
 				if w := lipgloss.Width(r.pending); w > maxPen {
 					maxPen = w
 				}
+				if w := lipgloss.Width(r.contributors); w > maxCon {
+					maxCon = w
+				}
 			}
 			if maxName > 30 {
 				maxName = 30
@@ -1801,8 +1756,11 @@ func (m Model) View() string {
 			if maxPen > 60 {
 				maxPen = 60
 			}
+			if maxCon > 40 {
+				maxCon = 40
+			}
 			if m.width > 0 {
-				avail := m.width - maxName - maxCur - 4 // 2 separators + padding
+				avail := m.width - maxName - maxCur - maxCon - 6 // 3 separators + padding
 				if avail < maxPen {
 					maxPen = avail
 				}
@@ -1811,13 +1769,15 @@ func (m Model) View() string {
 				}
 			}
 			sep := "  "
-			header := fmt.Sprintf("%s%s%s%s%s%s",
+			header := fmt.Sprintf("%s%s%s%s%s%s%s%s",
 				"    ",
 				padWidth("Name", maxName),
 				sep,
 				padWidth("Current", maxCur),
 				sep,
-				padWidth("Pending", maxPen))
+				padWidth("Pending", maxPen),
+				sep,
+				padWidth("Contributors", maxCon))
 			b.WriteString(headerStyle.Render(header))
 			b.WriteString("\n")
 
@@ -1846,22 +1806,26 @@ func (m Model) View() string {
 					if isRefreshing {
 						loadCol = padWidth(m.spin.View(), 4)
 					}
-					line = fmt.Sprintf("%s%s%s%s%s%s",
-						loadCol,
-						padWidth(truncateWidth(r.name, maxName), maxName),
-						sep,
-						padWidth(truncateWidth(r.title, maxCur), maxCur),
-						sep,
-						padWidth(truncateWidth(pending, maxPen), maxPen))
-				} else {
-					line = fmt.Sprintf("%s%s%s%s%s%s",
-						"    ",
-						padWidth("", maxName),
-						sep,
-						padWidth("", maxCur),
-						sep,
-						padWidth(truncateWidth(r.pending, maxPen), maxPen))
-				}
+				line = fmt.Sprintf("%s%s%s%s%s%s%s%s",
+					loadCol,
+					padWidth(truncateWidth(r.name, maxName), maxName),
+					sep,
+					padWidth(truncateWidth(r.title, maxCur), maxCur),
+					sep,
+					padWidth(truncateWidth(pending, maxPen), maxPen),
+					sep,
+					padWidth(truncateWidth(r.contributors, maxCon), maxCon))
+			} else {
+				line = fmt.Sprintf("%s%s%s%s%s%s%s%s",
+					"    ",
+					padWidth("", maxName),
+					sep,
+					padWidth("", maxCur),
+					sep,
+					padWidth(truncateWidth(r.pending, maxPen), maxPen),
+					sep,
+					padWidth(truncateWidth(r.contributors, maxCon), maxCon))
+			}
 				if m.width > 0 {
 					line = truncateWidth(line, m.width)
 				}
@@ -1915,6 +1879,89 @@ func (m Model) View() string {
 	}
 
 	return content
+}
+
+// serializePendingTags turns the pending tag list into the on-disk "tag|title,
+// tag|title" string plus a JSON map of tag → {release_author, contributors}
+// used to render the contributors column from cache.
+func serializePendingTags(tags []gh.PendingTag) (pending string, contribs string) {
+	if len(tags) == 0 {
+		return "", ""
+	}
+	cmap := make(map[string]map[string]any, len(tags))
+	for i, t := range tags {
+		if i > 0 {
+			pending += ", "
+		}
+		if t.Title != "" && t.Title != t.Name {
+			pending += t.Name + "|" + t.Title
+		} else {
+			pending += t.Name
+		}
+		cmap[t.Name] = map[string]any{"release_author": t.ReleaseAuthor, "contributors": t.Contributors}
+	}
+	contribs = ""
+	if b, err := json.Marshal(cmap); err == nil {
+		contribs = string(b)
+	}
+	return pending, contribs
+}
+
+// serializeUntaggedCommits turns the untagged commit list into the on-disk JSON
+// array, including per-commit authors so the contributors column survives cache
+// reloads.
+func serializeUntaggedCommits(commits []gh.CommitSummary) string {
+	if len(commits) == 0 {
+		return ""
+	}
+	var buf strings.Builder
+	buf.WriteByte('[')
+	for i, c := range commits {
+		if i > 0 {
+			buf.WriteByte(',')
+		}
+		cb, _ := json.Marshal(c.Contributors)
+		fmt.Fprintf(&buf, `{"sha":%q,"message":%q,"author":%q,"contributors":%s}`, c.SHA, c.Message, c.Author, cb)
+	}
+	buf.WriteByte(']')
+	return buf.String()
+}
+
+// formatContributors renders the contributors column for a version: unique
+// commit authors joined by ", ", with the release author marked "(release)"
+// when it isn't itself one of the committers. Ignored bots are dropped, and
+// names are deduped case-insensitively (a release author who also committed
+// appears once).
+func (m *Model) formatContributors(releaseAuthor string, contributors []string) string {
+	ignored := make(map[string]bool, len(m.cfg.GitHub.IgnoreContributors))
+	for _, ig := range m.cfg.GitHub.IgnoreContributors {
+		ignored[strings.ToLower(ig)] = true
+	}
+	names := []string{}
+	seen := map[string]bool{}
+	markRelease := releaseAuthor != ""
+	for _, c := range contributors {
+		if strings.EqualFold(c, releaseAuthor) {
+			markRelease = false
+			break
+		}
+	}
+	if releaseAuthor != "" && !ignored[strings.ToLower(releaseAuthor)] {
+		seen[strings.ToLower(releaseAuthor)] = true
+		if markRelease {
+			names = append(names, releaseAuthor+" (release)")
+		} else {
+			names = append(names, releaseAuthor)
+		}
+	}
+	for _, c := range contributors {
+		if c == "" || seen[strings.ToLower(c)] || ignored[strings.ToLower(c)] {
+			continue
+		}
+		seen[strings.ToLower(c)] = true
+		names = append(names, c)
+	}
+	return strings.Join(names, ", ")
 }
 
 func truncateWidth(s string, max int) string {
