@@ -195,7 +195,9 @@ type confirmAction struct {
 }
 
 type actionDoneMsg struct {
-	err error
+	repo string
+	num  int
+	err  error
 }
 
 type Model struct {
@@ -1414,9 +1416,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			if shipLog != nil {
 				shipLog.Printf("action: %v", msg.err)
 			}
+			if len(m.sections) > m.sectionIdx {
+				m.sectionErrs[m.sections[m.sectionIdx].name] = msg.err.Error()
+			}
+			return m, nil
 		}
-		for k := range m.loading {
-			m.loading[k] = true
+		if msg.repo != "" && msg.num > 0 {
+			m.refreshingItem = struct{ repo string; num int }{repo: msg.repo, num: msg.num}
+			return m, m.refreshItemCmd(context.Background())
 		}
 		return m, m.fullRefreshCmd()
 
@@ -2047,7 +2054,7 @@ func (m Model) execAction(action, repo string, num int, draft bool) tea.Cmd {
 		case "draft-toggle":
 			err = m.gh.ToggleDraft(ctx, repo, num, draft)
 		}
-		return actionDoneMsg{err: err}
+		return actionDoneMsg{repo: repo, num: num, err: err}
 	}
 }
 

@@ -22,6 +22,7 @@ type PR struct {
 	ReviewDecision string
 	CIState        string
 	Mergeable      string
+	State          string // "OPEN", "CLOSED", "MERGED"
 	UpdatedAt      string
 	IsDraft        bool
 	HeadRefOid     string
@@ -75,6 +76,7 @@ type prNode struct {
 		Title          string
 		URL            string
 		IsDraft        bool
+		State          githubv4.PullRequestState
 		Author         struct{ Login string }
 		ReviewDecision string
 		Mergeable      githubv4.MergeableState
@@ -115,6 +117,7 @@ type getPRResult struct {
 			Title          string
 			URL            string
 			IsDraft        bool
+			State          githubv4.PullRequestState
 			Author         struct{ Login string }
 			ReviewDecision string
 			Mergeable      githubv4.MergeableState
@@ -179,6 +182,7 @@ func (c *Client) search(ctx context.Context, query string) ([]PR, error) {
 					ReviewDecision: string(pr.ReviewDecision),
 					CIState:        ciState,
 					Mergeable:      string(pr.Mergeable),
+					State:          string(pr.State),
 					UpdatedAt:      pr.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 					IsDraft:        pr.IsDraft,
 					HeadRefOid:     pr.HeadRefOid,
@@ -341,6 +345,7 @@ func (c *Client) GetPR(ctx context.Context, repo string, number int) (*PR, error
 		ReviewDecision: string(pr.ReviewDecision),
 		CIState:        resolveCI(pr.Commits),
 		Mergeable:      string(pr.Mergeable),
+		State:          string(pr.State),
 		UpdatedAt:      pr.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 		IsDraft:        pr.IsDraft,
 		HeadRefOid:     pr.HeadRefOid,
@@ -708,23 +713,20 @@ func (c *Client) ClosePR(ctx context.Context, repo string, number int) error {
 }
 
 func (c *Client) ToggleDraft(ctx context.Context, repo string, number int, isDraft bool) error {
+	var args []string
 	if isDraft {
-		out, err := exec.CommandContext(ctx, "gh", "pr", "ready",
-			fmt.Sprintf("%d", number),
-			"-R", repo,
-		).CombinedOutput()
-		if err != nil {
-			return fmt.Errorf("mark PR #%d ready: %s: %w", number, strings.TrimSpace(string(out)), err)
-		}
-		return nil
+		args = []string{"pr", "ready"}
+	} else {
+		args = []string{"pr", "ready", "--undo"}
 	}
-	out, err := exec.CommandContext(ctx, "gh", "api",
-		fmt.Sprintf("repos/%s/pulls/%d", repo, number),
-		"-X", "PATCH",
-		"-f", "draft=true",
-	).CombinedOutput()
+	args = append(args, fmt.Sprintf("%d", number), "-R", repo)
+	out, err := exec.CommandContext(ctx, "gh", args...).CombinedOutput()
 	if err != nil {
-		return fmt.Errorf("convert PR #%d to draft: %s: %w", number, strings.TrimSpace(string(out)), err)
+		action := "convert to draft"
+		if isDraft {
+			action = "mark ready"
+		}
+		return fmt.Errorf("%s PR #%d: %s: %w", action, number, strings.TrimSpace(string(out)), err)
 	}
 	return nil
 }
