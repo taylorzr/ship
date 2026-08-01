@@ -409,6 +409,7 @@ func (m *Model) loadFromCache() {
 			title:   title,
 			repo:    v.Repo,
 			prodRef: v.ProdRef,
+			sha:     v.ProdSHA,
 			url:     fmt.Sprintf("https://github.com/%s/releases/tag/%s", v.Repo, v.ProdRef),
 			depth:   0,
 		}
@@ -454,7 +455,7 @@ func (m *Model) loadFromCache() {
 			if err := json.Unmarshal([]byte(v.UntaggedCommits), &commits); err == nil {
 				for _, c := range commits {
 					pr := row{
-						sha:     c.SHA[:7],
+						sha:     c.SHA,
 						pending: fmt.Sprintf("%s: %s", c.SHA[:7], c.Message),
 						repo:    v.Repo,
 						prodRef: v.ProdRef,
@@ -808,7 +809,7 @@ func (m Model) refreshServiceCmd(ctx context.Context, repo string) tea.Cmd {
 				if i > 0 {
 					buf.WriteByte(',')
 				}
-				fmt.Fprintf(&buf, `{"sha":%q,"message":%q}`, c.SHA[:7], c.Message)
+				fmt.Fprintf(&buf, `{"sha":%q,"message":%q}`, c.SHA, c.Message)
 			}
 			buf.WriteByte(']')
 			untagged = buf.String()
@@ -889,7 +890,7 @@ func (m Model) refreshItemCmd(ctx context.Context) tea.Cmd {
 					if i > 0 {
 						buf.WriteByte(',')
 					}
-					fmt.Fprintf(&buf, `{"sha":%q,"message":%q}`, c.SHA[:7], c.Message)
+					fmt.Fprintf(&buf, `{"sha":%q,"message":%q}`, c.SHA, c.Message)
 				}
 				buf.WriteByte(']')
 				untagged = buf.String()
@@ -1010,7 +1011,7 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 						if i > 0 {
 							buf.WriteByte(',')
 						}
-						fmt.Fprintf(&buf, `{"sha":%q,"message":%q}`, c.SHA[:7], c.Message)
+						fmt.Fprintf(&buf, `{"sha":%q,"message":%q}`, c.SHA, c.Message)
 					}
 					buf.WriteByte(']')
 					untagged = buf.String()
@@ -1148,6 +1149,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.tagging = false
 				m.tagQuery = ""
 				if tag != "" {
+					if shipLog != nil {
+						shipLog.Printf("tagging: tagMeta.sha=%q branch=%q", m.tagMeta.sha, m.tagMeta.branch)
+					}
 					return m, m.createTagRelease(m.tagMeta.repo, tag, m.tagMeta.sha, m.tagMeta.branch)
 				}
 		case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+o"))):
@@ -1155,7 +1159,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.tagging = false
 			m.tagQuery = ""
 			if tag != "" {
-				url := fmt.Sprintf("https://github.com/%s/releases/new?tag=%s&target=%s", m.tagMeta.repo, url.QueryEscape(tag), m.tagMeta.branch)
+				url := fmt.Sprintf("https://github.com/%s/releases/new?tag=%s&target=%s", m.tagMeta.repo, url.QueryEscape(tag), m.tagMeta.sha)
 				openBrowser(url)
 			}
 			case key.Matches(msg, key.NewBinding(key.WithKeys("backspace"))):
@@ -1204,6 +1208,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			r := m.currentRow()
 			if r != nil && r.url != "" {
 				openBrowser(r.url)
+			} else if r != nil && m.sections[m.sectionIdx].name == "Services" && r.depth > 0 && r.sha != "" && r.repo != "" {
+				openBrowser(fmt.Sprintf("https://github.com/%s/commit/%s", r.repo, r.sha))
 			}
 		case key.Matches(msg, keys.Diff):
 			switch m.sections[m.sectionIdx].name {
@@ -1370,6 +1376,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				s := m.sections[m.sectionIdx]
 				if s.name == "Services" {
 					r := m.currentRow()
+					if shipLog != nil {
+						shipLog.Printf("T pressed: r.url=%q r.sha=%q r.depth=%d", r.url, r.sha, r.depth)
+					}
 					if r != nil && r.url == "" && r.sha != "" {
 						var versioning, branch string
 						for _, svc := range m.cfg.Services {
@@ -1384,8 +1393,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 						m.tagging = true
 						m.tagQuery = ""
-						m.tagMeta = tagState{repo: r.repo, sha: r.sha, branch: branch, loading: true}
-						return m, m.fetchTagMetaCmd(r.repo, versioning)
+m.tagMeta = tagState{repo: r.repo, sha: r.sha, branch: branch, loading: true}
+					if shipLog != nil {
+						shipLog.Printf("T: set tagMeta.sha=%q (from r.sha=%q) branch=%q", m.tagMeta.sha, r.sha, branch)
+					}
+					return m, m.fetchTagMetaCmd(r.repo, versioning)
 					}
 				}
 			}
@@ -1545,7 +1557,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 
 	case tagCreatedMsg:
 		m.refreshingItem = struct{ repo string; num int }{repo: msg.repo, num: 0}
-		return m, m.refreshServiceCmd(context.Background(), msg.repo)
+		return m, m.refreshReleases(context.Background())
 	}
 
 	return m, nil
@@ -1617,7 +1629,7 @@ func (m *Model) createTagRelease(repo, tag, sha, branch string) tea.Cmd {
 			return errorMsg(fmt.Sprintf("create tag/release: %v", err))
 		}
 		if hasReleases {
-			err = m.gh.CreateRelease(ctx, repo, tag, branch)
+			err = m.gh.CreateRelease(ctx, repo, tag, sha)
 		} else {
 			err = m.gh.CreateTag(ctx, repo, tag, sha)
 		}
@@ -2130,6 +2142,18 @@ func (m Model) renderTagInput() string {
 		b.WriteString("\n\n")
 	} else {
 		b.WriteString(helpKey.Render("(no tags yet)"))
+		b.WriteString("\n\n")
+	}
+
+	if m.tagMeta.sha != "" {
+		target := m.tagMeta.sha
+		if len(target) > 7 {
+			target = target[:7]
+		}
+		b.WriteString(helpKey.Render("Target: " + target))
+		if m.tagMeta.branch != "" {
+			b.WriteString(helpKey.Render(" on " + m.tagMeta.branch))
+		}
 		b.WriteString("\n\n")
 	}
 

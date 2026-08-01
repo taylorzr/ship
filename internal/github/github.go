@@ -4,7 +4,9 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 	"time"
 
@@ -469,6 +471,17 @@ func (c *Client) ResolveRef(ctx context.Context, repo, ref string) (string, erro
 	return strings.TrimSpace(string(out)), nil
 }
 
+// ResolveCommit resolves a short or full SHA to the full SHA via the
+// commits API. Needed because `gh release create --target` does not resolve
+// short SHAs and falls back to the branch HEAD.
+func (c *Client) ResolveCommit(ctx context.Context, repo, sha string) (string, error) {
+	out, err := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("repos/%s/commits/%s", repo, sha), "--jq", ".sha").CombinedOutput()
+	if err != nil {
+		return "", fmt.Errorf("resolve commit %s: %s: %w", sha, strings.TrimSpace(string(out)), err)
+	}
+	return strings.TrimSpace(string(out)), nil
+}
+
 func (c *Client) DefaultBranch(ctx context.Context, repo string) string {
 	out, err := exec.CommandContext(ctx, "gh", "api", fmt.Sprintf("repos/%s", repo), "--jq", ".default_branch").CombinedOutput()
 	if err != nil {
@@ -759,11 +772,17 @@ func (c *Client) RepoHasReleases(ctx context.Context, repo string) (bool, error)
 }
 
 func (c *Client) CreateRelease(ctx context.Context, repo, tag, sha string) error {
-	out, err := exec.CommandContext(ctx, "gh", "release", "create", tag,
-		"--target", sha,
-		"--generate-notes",
-		"-R", repo,
-	).CombinedOutput()
+	full, err := c.ResolveCommit(ctx, repo, sha)
+	if err != nil {
+		return err
+	}
+	args := []string{"release", "create", tag, "--target", full, "--generate-notes", "-R", repo}
+	fmt.Fprintf(os.Stderr, "CreateRelease: gh %s (input sha=%s, resolved sha=%s)\n", strings.Join(args, " "), sha, full)
+	if logFile, err := os.OpenFile(filepath.Join(os.Getenv("HOME"), ".config", "ship", "ship.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+		fmt.Fprintf(logFile, "CreateRelease: gh %s (input sha=%s, resolved sha=%s)\n", strings.Join(args, " "), sha, full)
+		logFile.Close()
+	}
+	out, err := exec.CommandContext(ctx, "gh", args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("create release: %s: %w", strings.TrimSpace(string(out)), err)
 	}
@@ -771,12 +790,20 @@ func (c *Client) CreateRelease(ctx context.Context, repo, tag, sha string) error
 }
 
 func (c *Client) CreateTag(ctx context.Context, repo, tag, sha string) error {
-	out, err := exec.CommandContext(ctx, "gh", "api",
-		fmt.Sprintf("repos/%s/git/refs", repo),
-		"-X", "POST",
-		"-f", fmt.Sprintf("ref=refs/tags/%s", tag),
-		"-f", fmt.Sprintf("sha=%s", sha),
-	).CombinedOutput()
+	full, err := c.ResolveCommit(ctx, repo, sha)
+	if err != nil {
+		return err
+	}
+	args := []string{"api", fmt.Sprintf("repos/%s/git/refs", repo), "-X", "POST",
+		"-F", fmt.Sprintf("ref=refs/tags/%s", tag),
+		"-F", fmt.Sprintf("sha=%s", full),
+	}
+	fmt.Fprintf(os.Stderr, "CreateTag: gh %s (input sha=%s, resolved sha=%s)\n", strings.Join(args, " "), sha, full)
+	if logFile, err := os.OpenFile(filepath.Join(os.Getenv("HOME"), ".config", "ship", "ship.log"), os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0o644); err == nil {
+		fmt.Fprintf(logFile, "CreateTag: gh %s (input sha=%s, resolved sha=%s)\n", strings.Join(args, " "), sha, full)
+		logFile.Close()
+	}
+	out, err := exec.CommandContext(ctx, "gh", args...).CombinedOutput()
 	if err != nil {
 		return fmt.Errorf("create tag: %s: %w", strings.TrimSpace(string(out)), err)
 	}
