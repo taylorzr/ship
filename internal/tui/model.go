@@ -62,6 +62,8 @@ var (
 	headerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 	errorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	overflowStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	healthOK  = lipgloss.NewStyle().Foreground(lipgloss.Color("84"))
+	healthBad = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	dialogStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("205")).
@@ -113,6 +115,7 @@ type row struct {
 	headSha   string // PR head SHA for stale check
 	contributors string // version contributors (releases section)
 	mergeState string // PR merge state; "BEHIND" = needs backmerge
+	health     string // service deployment health summary
 }
 
 type section struct {
@@ -223,7 +226,7 @@ type Model struct {
 	tagMeta       tagState
 	showHelp      bool
 	gPending      bool
-	mockK8sImages map[string]string
+	mockK8sSpecs map[string]k8s.MockSpec
 	refreshingItem struct { repo string; num int }
 }
 
@@ -241,7 +244,7 @@ type tagMetaMsg struct {
 	hasReleases bool
 }
 
-func New(cfg *config.Config, st *store.Store, ghClient *gh.Client, mockK8sImages map[string]string) Model {
+func New(cfg *config.Config, st *store.Store, ghClient *gh.Client, mockK8sSpecs map[string]k8s.MockSpec) Model {
 	s := spinner.New()
 	s.Spinner = spinner.Ellipsis
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
@@ -260,9 +263,9 @@ func New(cfg *config.Config, st *store.Store, ghClient *gh.Client, mockK8sImages
 		store:       st,
 		gh:          ghClient,
 		spin:        s,
-		loading:     loading,
-		sectionErrs: map[string]string{},
-		mockK8sImages: mockK8sImages,
+		loading:      loading,
+		sectionErrs:  map[string]string{},
+		mockK8sSpecs: mockK8sSpecs,
 	}
 	m.loadFromCache()
 	return m
@@ -413,6 +416,7 @@ func (m *Model) loadFromCache() {
 			sha:     v.ProdSHA,
 			url:     fmt.Sprintf("https://github.com/%s/releases/tag/%s", v.Repo, v.ProdRef),
 			depth:   0,
+			health:  v.Health,
 		}
 		if v.Error != "" {
 			r.title = "✗ " + v.Error
@@ -785,18 +789,18 @@ func (m Model) refreshServiceCmd(ctx context.Context, repo string) tea.Cmd {
 		svcCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
 		var rc k8s.Client
-		if len(m.mockK8sImages) > 0 {
-			img, ok := m.mockK8sImages[svc.Name]
+		if len(m.mockK8sSpecs) > 0 {
+			spec, ok := m.mockK8sSpecs[svc.Name]
 			if !ok {
-				img, ok = m.mockK8sImages[svc.Repo]
+				spec, ok = m.mockK8sSpecs[svc.Repo]
 			}
 			if !ok {
-				img, ok = m.mockK8sImages["*"]
+				spec, ok = m.mockK8sSpecs["*"]
 			}
 			if !ok {
-				return refreshDoneMsg{source: "Services", err: fmt.Errorf("mock: no image for service %q", svc.Name)}
+				return refreshDoneMsg{source: "Services", err: fmt.Errorf("mock: no spec for service %q", svc.Name)}
 			}
-			rc = k8s.NewMock(map[string]string{"*": img})
+			rc = k8s.NewMock(map[string]k8s.MockSpec{"*": spec})
 		} else {
 			var err error
 			rc, err = k8s.NewRealClient(svcCtx, "", svc.Context, m.cfg.K8s.LoginCommand)
@@ -818,6 +822,7 @@ func (m Model) refreshServiceCmd(ctx context.Context, repo string) tea.Cmd {
 			PendingTags:     pending,
 			PendingContribs: contribs,
 			UntaggedCommits: untagged,
+			Health:          serializeHealth(v.Health),
 			Error:           v.Error,
 		})
 		return refreshDoneMsg{source: "Services", err: nil}
@@ -845,18 +850,18 @@ func (m Model) refreshItemCmd(ctx context.Context) tea.Cmd {
 			svcCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 			defer cancel()
 			var rc k8s.Client
-			if len(m.mockK8sImages) > 0 {
-				img, ok := m.mockK8sImages[svc.Name]
+			if len(m.mockK8sSpecs) > 0 {
+				spec, ok := m.mockK8sSpecs[svc.Name]
 				if !ok {
-					img, ok = m.mockK8sImages[svc.Repo]
+					spec, ok = m.mockK8sSpecs[svc.Repo]
 				}
 				if !ok {
-					img, ok = m.mockK8sImages["*"]
+					spec, ok = m.mockK8sSpecs["*"]
 				}
 				if !ok {
-					return refreshDoneMsg{source: s.name, err: fmt.Errorf("mock: no image for service %q", svc.Name)}
+					return refreshDoneMsg{source: s.name, err: fmt.Errorf("mock: no spec for service %q", svc.Name)}
 				}
-				rc = k8s.NewMock(map[string]string{"*": img})
+				rc = k8s.NewMock(map[string]k8s.MockSpec{"*": spec})
 			} else {
 				var err error
 				rc, err = k8s.NewRealClient(svcCtx, "", svc.Context, m.cfg.K8s.LoginCommand)
@@ -878,6 +883,7 @@ func (m Model) refreshItemCmd(ctx context.Context) tea.Cmd {
 				PendingTags:     pending,
 				PendingContribs: contribs,
 				UntaggedCommits: untagged,
+				Health:          serializeHealth(v.Health),
 				Error:           v.Error,
 			})
 			return refreshDoneMsg{source: s.name, err: nil}
@@ -929,6 +935,7 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 			PendingTags     string
 			PendingContribs string
 			UntaggedCommits string
+			Health          string
 			Error           string
 		}
 
@@ -944,19 +951,19 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 
 				svcStart := time.Now()
 				var rc k8s.Client
-				if len(m.mockK8sImages) > 0 {
-					img, ok := m.mockK8sImages[svc.Name]
+				if len(m.mockK8sSpecs) > 0 {
+					spec, ok := m.mockK8sSpecs[svc.Name]
 					if !ok {
-						img, ok = m.mockK8sImages[svc.Repo]
+						spec, ok = m.mockK8sSpecs[svc.Repo]
 					}
 					if !ok {
-						img, ok = m.mockK8sImages["*"]
+						spec, ok = m.mockK8sSpecs["*"]
 					}
 					if !ok {
-						results <- svcResult{Repo: svc.Repo, Error: fmt.Sprintf("mock: no image for service %q (key by name or repo)", svc.Name)}
+						results <- svcResult{Repo: svc.Repo, Error: fmt.Sprintf("mock: no spec for service %q (key by name or repo)", svc.Name)}
 						return
 					}
-					rc = k8s.NewMock(map[string]string{"*": img})
+					rc = k8s.NewMock(map[string]k8s.MockSpec{"*": spec})
 				} else {
 					var err error
 					rc, err = k8s.NewRealClient(svcCtx, "", svc.Context, m.cfg.K8s.LoginCommand)
@@ -984,6 +991,7 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 					PendingTags:     pending,
 					PendingContribs: contribs,
 					UntaggedCommits: untagged,
+					Health:          serializeHealth(r.Health),
 					Error:           r.Error,
 				}
 			}(svc)
@@ -1002,6 +1010,7 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 				PendingTags:     res.PendingTags,
 				PendingContribs: res.PendingContribs,
 				UntaggedCommits: res.UntaggedCommits,
+				Health:          res.Health,
 				Error:           res.Error,
 			})
 			if res.Error != "" {
@@ -1676,6 +1685,7 @@ func (m Model) View() string {
 
 		// empty section indicator (PR sections only)
 		if len(s.rows) == 0 && !m.loading[s.name] && s.name != "Services" && s.name != "Releases" {
+			b.WriteString("    ")
 			b.WriteString(helpKey.Render("- no results -"))
 			b.WriteString("\n")
 		}
@@ -1738,7 +1748,7 @@ func (m Model) View() string {
 			maxName := 4  // "Name"
 			maxCur := 7   // "Current"
 			maxPen := 7   // "Pending"
-			maxCon := 11  // "Contributors"
+			maxCon := 11  // "Details"
 			for _, r := range s.rows {
 				if r.depth == 0 {
 					if w := lipgloss.Width(r.name); w > maxName {
@@ -1751,7 +1761,7 @@ func (m Model) View() string {
 				if w := lipgloss.Width(r.pending); w > maxPen {
 					maxPen = w
 				}
-				if w := lipgloss.Width(r.contributors); w > maxCon {
+				if w := lipgloss.Width(detailsText(r.health, r.contributors)); w > maxCon {
 					maxCon = w
 				}
 			}
@@ -1764,8 +1774,8 @@ func (m Model) View() string {
 			if maxPen > 60 {
 				maxPen = 60
 			}
-			if maxCon > 40 {
-				maxCon = 40
+			if maxCon > 60 {
+				maxCon = 60
 			}
 			if m.width > 0 {
 				avail := m.width - maxName - maxCur - maxCon - 6 // 3 separators + padding
@@ -1785,7 +1795,7 @@ func (m Model) View() string {
 				sep,
 				padWidth("Pending", maxPen),
 				sep,
-				padWidth("Contributors", maxCon))
+				padWidth("Details", maxCon))
 			b.WriteString(headerStyle.Render(header))
 			b.WriteString("\n")
 
@@ -1822,7 +1832,7 @@ func (m Model) View() string {
 					sep,
 					padWidth(truncateWidth(pending, maxPen), maxPen),
 					sep,
-					padWidth(truncateWidth(r.contributors, maxCon), maxCon))
+					padWidth(truncateWidth(renderDetails(r.health, r.contributors, isSelected), maxCon), maxCon))
 			} else {
 				line = fmt.Sprintf("%s%s%s%s%s%s%s%s",
 					"    ",
@@ -1913,6 +1923,152 @@ func serializePendingTags(tags []gh.PendingTag) (pending string, contribs string
 		contribs = string(b)
 	}
 	return pending, contribs
+}
+
+// serializeHealth turns service health into a compact on-disk string so the
+// Services column survives cache reloads.
+func serializeHealth(h k8s.Health) string {
+	if h.Replicas == 0 && len(h.Events) == 0 && len(h.Conditions) == 0 && h.PendingPods == 0 && h.FailedPods == 0 {
+		return ""
+	}
+	events := strings.Join(h.Events, ",")
+	conditions := strings.Join(h.Conditions, ",")
+	return fmt.Sprintf("%v|%d|%d|%d|%s|%s|%d|%d", h.Ready, h.ReadyReplicas, h.Replicas, h.Restarts, events, conditions, h.PendingPods, h.FailedPods)
+}
+
+// parseHealth decodes a value produced by serializeHealth.
+func parseHealth(s string) k8s.Health {
+	var h k8s.Health
+	parts := strings.SplitN(s, "|", 8)
+	if len(parts) < 5 {
+		return h
+	}
+	fmt.Sscanf(parts[0], "%t", &h.Ready)
+	fmt.Sscanf(parts[1], "%d", &h.ReadyReplicas)
+	fmt.Sscanf(parts[2], "%d", &h.Replicas)
+	fmt.Sscanf(parts[3], "%d", &h.Restarts)
+	if parts[4] != "" {
+		h.Events = strings.Split(parts[4], ",")
+	}
+	if len(parts) > 5 && parts[5] != "" {
+		h.Conditions = strings.Split(parts[5], ",")
+	}
+	if len(parts) > 6 {
+		fmt.Sscanf(parts[6], "%d", &h.PendingPods)
+	}
+	if len(parts) > 7 {
+		fmt.Sscanf(parts[7], "%d", &h.FailedPods)
+	}
+	return h
+}
+
+// formatHealth renders the cached health string as a compact column value:
+// ✓ healthy, ✗ not ready, ↻N restarts, !Reason warning events, ⌐N pending,
+// ⚠N failed, !Condition deployment conditions.
+func formatHealth(health string) string {
+	h := parseHealth(health)
+	if h.Replicas == 0 && h.Restarts == 0 && len(h.Events) == 0 && len(h.Conditions) == 0 && h.PendingPods == 0 && h.FailedPods == 0 {
+		return ""
+	}
+	var parts []string
+	if h.Ready {
+		parts = append(parts, "✓")
+	} else if h.Replicas > 0 {
+		parts = append(parts, "✗")
+	}
+	if h.Restarts > 0 {
+		parts = append(parts, fmt.Sprintf("↻%d", h.Restarts))
+	}
+	for _, e := range h.Events {
+		if s := shortEvent(e); s != "" {
+			parts = append(parts, "!"+s)
+		}
+	}
+	for _, c := range h.Conditions {
+		if s := shortEvent(c); s != "" {
+			parts = append(parts, "!"+s)
+		}
+	}
+	if h.PendingPods > 0 {
+		parts = append(parts, fmt.Sprintf("⏳%d", h.PendingPods))
+	}
+	if h.FailedPods > 0 {
+		parts = append(parts, fmt.Sprintf("⚠%d", h.FailedPods))
+	}
+	return strings.Join(parts, " ")
+}
+
+// shortEvent abbreviates a k8s event or condition reason to a short token.
+func shortEvent(reason string) string {
+	switch reason {
+	case "OOMKilling", "OOMKilled":
+		return "OOM"
+	case "BackOff", "CrashLoopBackOff":
+		return "BackOff"
+	case "FailedScheduling":
+		return "Pend"
+	case "FailedMount", "FailedAttachVolume":
+		return "Mount"
+	case "FailedCreate", "FailedCreatePodSandBox", "FailedCreatePod":
+		return "Create"
+	case "Evicted", "Evicting":
+		return "Evicted"
+	case "Unhealthy":
+		return "Unhealthy"
+	case "NodeNotReady", "NodeReady":
+		return "Node"
+	case "Killing", "KillPodSandbox":
+		return "Kill"
+	case "ProgressDeadlineExceeded":
+		return "Stuck"
+	case "ReplicaFailure":
+		return "RepFail"
+	case "Unavailable":
+		return "Unavail"
+	case "Started", "Pulled", "Pulling", "Scheduled", "SuccessfulCreate", "MinimumReplicasAvailable":
+		return ""
+	default:
+		if len(reason) > 7 {
+			return reason[:7]
+		}
+		return reason
+	}
+}
+
+// detailsText renders the plain (unstyled) Details column value: the health
+// summary plus any contributor names, used for width computation.
+func detailsText(health, contributors string) string {
+	var parts []string
+	if h := formatHealth(health); h != "" {
+		parts = append(parts, h)
+	}
+	if contributors != "" {
+		parts = append(parts, contributors)
+	}
+	return strings.Join(parts, " · ")
+}
+
+// renderDetails styles the Details column: green health when healthy, red when
+// not. The color is skipped on the selected row so the reverse highlight spans
+// the full line.
+func renderDetails(health, contributors string, isSelected bool) string {
+	if health == "" {
+		return contributors
+	}
+	h := parseHealth(health)
+	if isSelected {
+		return detailsText(health, contributors)
+	}
+	healthText := formatHealth(health)
+	if h.Ready && len(h.Events) == 0 {
+		healthText = healthOK.Render(healthText)
+	} else {
+		healthText = healthBad.Render(healthText)
+	}
+	if contributors == "" {
+		return healthText
+	}
+	return healthText + " · " + contributors
 }
 
 // serializeUntaggedCommits turns the untagged commit list into the on-disk JSON
@@ -2195,6 +2351,15 @@ func (m Model) renderHelpOverlay() string {
 				}
 			}
 			actions = helpSection("actions", svcEntries)
+			legend = helpSection("legend", [][2]string{
+				{"✓", "healthy"},
+				{"✗", "not ready"},
+				{"↻N", "restarts"},
+				{"⏳N", "pods pending"},
+				{"⚠N", "pods failed"},
+				{"!OOM", "warning event"},
+				{"!Stuck", "rollout stuck"},
+			})
 		}
 	}
 

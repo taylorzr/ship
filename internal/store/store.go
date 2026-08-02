@@ -125,6 +125,12 @@ func (s *Store) migrate() error {
 		s.db.Exec(`ALTER TABLE version ADD COLUMN pending_contribs TEXT DEFAULT ''`)
 	}
 
+	var hasHealth bool
+	err = s.db.QueryRow(`SELECT COUNT(*) > 0 FROM pragma_table_info('version') WHERE name = 'health'`).Scan(&hasHealth)
+	if err == nil && !hasHealth {
+		s.db.Exec(`ALTER TABLE version ADD COLUMN health TEXT DEFAULT ''`)
+	}
+
 	// migrate v2: include role in primary key so sections don't overwrite each other
 	var rolePK int
 	s.db.QueryRow(`SELECT COALESCE(pk, 0) FROM pragma_table_info('pr') WHERE name = 'role'`).Scan(&rolePK)
@@ -299,17 +305,18 @@ type CachedVersion struct {
 	Error           string
 	UntaggedCommits string
 	PendingContribs string
+	Health          string
 }
 
 func (s *Store) SaveVersion(v CachedVersion) error {
-	_, err := s.db.Exec(`INSERT OR REPLACE INTO version (repo, prod_ref, prod_sha, ahead_by, pending_tags, resolved_at, error, untagged_commits, pending_contribs)
-		VALUES (?, ?, ?, ?, ?, datetime('now'), ?, ?, ?)`,
-		v.Repo, v.ProdRef, v.ProdSHA, v.AheadBy, v.PendingTags, v.Error, v.UntaggedCommits, v.PendingContribs)
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO version (repo, prod_ref, prod_sha, ahead_by, pending_tags, resolved_at, error, untagged_commits, pending_contribs, health)
+		VALUES (?, ?, ?, ?, ?, datetime('now'), ?, ?, ?, ?)`,
+		v.Repo, v.ProdRef, v.ProdSHA, v.AheadBy, v.PendingTags, v.Error, v.UntaggedCommits, v.PendingContribs, v.Health)
 	return err
 }
 
 func (s *Store) CachedVersions() ([]CachedVersion, error) {
-	rows, err := s.db.Query(`SELECT repo, prod_ref, prod_sha, ahead_by, COALESCE(pending_tags, ''), COALESCE(resolved_at, ''), COALESCE(error, ''), COALESCE(untagged_commits, ''), COALESCE(pending_contribs, '') FROM version ORDER BY repo`)
+	rows, err := s.db.Query(`SELECT repo, prod_ref, prod_sha, ahead_by, COALESCE(pending_tags, ''), COALESCE(resolved_at, ''), COALESCE(error, ''), COALESCE(untagged_commits, ''), COALESCE(pending_contribs, ''), COALESCE(health, '') FROM version ORDER BY repo`)
 	if err != nil {
 		return nil, err
 	}
@@ -318,7 +325,7 @@ func (s *Store) CachedVersions() ([]CachedVersion, error) {
 	var out []CachedVersion
 	for rows.Next() {
 		var v CachedVersion
-		if err := rows.Scan(&v.Repo, &v.ProdRef, &v.ProdSHA, &v.AheadBy, &v.PendingTags, &v.ResolvedAt, &v.Error, &v.UntaggedCommits, &v.PendingContribs); err != nil {
+		if err := rows.Scan(&v.Repo, &v.ProdRef, &v.ProdSHA, &v.AheadBy, &v.PendingTags, &v.ResolvedAt, &v.Error, &v.UntaggedCommits, &v.PendingContribs, &v.Health); err != nil {
 			return nil, err
 		}
 		out = append(out, v)

@@ -10,15 +10,16 @@ import (
 )
 
 type Result struct {
-	Service        config.ServiceConfig
-	ProdRef        string // tag or SHA from k8s image
-	ProdSHA        string // resolved git SHA
-	ProdTag        string // if the prod ref was a tag
-	AheadBy        int
-	PendingTags    []gh.PendingTag
+	Service         config.ServiceConfig
+	ProdRef         string // tag or SHA from k8s image
+	ProdSHA         string // resolved git SHA
+	ProdTag         string // if the prod ref was a tag
+	AheadBy         int
+	PendingTags     []gh.PendingTag
 	UntaggedCommits []gh.CommitSummary
-	Commits        []gh.CommitSummary
-	Error          string
+	Commits         []gh.CommitSummary
+	Health          k8s.Health
+	Error           string
 }
 
 func Resolve(ctx context.Context, k8sClient k8s.Client, ghClient *gh.Client, svc config.ServiceConfig) *Result {
@@ -34,6 +35,7 @@ func Resolve(ctx context.Context, k8sClient k8s.Client, ghClient *gh.Client, svc
 		r.Error = fmt.Sprintf("%s: k8s: %v", svc.Repo, err)
 		return r
 	}
+	r.Health = dep.Health
 
 	_, tag, err := k8s.ParseImageTag(dep.Image)
 	if err != nil {

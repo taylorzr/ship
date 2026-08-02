@@ -38,14 +38,14 @@ var releasesCmd = &cobra.Command{
 	RunE:  runReleases,
 }
 
-var mockK8sImages map[string]string
+var mockK8sSpecs map[string]string
 var releasesRepo string
 
 func init() {
 	rootCmd.AddCommand(countCmd)
 	rootCmd.AddCommand(releasesCmd)
-	rootCmd.Flags().StringToStringVar(&mockK8sImages, "mock-k8s", nil, "mock k8s per service (e.g. svc1=repo/app:v10.1.0,svc2=repo/other:v2.0.0)")
-	releasesCmd.Flags().StringToStringVar(&mockK8sImages, "mock-k8s", nil, "mock k8s per service (e.g. svc1=repo/app:v10.1.0,svc2=repo/other:v2.0.0)")
+	rootCmd.Flags().StringToStringVar(&mockK8sSpecs, "mock-k8s", nil, "mock k8s per service (e.g. svc1=repo/app:v10.1.0,svc2=repo/other:v2.0.0|restarts=3|events=OOMKilling+BackOff)")
+	releasesCmd.Flags().StringToStringVar(&mockK8sSpecs, "mock-k8s", nil, "mock k8s per service (e.g. svc1=repo/app:v10.1.0,svc2=repo/other:v2.0.0|restarts=3|events=OOMKilling+BackOff)")
 	releasesCmd.Flags().StringVar(&releasesRepo, "repo", "", "filter to a specific repo (e.g. taylorzr/kitty-meow)")
 }
 
@@ -74,7 +74,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 
 	ghClient := gh.NewClient(token)
 
-	m := tui.New(cfg, st, ghClient, mockK8sImages)
+	m := tui.New(cfg, st, ghClient, parseMockSpecs(mockK8sSpecs))
 	p := tea.NewProgram(m, tea.WithAltScreen())
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("tui: %w", err)
@@ -95,6 +95,19 @@ func toCached(p gh.PR, role string) store.CachedPR {
 		Mergeable:      p.Mergeable,
 		UpdatedAt:      p.UpdatedAt,
 	}
+}
+
+// parseMockSpecs converts the raw --mock-k8s string map into per-service
+// k8s.MockSpec values.
+func parseMockSpecs(raw map[string]string) map[string]k8s.MockSpec {
+	if len(raw) == 0 {
+		return nil
+	}
+	specs := make(map[string]k8s.MockSpec, len(raw))
+	for k, v := range raw {
+		specs[k] = k8s.ParseMockSpec(v)
+	}
+	return specs
 }
 
 func runCount() {
@@ -172,20 +185,21 @@ func runReleases(cmd *cobra.Command, args []string) error {
 			continue
 		}
 		var svcK8s k8s.Client
-		if len(mockK8sImages) > 0 {
-			img, ok := mockK8sImages[svc.Name]
+		if len(mockK8sSpecs) > 0 {
+			spec, ok := mockK8sSpecs[svc.Name]
 			if !ok {
-				img, ok = mockK8sImages[svc.Repo]
+				spec, ok = mockK8sSpecs[svc.Repo]
 			}
 			if !ok {
-				img, ok = mockK8sImages["*"]
+				spec, ok = mockK8sSpecs["*"]
 			}
 			if !ok {
-				fmt.Printf("── %s ──\n  ✗ mock: no image for service %q (key by name or repo)\n\n", svc.Repo, svc.Name)
+				fmt.Printf("── %s ──\n  ✗ mock: no spec for service %q (key by name or repo)\n\n", svc.Repo, svc.Name)
 				continue
 			}
-			svcK8s = k8s.NewMock(map[string]string{"*": img})
-			fmt.Printf("(using mock k8s — service: %s, image: %s)\n\n", svc.Name, img)
+			parsed := k8s.ParseMockSpec(spec)
+			svcK8s = k8s.NewMock(map[string]k8s.MockSpec{"*": parsed})
+			fmt.Printf("(using mock k8s — service: %s, image: %s)\n\n", svc.Name, parsed.Image)
 		} else {
 			svcCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
 			rc, err := k8s.NewRealClient(svcCtx, "", svc.Context, cfg.K8s.LoginCommand)

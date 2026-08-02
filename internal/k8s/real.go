@@ -8,6 +8,8 @@ import (
 	"sync"
 	"time"
 
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/kubernetes"
@@ -104,10 +106,91 @@ func (c *RealClient) getDeployment(ctx context.Context, namespace, name string) 
 	}
 
 	image := dep.Spec.Template.Spec.Containers[0].Image
-	return &Deployment{
+	d := &Deployment{
 		Image:     image,
 		Container: dep.Spec.Template.Spec.Containers[0].Name,
-	}, nil
+		Health: Health{
+			Ready:         dep.Status.ReadyReplicas == dep.Status.Replicas && dep.Status.Replicas > 0,
+			ReadyReplicas: dep.Status.ReadyReplicas,
+			Replicas:      dep.Status.Replicas,
+		},
+	}
+	c.collectHealth(ctx, namespace, name, dep, d)
+	return d, nil
+}
+
+// collectHealth augments the deployment with pod restart counts and recent
+// warning events (OOM kills, backoff, failed scheduling, ...).
+func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, dep *appsv1.Deployment, d *Deployment) {
+	sel, err := metav1.LabelSelectorAsSelector(dep.Spec.Selector)
+	if err != nil {
+		return
+	}
+	pods, err := c.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: sel.String()})
+	if err != nil {
+		return
+	}
+
+	podNames := make(map[string]bool, len(pods.Items))
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		podNames[pod.Name] = true
+		switch pod.Status.Phase {
+		case corev1.PodPending:
+			d.Health.PendingPods++
+		case corev1.PodFailed:
+			d.Health.FailedPods++
+		}
+		for _, cs := range pod.Status.ContainerStatuses {
+			d.Health.Restarts += cs.RestartCount
+		}
+	}
+
+	// deployment-level conditions: stuck rollouts and replica failures are
+	// not visible via ready replicas alone.
+	for _, cond := range dep.Status.Conditions {
+		switch {
+		case cond.Type == appsv1.DeploymentProgressing && cond.Reason == "ProgressDeadlineExceeded":
+			d.Health.Conditions = append(d.Health.Conditions, "ProgressDeadlineExceeded")
+		case cond.Type == appsv1.DeploymentReplicaFailure && cond.Status == corev1.ConditionTrue:
+			d.Health.Conditions = append(d.Health.Conditions, "ReplicaFailure")
+		case cond.Type == appsv1.DeploymentAvailable && cond.Status == corev1.ConditionFalse:
+			d.Health.Conditions = append(d.Health.Conditions, "Unavailable")
+		}
+	}
+
+	events, err := c.clientset.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return
+	}
+	cutoff := metav1.NewTime(metav1.Now().Add(-24 * time.Hour))
+	seen := map[string]bool{}
+	for i := range events.Items {
+		ev := &events.Items[i]
+		if ev.Type != "Warning" {
+			continue
+		}
+		if ev.LastTimestamp.Before(&cutoff) {
+			continue
+		}
+		obj := ev.InvolvedObject
+		if obj.Kind == "Deployment" && obj.Name == name {
+			// deployment-level warning (e.g. FailedRollout)
+		} else if obj.Kind == "Pod" && podNames[obj.Name] {
+			// pod-level warning (e.g. OOMKilled)
+		} else {
+			continue
+		}
+		reason := ev.Reason
+		if reason == "" {
+			continue
+		}
+		if seen[reason] {
+			continue
+		}
+		seen[reason] = true
+		d.Health.Events = append(d.Health.Events, reason)
+	}
 }
 
 // isAuthErr reports whether err looks like an expired/invalid credential.

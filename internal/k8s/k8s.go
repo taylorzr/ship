@@ -6,9 +6,21 @@ import (
 	"strings"
 )
 
+type Health struct {
+	Ready         bool
+	ReadyReplicas int32
+	Replicas      int32
+	Restarts      int32
+	Events        []string // recent Warning reasons, e.g. "OOMKilled", "BackOff"
+	Conditions    []string // deployment condition reasons, e.g. "ProgressDeadlineExceeded"
+	PendingPods   int32    // pods stuck in Pending phase (scheduling, etc.)
+	FailedPods    int32    // pods in Failed phase
+}
+
 type Deployment struct {
 	Image     string // full image ref, e.g. "123456789.dkr.ecr.us-east-1.amazonaws.com/podium-deploy-api:v10.1.0"
 	Container string
+	Health    Health
 }
 
 type Client interface {
