@@ -3,9 +3,11 @@ package k8s
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"os/exec"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -18,6 +20,23 @@ import (
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 )
+
+// inflight counts k8s API requests across all per-service clients so the TUI
+// can show live request activity in its footer.
+var inflight atomic.Int64
+
+// InFlight reports how many k8s API requests are currently in flight.
+func InFlight() int64 { return inflight.Load() }
+
+type countingRoundTripper struct {
+	base http.RoundTripper
+}
+
+func (t *countingRoundTripper) RoundTrip(r *http.Request) (*http.Response, error) {
+	inflight.Add(1)
+	defer inflight.Add(-1)
+	return t.base.RoundTrip(r)
+}
 
 type RealClient struct {
 	clientset     kubernetes.Interface
@@ -60,6 +79,11 @@ func NewRealClient(ctx context.Context, kubeconfig, context, loginCmd string) (*
 		if err != nil {
 			ch <- result{nil, fmt.Errorf("kubeconfig context %q: %w", actualCtx, err)}
 			return
+		}
+		// Count API requests through both the typed and dynamic clients so
+		// the TUI footer can show live k8s request activity.
+		restCfg.WrapTransport = func(rt http.RoundTripper) http.RoundTripper {
+			return &countingRoundTripper{base: rt}
 		}
 
 		clientset, err := kubernetes.NewForConfig(restCfg)

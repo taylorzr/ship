@@ -2015,9 +2015,15 @@ const (
 
 // healthSegments splits a workload's health into display parts so callers can
 // style each individually: the ✓ is the health check, ↻N restarts and their
-// causes are warnings, and everything else (events, conditions, pending,
-// failed, not-ready) is a red health problem.
+// causes are warnings (yellow) while the workload is otherwise healthy, and
+// everything else (events, conditions, pending, failed, not-ready) is a red
+// health problem. When the workload is currently unhealthy the restarts are
+// red too — they're part of the active problem, not a past warning.
 func healthSegments(h k8s.Health) []healthSeg {
+	restartKind := segWarn
+	if !h.Ready || len(h.Events) > 0 || len(h.Conditions) > 0 || h.PendingPods > 0 || h.FailedPods > 0 {
+		restartKind = segBad
+	}
 	var segs []healthSeg
 	if h.Ready {
 		segs = append(segs, healthSeg{"✓", segOK})
@@ -2025,11 +2031,11 @@ func healthSegments(h k8s.Health) []healthSeg {
 		segs = append(segs, healthSeg{"✗", segBad})
 	}
 	if h.Restarts > 0 {
-		segs = append(segs, healthSeg{fmt.Sprintf("↻%d", h.Restarts), segWarn})
+		segs = append(segs, healthSeg{fmt.Sprintf("↻%d", h.Restarts), restartKind})
 	}
 	for _, c := range h.RestartCauses {
 		if s := shortEvent(c); s != "" {
-			segs = append(segs, healthSeg{"!" + s, segWarn})
+			segs = append(segs, healthSeg{"!" + s, restartKind})
 		}
 	}
 	for _, e := range h.Events {
@@ -2125,8 +2131,9 @@ func detailsText(health, contributors string) string {
 }
 
 // renderHealthColored styles each health segment individually: the ✓ is green
-// when ready, restart counts and their causes are yellow warnings, and active
-// problems (events, conditions, pending, failed, not-ready) are red.
+// when ready, restart counts and their causes are yellow while the workload is
+// otherwise healthy (red when it isn't), and active problems (events,
+// conditions, pending, failed, not-ready) are red.
 func renderHealthColored(health string) string {
 	h := parseHealth(health)
 	if healthEmpty(h) {
@@ -2344,8 +2351,11 @@ func (m Model) viewHelp() string {
 	}
 	if m.gh != nil {
 		if n := m.gh.InFlight(); n > 0 {
-			line += helpKey.Render(fmt.Sprintf("  %d queries", n))
+			line += helpKey.Render(fmt.Sprintf("  %d gh", n))
 		}
+	}
+	if n := k8s.InFlight(); n > 0 {
+		line += helpKey.Render(fmt.Sprintf("  %d k8s", n))
 	}
 	line += "  " + helpKey.Render("?:") + " " + helpKey.Render("help")
 	return line
