@@ -63,6 +63,7 @@ var (
 	errorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	overflowStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	healthOK  = lipgloss.NewStyle().Foreground(lipgloss.Color("84"))
+	healthWarn = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
 	healthBad = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	dialogStyle = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
@@ -1978,18 +1979,19 @@ func serializePendingTags(tags []gh.PendingTag) (pending string, contribs string
 // serializeHealth turns service health into a compact on-disk string so the
 // Services column survives cache reloads.
 func serializeHealth(h k8s.Health) string {
-	if h.Replicas == 0 && len(h.Events) == 0 && len(h.Conditions) == 0 && h.PendingPods == 0 && h.FailedPods == 0 {
+	if h.Replicas == 0 && h.Restarts == 0 && len(h.RestartCauses) == 0 && len(h.Events) == 0 && len(h.Conditions) == 0 && h.PendingPods == 0 && h.FailedPods == 0 {
 		return ""
 	}
 	events := strings.Join(h.Events, ",")
 	conditions := strings.Join(h.Conditions, ",")
-	return fmt.Sprintf("%v|%d|%d|%d|%s|%s|%d|%d", h.Ready, h.ReadyReplicas, h.Replicas, h.Restarts, events, conditions, h.PendingPods, h.FailedPods)
+	causes := strings.Join(h.RestartCauses, ",")
+	return fmt.Sprintf("%v|%d|%d|%d|%s|%s|%d|%d|%s", h.Ready, h.ReadyReplicas, h.Replicas, h.Restarts, events, conditions, h.PendingPods, h.FailedPods, causes)
 }
 
 // parseHealth decodes a value produced by serializeHealth.
 func parseHealth(s string) k8s.Health {
 	var h k8s.Health
-	parts := strings.SplitN(s, "|", 8)
+	parts := strings.SplitN(s, "|", 9)
 	if len(parts) < 5 {
 		return h
 	}
@@ -2009,41 +2011,78 @@ func parseHealth(s string) k8s.Health {
 	if len(parts) > 7 {
 		fmt.Sscanf(parts[7], "%d", &h.FailedPods)
 	}
+	if len(parts) > 8 && parts[8] != "" {
+		h.RestartCauses = strings.Split(parts[8], ",")
+	}
 	return h
 }
 
-// formatHealth renders the cached health string as a compact column value:
-// ✓ healthy, ✗ not ready, ↻N restarts, !Reason warning events, ⌐N pending,
-// ⚠N failed, !Condition deployment conditions.
-func formatHealth(health string) string {
-	h := parseHealth(health)
-	if h.Replicas == 0 && h.Restarts == 0 && len(h.Events) == 0 && len(h.Conditions) == 0 && h.PendingPods == 0 && h.FailedPods == 0 {
-		return ""
-	}
-	var parts []string
+type healthSeg struct {
+	text string
+	kind int
+}
+
+const (
+	segOK = iota
+	segWarn
+	segBad
+)
+
+// healthSegments splits a workload's health into display parts so callers can
+// style each individually: the ✓ is the health check, ↻N restarts and their
+// causes are warnings, and everything else (events, conditions, pending,
+// failed, not-ready) is a red health problem.
+func healthSegments(h k8s.Health) []healthSeg {
+	var segs []healthSeg
 	if h.Ready {
-		parts = append(parts, "✓")
+		segs = append(segs, healthSeg{"✓", segOK})
 	} else if h.Replicas > 0 {
-		parts = append(parts, "✗")
+		segs = append(segs, healthSeg{"✗", segBad})
 	}
 	if h.Restarts > 0 {
-		parts = append(parts, fmt.Sprintf("↻%d", h.Restarts))
+		segs = append(segs, healthSeg{fmt.Sprintf("↻%d", h.Restarts), segWarn})
+	}
+	for _, c := range h.RestartCauses {
+		if s := shortEvent(c); s != "" {
+			segs = append(segs, healthSeg{"!" + s, segWarn})
+		}
 	}
 	for _, e := range h.Events {
 		if s := shortEvent(e); s != "" {
-			parts = append(parts, "!"+s)
+			segs = append(segs, healthSeg{"!" + s, segBad})
 		}
 	}
 	for _, c := range h.Conditions {
 		if s := shortEvent(c); s != "" {
-			parts = append(parts, "!"+s)
+			segs = append(segs, healthSeg{"!" + s, segBad})
 		}
 	}
 	if h.PendingPods > 0 {
-		parts = append(parts, fmt.Sprintf("⏳%d", h.PendingPods))
+		segs = append(segs, healthSeg{fmt.Sprintf("⏳%d", h.PendingPods), segBad})
 	}
 	if h.FailedPods > 0 {
-		parts = append(parts, fmt.Sprintf("⚠%d", h.FailedPods))
+		segs = append(segs, healthSeg{fmt.Sprintf("⚠%d", h.FailedPods), segBad})
+	}
+	return segs
+}
+
+func healthEmpty(h k8s.Health) bool {
+	return h.Replicas == 0 && h.Restarts == 0 && len(h.RestartCauses) == 0 &&
+		len(h.Events) == 0 && len(h.Conditions) == 0 && h.PendingPods == 0 && h.FailedPods == 0
+}
+
+// formatHealth renders the cached health string as a compact plain-text column
+// value: ✓ healthy, ✗ not ready, ↻N restarts, !Reason warning events, ⏳N
+// pending, ⚠N failed, !Condition deployment conditions, !Cause restarts.
+func formatHealth(health string) string {
+	h := parseHealth(health)
+	if healthEmpty(h) {
+		return ""
+	}
+	segs := healthSegments(h)
+	parts := make([]string, len(segs))
+	for i, s := range segs {
+		parts[i] = s.text
 	}
 	return strings.Join(parts, " ")
 }
@@ -2100,23 +2139,39 @@ func detailsText(health, contributors string) string {
 	return strings.Join(parts, " · ")
 }
 
-// renderDetails styles the Details column: green health when healthy, red when
-// not. The color is skipped on the selected row so the reverse highlight spans
-// the full line.
+// renderHealthColored styles each health segment individually: the ✓ is green
+// when ready, restart counts and their causes are yellow warnings, and active
+// problems (events, conditions, pending, failed, not-ready) are red.
+func renderHealthColored(health string) string {
+	h := parseHealth(health)
+	if healthEmpty(h) {
+		return ""
+	}
+	segs := healthSegments(h)
+	parts := make([]string, len(segs))
+	for i, s := range segs {
+		switch s.kind {
+		case segWarn:
+			parts[i] = healthWarn.Render(s.text)
+		case segBad:
+			parts[i] = healthBad.Render(s.text)
+		default:
+			parts[i] = healthOK.Render(s.text)
+		}
+	}
+	return strings.Join(parts, " ")
+}
+
+// renderDetails styles the Details column. The color is skipped on the
+// selected row so the reverse highlight spans the full line.
 func renderDetails(health, contributors string, isSelected bool) string {
 	if health == "" {
 		return contributors
 	}
-	h := parseHealth(health)
 	if isSelected {
 		return detailsText(health, contributors)
 	}
-	healthText := formatHealth(health)
-	if h.Ready && len(h.Events) == 0 {
-		healthText = healthOK.Render(healthText)
-	} else {
-		healthText = healthBad.Render(healthText)
-	}
+	healthText := renderHealthColored(health)
 	if contributors == "" {
 		return healthText
 	}
@@ -2407,6 +2462,7 @@ func (m Model) renderHelpOverlay() string {
 				{"✓", "healthy"},
 				{"✗", "not ready"},
 				{"↻N", "restarts"},
+				{"!Cause", "last restart cause"},
 				{"⏳N", "pods pending"},
 				{"⚠N", "pods failed"},
 				{"!OOM", "warning event"},

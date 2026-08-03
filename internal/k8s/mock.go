@@ -17,7 +17,7 @@ type MockSpec struct {
 
 // ParseMockSpec decodes a --mock-k8s value of the form
 //
-//	image|restarts=3|events=OOMKilling+BackOff|ready=false|replicas=2|ready_replicas=1|conditions=ProgressDeadlineExceeded|pending=1|failed=1
+//	image|restarts=3|causes=OOMKilling+Exit137|events=OOMKilling+BackOff|ready=false|replicas=2|ready_replicas=1|conditions=ProgressDeadlineExceeded|pending=1|failed=1
 //
 // Health fields are optional; image is everything before the first "|".
 // If no health fields are given the deployment is healthy. When `ready` is
@@ -37,6 +37,12 @@ func ParseMockSpec(v string) MockSpec {
 			case "restarts":
 				if n, err := strconv.Atoi(val); err == nil {
 					spec.Health.Restarts = int32(n)
+				}
+			case "causes":
+				for _, c := range strings.Split(val, "+") {
+					if c != "" {
+						spec.Health.RestartCauses = append(spec.Health.RestartCauses, c)
+					}
 				}
 			case "ready":
 				spec.Health.Ready = val == "true" || val == "1"

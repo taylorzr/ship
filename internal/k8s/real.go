@@ -257,6 +257,30 @@ var transientReasons = map[string]bool{
 	"NodeReady":             true,
 }
 
+// terminationCause returns a human label for why a container last terminated,
+// preferring a stable reason (e.g. "OOMKilled") over a generic "Error" plus
+// exit code (e.g. "Exit137"). Returns "" for containers that never terminated.
+// Unlike events, this lives in the pod status, so it survives kubelet event
+// GC and shows up even for containers that restarted and are now healthy.
+func terminationCause(cs corev1.ContainerStatus) string {
+	var t *corev1.ContainerStateTerminated
+	if cs.State.Terminated != nil {
+		t = cs.State.Terminated
+	} else if cs.LastTerminationState.Terminated != nil {
+		t = cs.LastTerminationState.Terminated
+	}
+	if t == nil {
+		return ""
+	}
+	if t.Reason != "" && t.Reason != "Error" {
+		return t.Reason
+	}
+	if t.ExitCode != 0 {
+		return fmt.Sprintf("Exit%d", t.ExitCode)
+	}
+	return t.Reason
+}
+
 // collectHealth augments the workload with pod restart counts, Pending/Failed
 // pod phases, workload conditions, and recent warning events (OOM kills,
 // backoff, failed scheduling, ...).
@@ -272,6 +296,7 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 
 	podNames := make(map[string]bool, len(pods.Items))
 	podReady := make(map[string]bool, len(pods.Items))
+	seenCauses := make(map[string]bool)
 	for i := range pods.Items {
 		pod := &pods.Items[i]
 		podNames[pod.Name] = true
@@ -293,6 +318,10 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 		podReady[pod.Name] = ready
 		for _, cs := range pod.Status.ContainerStatuses {
 			h.Restarts += cs.RestartCount
+			if cause := terminationCause(cs); cause != "" && !seenCauses[cause] {
+				seenCauses[cause] = true
+				h.RestartCauses = append(h.RestartCauses, cause)
+			}
 		}
 	}
 

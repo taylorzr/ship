@@ -11,6 +11,7 @@ type Health struct {
 	ReadyReplicas int32
 	Replicas      int32
 	Restarts      int32
+	RestartCauses []string // last termination reason per restarted container, e.g. "OOMKilled", "Exit137"
 	Events        []string // recent Warning reasons, e.g. "OOMKilled", "BackOff"
 	Conditions    []string // deployment condition reasons, e.g. "ProgressDeadlineExceeded"
 	PendingPods   int32    // pods stuck in Pending phase (scheduling, etc.)
