@@ -62,7 +62,7 @@ func (c *Client) User(ctx context.Context) (string, error) {
 
 type checkNode struct {
 	CheckRun struct {
-		Status string
+		Status     string
 		Conclusion string
 	} `graphql:"... on CheckRun"`
 }
@@ -73,33 +73,41 @@ type statusNode struct {
 	} `graphql:"... on StatusContext"`
 }
 
+// ciNode is one status-check context on a commit. Both the search and detail
+// queries produce this node type; they differ only in how many they request.
+type ciNode struct {
+	checkNode
+	statusNode
+}
+
+// commitNode wraps a commit's status-check rollup. Shared by the search and
+// detail queries so CI resolution works over either shape.
+type commitNode struct {
+	Commit struct {
+		StatusCheckRollup struct {
+			Contexts struct {
+				Nodes []ciNode
+			} `graphql:"contexts(last: 5)"`
+		}
+	}
+}
+
 type prNode struct {
 	PullRequest struct {
-		Number         int
-		Title          string
-		URL            string
-		IsDraft        bool
-		State          githubv4.PullRequestState
-		Author         struct{ Login string }
-		ReviewDecision string
-		Mergeable      githubv4.MergeableState
+		Number           int
+		Title            string
+		URL              string
+		IsDraft          bool
+		State            githubv4.PullRequestState
+		Author           struct{ Login string }
+		ReviewDecision   string
+		Mergeable        githubv4.MergeableState
 		MergeStateStatus githubv4.MergeStateStatus
-		UpdatedAt      githubv4.DateTime
-		HeadRefOid     string
-		Repository     struct{ NameWithOwner string }
-		Commits        struct {
-			Nodes []struct {
-				Commit struct {
-					StatusCheckRollup struct {
-						Contexts struct {
-							Nodes []struct {
-								checkNode
-								statusNode
-							}
-						} `graphql:"contexts(last: 20)"`
-					}
-				}
-			}
+		UpdatedAt        githubv4.DateTime
+		HeadRefOid       string
+		Repository       struct{ NameWithOwner string }
+		Commits          struct {
+			Nodes []commitNode
 		} `graphql:"commits(last: 1)"`
 	} `graphql:"... on PullRequest"`
 }
@@ -117,31 +125,20 @@ type searchResult struct {
 type getPRResult struct {
 	Repository struct {
 		PullRequest struct {
-			Number         int
-			Title          string
-			URL            string
-			IsDraft        bool
-			State          githubv4.PullRequestState
-			Author         struct{ Login string }
-			ReviewDecision string
-			Mergeable      githubv4.MergeableState
+			Number           int
+			Title            string
+			URL              string
+			IsDraft          bool
+			State            githubv4.PullRequestState
+			Author           struct{ Login string }
+			ReviewDecision   string
+			Mergeable        githubv4.MergeableState
 			MergeStateStatus githubv4.MergeStateStatus
-			UpdatedAt      githubv4.DateTime
-			HeadRefOid     string
-			Repository     struct{ NameWithOwner string }
-			Commits        struct {
-				Nodes []struct {
-					Commit struct {
-						StatusCheckRollup struct {
-							Contexts struct {
-								Nodes []struct {
-									checkNode
-									statusNode
-								}
-							} `graphql:"contexts(last: 20)"`
-						}
-					}
-				}
+			UpdatedAt        githubv4.DateTime
+			HeadRefOid       string
+			Repository       struct{ NameWithOwner string }
+			Commits          struct {
+				Nodes []commitNode
 			} `graphql:"commits(last: 1)"`
 		} `graphql:"pullRequest(number: $number)"`
 	} `graphql:"repository(owner: $owner, name: $name)"`
@@ -177,7 +174,7 @@ func (c *Client) search(ctx context.Context, query string) ([]PR, error) {
 
 			for _, n := range q.Search.Nodes {
 				pr := n.PullRequest
-				ciState := resolveCI(pr.Commits)
+				ciState := resolveCI(rollupNodes(pr.Commits.Nodes))
 				all = append(all, PR{
 					Number:         pr.Number,
 					Repo:           pr.Repository.NameWithOwner,
@@ -225,29 +222,20 @@ func (c *Client) search(ctx context.Context, query string) ([]PR, error) {
 	return nil, fmt.Errorf("github search %q: %w", query, lastErr)
 }
 
-func resolveCI(commits struct {
-	Nodes []struct {
-		Commit struct {
-			StatusCheckRollup struct {
-				Contexts struct {
-					Nodes []struct {
-						checkNode
-						statusNode
-					}
-				} `graphql:"contexts(last: 20)"`
-			}
-		}
+// rollupNodes returns the status-check contexts of a commit's rollup, or nil
+// when the commit has none.
+func rollupNodes(nodes []commitNode) []ciNode {
+	if len(nodes) == 0 {
+		return nil
 	}
-}) string {
-	nodes := commits.Nodes
+	return nodes[0].Commit.StatusCheckRollup.Contexts.Nodes
+}
+
+func resolveCI(nodes []ciNode) string {
 	if len(nodes) == 0 {
 		return "none"
 	}
-	ctxs := nodes[0].Commit.StatusCheckRollup.Contexts.Nodes
-	if len(ctxs) == 0 {
-		return "none"
-	}
-	for _, c := range ctxs {
+	for _, c := range nodes {
 		state := c.StatusContext.State
 		if state == "" {
 			// CheckRun: use Conclusion (overrides Status)
@@ -349,7 +337,7 @@ func (c *Client) GetPR(ctx context.Context, repo string, number int) (*PR, error
 		Author:         pr.Author.Login,
 		URL:            pr.URL,
 		ReviewDecision: string(pr.ReviewDecision),
-		CIState:        resolveCI(pr.Commits),
+		CIState:        resolveCI(rollupNodes(pr.Commits.Nodes)),
 		Mergeable:      string(pr.Mergeable),
 		MergeState:     string(pr.MergeStateStatus),
 		State:          string(pr.State),
@@ -414,8 +402,8 @@ func (c *Client) GetHeadSha(ctx context.Context, repo string, number int) (strin
 }
 
 type CompareResult struct {
-	AheadBy  int
-	Commits  []CommitSummary
+	AheadBy int
+	Commits []CommitSummary
 }
 
 type CommitSummary struct {
@@ -511,15 +499,15 @@ func (c *Client) Compare(ctx context.Context, repo, base, head string) (*Compare
 		return nil, fmt.Errorf("gh api compare: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	var resp struct {
-		AheadBy  int `json:"ahead_by"`
-		Commits  []struct {
+		AheadBy int `json:"ahead_by"`
+		Commits []struct {
 			SHA     string `json:"sha"`
 			Parents []struct {
 				SHA string `json:"sha"`
 			} `json:"parents"`
 			Commit struct {
-				Message  string `json:"message"`
-				Author   struct {
+				Message string `json:"message"`
+				Author  struct {
 					Name string `json:"name"`
 				} `json:"author"`
 			} `json:"commit"`
@@ -589,7 +577,7 @@ func (c *Client) ListTags(ctx context.Context, repo string) ([]TagInfo, error) {
 		return nil, fmt.Errorf("list tags: %s: %w", strings.TrimSpace(string(out)), err)
 	}
 	var resp []struct {
-		Ref  string `json:"ref"`
+		Ref    string `json:"ref"`
 		Object struct {
 			SHA  string `json:"sha"`
 			Type string `json:"type"`
