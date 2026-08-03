@@ -12,6 +12,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"github.com/shurcooL/githubv4"
@@ -38,19 +39,45 @@ type PR struct {
 type Client struct {
 	gql  *githubv4.Client
 	hc   *http.Client
+	ct   *countingTransport
 	user string
+}
+
+// countingTransport counts in-flight GitHub API requests so the TUI can show
+// live query activity. Counting here (at the HTTP layer) covers REST search,
+// GraphQL, and mutations alike, including the retry/pagination loops.
+type countingTransport struct {
+	base     http.RoundTripper
+	inflight atomic.Int64
+}
+
+func (t *countingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
+	t.inflight.Add(1)
+	defer t.inflight.Add(-1)
+	return t.base.RoundTrip(r)
 }
 
 func NewClient(token string) *Client {
 	src := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
-	hc := oauth2.NewClient(context.Background(), src)
-	// 60s: the search backend can be slow under load, and a 30s cap aborted
-	// requests that GitHub was about to answer (contributing to the "takes ~1
-	// min then fails" pattern). 502s themselves are GitHub-side; the search
-	// retry loops handle those.
-	hc.Timeout = 60 * time.Second
+	ct := &countingTransport{base: http.DefaultTransport}
+	hc := &http.Client{
+		Transport: &oauth2.Transport{Source: src, Base: ct},
+		// 60s: the search backend can be slow under load, and a 30s cap
+		// aborted requests that GitHub was about to answer (contributing to
+		// the "takes ~1 min then fails" pattern). 502s themselves are
+		// GitHub-side; the search retry loops handle those.
+		Timeout: 60 * time.Second,
+	}
 	gql := githubv4.NewClient(hc)
-	return &Client{gql: gql, hc: hc}
+	return &Client{gql: gql, hc: hc, ct: ct}
+}
+
+// InFlight reports how many GitHub API requests are currently in flight.
+func (c *Client) InFlight() int64 {
+	if c.ct == nil {
+		return 0
+	}
+	return c.ct.inflight.Load()
 }
 
 func (c *Client) User(ctx context.Context) (string, error) {

@@ -781,30 +781,15 @@ func (m Model) refreshDeps(ctx context.Context) tea.Cmd {
 
 // enrichPRDetails fills in the PR detail columns (CI, review decision,
 // mergeability) for a just-refreshed section. REST search returns basic issue
-// metadata only, so newly-seen PRs would otherwise show blank ci:/review:/
-// merge: until a manual `r` refresh. Only PRs whose cached details are still
-// empty are fetched — once filled, they stay fresh via the store's
-// preserve-on-empty logic and `r`.
+// metadata only, so PRs would otherwise show blank ci:/review:/merge: until a
+// manual `r` refresh. It runs on every section refresh — initial load, Shift-R,
+// and the auto-refresh — so the details track the list.
 func (m Model) enrichPRDetails(ctx context.Context, role string, prs []gh.PR) {
 	if len(prs) == 0 {
 		return
 	}
-	cached, err := m.store.CachedPRs(role)
-	if err != nil {
-		return
-	}
-	needs := make(map[string]bool, len(cached))
-	for _, c := range cached {
-		if c.CIState == "" || c.ReviewDecision == "" || c.Mergeable == "" {
-			needs[fmt.Sprintf("%s#%d", c.Repo, c.Number)] = true
-		}
-	}
 	var wg sync.WaitGroup
 	for _, p := range prs {
-		key := fmt.Sprintf("%s#%d", p.Repo, p.Number)
-		if !needs[key] {
-			continue
-		}
 		wg.Add(1)
 		go func(p gh.PR) {
 			defer wg.Done()
@@ -2356,6 +2341,11 @@ func (m Model) viewHelp() string {
 	line := helpKey.Render("ship")
 	if !m.lastRefreshed.IsZero() {
 		line += helpKey.Render(" (refresh in " + refreshCountdown(m.lastRefreshed, m.cfg.RefreshInterval) + ")")
+	}
+	if m.gh != nil {
+		if n := m.gh.InFlight(); n > 0 {
+			line += helpKey.Render(fmt.Sprintf("  %d queries", n))
+		}
 	}
 	line += "  " + helpKey.Render("?:") + " " + helpKey.Render("help")
 	return line
