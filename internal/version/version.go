@@ -44,8 +44,10 @@ func Resolve(ctx context.Context, k8sClient k8s.Client, ghClient *gh.Client, svc
 	}
 	r.ProdRef = tag
 
-	if k8s.LooksLikeSHA(tag) {
-		r.ProdSHA = tag
+	if sha, ok := k8s.SHAFromImage(tag); ok {
+		// image tag is a raw SHA or "sha-<sha>" — use the bare SHA directly,
+		// no tag resolution needed.
+		r.ProdSHA = sha
 	} else {
 		r.ProdTag = tag
 		sha, err := ghClient.ResolveRef(ctx, svc.Repo, tag)

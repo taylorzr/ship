@@ -414,7 +414,7 @@ func (m *Model) loadFromCache() {
 			repo:    v.Repo,
 			prodRef: v.ProdRef,
 			sha:     v.ProdSHA,
-			url:     fmt.Sprintf("https://github.com/%s/releases/tag/%s", v.Repo, v.ProdRef),
+			url:     serviceRowURL(v.Repo, v.ProdRef),
 			depth:   0,
 			health:  v.Health,
 		}
@@ -2495,6 +2495,15 @@ func toCached(p gh.PR, role string) store.CachedPR {
 	}
 }
 
+// serviceRowURL links a service row to its prod version. SHA refs point at
+// the commit (releases/tag/<sha> doesn't exist); tags point at the release.
+func serviceRowURL(repo, ref string) string {
+	if sha, ok := k8s.SHAFromImage(ref); ok {
+		return fmt.Sprintf("https://github.com/%s/commit/%s", repo, sha)
+	}
+	return fmt.Sprintf("https://github.com/%s/releases/tag/%s", repo, ref)
+}
+
 func openBrowser(url string) {
 	var cmd *exec.Cmd
 	switch runtime.GOOS {
@@ -2523,8 +2532,7 @@ func (m Model) openBrowse() {
 	openBrowser(u)
 }
 
-func orJoin(parts []string) string {
-	switch len(parts) {
+func orJoin(parts []string) string {	switch len(parts) {
 	case 0:
 		return ""
 	case 1:

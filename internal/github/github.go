@@ -627,7 +627,9 @@ func (c *Client) PendingTags(ctx context.Context, repo, prodSHA, branch, source,
 	var pending []PendingTag
 	var err error
 
-	if source == "tags" {
+	// When prod is a SHA (prodTag empty), the releases path can't order by
+	// release time relative to a tag, so fall back to git-based detection.
+	if source == "tags" || prodTag == "" {
 		pending, err = c.pendingTagsFromGit(ctx, repo, prodSHA)
 	} else {
 		var releasesExist bool

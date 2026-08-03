@@ -38,14 +38,18 @@ func ParseImageTag(image string) (string, string, error) {
 	return parts[0], parts[1], nil
 }
 
-func LooksLikeSHA(tag string) bool {
-	if len(tag) < 7 || len(tag) > 40 {
-		return false
+// SHAFromImage returns the bare commit SHA when the image tag is a raw SHA or
+// a "sha-" prefixed SHA (e.g. "sha-abc1234"), and reports whether it matched.
+// The prefix is stripped so callers can use the result directly as a git ref.
+func SHAFromImage(tag string) (string, bool) {
+	raw := strings.TrimPrefix(tag, "sha-")
+	if len(raw) < 7 || len(raw) > 40 {
+		return "", false
 	}
-	for _, c := range tag {
+	for _, c := range raw {
 		if !((c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F')) {
-			return false
+			return "", false
 		}
 	}
-	return true
+	return raw, true
 }
