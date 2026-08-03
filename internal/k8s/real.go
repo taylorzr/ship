@@ -236,6 +236,27 @@ func (c *RealClient) getRollout(ctx context.Context, namespace, name string) (*W
 	return w, nil
 }
 
+// transientReasons are Warning event reasons that describe conditions which
+// may have since resolved (failed probes, failed pod/sandbox creation,
+// restart backoff, scheduling/mount hiccups). They're only surfaced when the
+// affected pod is still in a bad state, so a pod that failed a startup probe
+// and then became healthy doesn't keep reporting !Unhealthy.
+var transientReasons = map[string]bool{
+	"Unhealthy":             true,
+	"FailedCreate":          true,
+	"FailedCreatePodSandBox": true,
+	"FailedCreatePod":       true,
+	"BackOff":               true,
+	"CrashLoopBackOff":      true,
+	"FailedScheduling":      true,
+	"FailedMount":           true,
+	"FailedAttachVolume":    true,
+	"Killing":               true,
+	"KillPodSandbox":        true,
+	"NodeNotReady":          true,
+	"NodeReady":             true,
+}
+
 // collectHealth augments the workload with pod restart counts, Pending/Failed
 // pod phases, workload conditions, and recent warning events (OOM kills,
 // backoff, failed scheduling, ...).
@@ -250,6 +271,7 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 	}
 
 	podNames := make(map[string]bool, len(pods.Items))
+	podReady := make(map[string]bool, len(pods.Items))
 	for i := range pods.Items {
 		pod := &pods.Items[i]
 		podNames[pod.Name] = true
@@ -259,6 +281,16 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 		case corev1.PodFailed:
 			h.FailedPods++
 		}
+		ready := pod.Status.Phase == corev1.PodRunning
+		if ready {
+			for _, cs := range pod.Status.ContainerStatuses {
+				if !cs.Ready {
+					ready = false
+					break
+				}
+			}
+		}
+		podReady[pod.Name] = ready
 		for _, cs := range pod.Status.ContainerStatuses {
 			h.Restarts += cs.RestartCount
 		}
@@ -282,7 +314,12 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 		if obj.Kind == kind && obj.Name == name {
 			// workload-level warning (e.g. FailedRollout)
 		} else if obj.Kind == "Pod" && podNames[obj.Name] {
-			// pod-level warning (e.g. OOMKilled)
+			// pod-level warning (e.g. OOMKilled). Skip transient reasons
+			// when the pod has since become ready (e.g. a startup probe
+			// that failed during rollout then succeeded).
+			if podReady[obj.Name] && transientReasons[ev.Reason] {
+				continue
+			}
 		} else {
 			continue
 		}
