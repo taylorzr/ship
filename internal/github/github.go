@@ -60,34 +60,15 @@ func (c *Client) User(ctx context.Context) (string, error) {
 	return c.user, nil
 }
 
-type checkNode struct {
-	CheckRun struct {
-		Status     string
-		Conclusion string
-	} `graphql:"... on CheckRun"`
-}
-
-type statusNode struct {
-	StatusContext struct {
-		State string
-	} `graphql:"... on StatusContext"`
-}
-
-// ciNode is one status-check context on a commit. Both the search and detail
-// queries produce this node type; they differ only in how many they request.
-type ciNode struct {
-	checkNode
-	statusNode
-}
-
-// commitNode wraps a commit's status-check rollup. Shared by the search and
-// detail queries so CI resolution works over either shape.
+// commitNode wraps a commit's status-check rollup. The rollup's combined
+// state (SUCCESS/FAILURE/PENDING/EXPECTED/ERROR) is precomputed by GitHub, so
+// we ask for that single scalar instead of expanding every check-run and
+// status-context node. Expanding the contexts connection per PR is what
+// tripped persistent HTTP 502s on large search queries.
 type commitNode struct {
 	Commit struct {
 		StatusCheckRollup struct {
-			Contexts struct {
-				Nodes []ciNode
-			} `graphql:"contexts(last: 5)"`
+			State string
 		}
 	}
 }
@@ -174,7 +155,7 @@ func (c *Client) search(ctx context.Context, query string) ([]PR, error) {
 
 			for _, n := range q.Search.Nodes {
 				pr := n.PullRequest
-				ciState := resolveCI(rollupNodes(pr.Commits.Nodes))
+				ciState := resolveRollup(pr.Commits.Nodes)
 				all = append(all, PR{
 					Number:         pr.Number,
 					Repo:           pr.Repository.NameWithOwner,
@@ -222,39 +203,20 @@ func (c *Client) search(ctx context.Context, query string) ([]PR, error) {
 	return nil, fmt.Errorf("github search %q: %w", query, lastErr)
 }
 
-// rollupNodes returns the status-check contexts of a commit's rollup, or nil
-// when the commit has none.
-func rollupNodes(nodes []commitNode) []ciNode {
-	if len(nodes) == 0 {
-		return nil
-	}
-	return nodes[0].Commit.StatusCheckRollup.Contexts.Nodes
-}
-
-func resolveCI(nodes []ciNode) string {
-	if len(nodes) == 0 {
+// resolveRollup maps a commit's combined status-check state to the UI's CI
+// column. An empty state means the commit has no checks at all.
+func resolveRollup(nodes []commitNode) string {
+	if len(nodes) == 0 || nodes[0].Commit.StatusCheckRollup.State == "" {
 		return "none"
 	}
-	for _, c := range nodes {
-		state := c.StatusContext.State
-		if state == "" {
-			// CheckRun: use Conclusion (overrides Status)
-			if c.CheckRun.Conclusion == "FAILURE" || c.CheckRun.Conclusion == "TIMED_OUT" || c.CheckRun.Conclusion == "ACTION_REQUIRED" {
-				return "failure"
-			}
-			if c.CheckRun.Status == "IN_PROGRESS" || c.CheckRun.Status == "QUEUED" || c.CheckRun.Status == "WAITING" {
-				return "pending"
-			}
-		} else {
-			if state == "FAILURE" || state == "ERROR" {
-				return "failure"
-			}
-			if state == "PENDING" || state == "QUEUED" || state == "IN_PROGRESS" {
-				return "pending"
-			}
-		}
+	switch nodes[0].Commit.StatusCheckRollup.State {
+	case "FAILURE", "ERROR":
+		return "failure"
+	case "PENDING", "EXPECTED":
+		return "pending"
+	default:
+		return "success"
 	}
-	return "success"
 }
 
 func (c *Client) ownerFilter(ctx context.Context, owners []string) string {
@@ -337,7 +299,7 @@ func (c *Client) GetPR(ctx context.Context, repo string, number int) (*PR, error
 		Author:         pr.Author.Login,
 		URL:            pr.URL,
 		ReviewDecision: string(pr.ReviewDecision),
-		CIState:        resolveCI(rollupNodes(pr.Commits.Nodes)),
+		CIState:        resolveRollup(pr.Commits.Nodes),
 		Mergeable:      string(pr.Mergeable),
 		MergeState:     string(pr.MergeStateStatus),
 		State:          string(pr.State),
