@@ -684,6 +684,7 @@ func (m Model) refreshMyPRs(ctx context.Context) tea.Cmd {
 				cache[i] = toCached(p, "mine")
 			}
 			m.store.SavePRs(cache, "mine")
+			m.enrichPRDetails(ctx, "mine", prs)
 		}
 		return refreshDoneMsg{source: "My PRs", err: err}
 	}
@@ -710,6 +711,7 @@ func (m Model) refreshReview(ctx context.Context) tea.Cmd {
 				cache[i] = toCached(p, "review-direct")
 			}
 			m.store.SavePRs(cache, "review-direct")
+			m.enrichPRDetails(ctx, "review-direct", revs)
 		}
 		return refreshDoneMsg{source: "To Review", err: err}
 	}
@@ -736,6 +738,7 @@ func (m Model) refreshTeamReview(ctx context.Context) tea.Cmd {
 				cache[i] = toCached(p, "review-team")
 			}
 			m.store.SavePRs(cache, "review-team")
+			m.enrichPRDetails(ctx, "review-team", prs)
 		}
 		return refreshDoneMsg{source: "Team Review", err: err}
 	}
@@ -769,9 +772,56 @@ func (m Model) refreshDeps(ctx context.Context) tea.Cmd {
 				cache[i] = toCached(p, "dep")
 			}
 			m.store.SavePRs(cache, "dep")
+			m.enrichPRDetails(ctx, "dep", deps)
 		}
 		return refreshDoneMsg{source: "Dependencies", err: err}
 	}
+}
+
+// enrichPRDetails fills in the PR detail columns (CI, review decision,
+// mergeability) for a just-refreshed section. REST search returns basic issue
+// metadata only, so newly-seen PRs would otherwise show blank ci:/review:/
+// merge: until a manual `r` refresh. Only PRs whose cached details are still
+// empty are fetched — once filled, they stay fresh via the store's
+// preserve-on-empty logic and `r`.
+func (m Model) enrichPRDetails(ctx context.Context, role string, prs []gh.PR) {
+	if len(prs) == 0 {
+		return
+	}
+	cached, err := m.store.CachedPRs(role)
+	if err != nil {
+		return
+	}
+	needs := make(map[string]bool, len(cached))
+	for _, c := range cached {
+		if c.CIState == "" || c.ReviewDecision == "" || c.Mergeable == "" {
+			needs[fmt.Sprintf("%s#%d", c.Repo, c.Number)] = true
+		}
+	}
+	var wg sync.WaitGroup
+	for _, p := range prs {
+		key := fmt.Sprintf("%s#%d", p.Repo, p.Number)
+		if !needs[key] {
+			continue
+		}
+		wg.Add(1)
+		go func(p gh.PR) {
+			defer wg.Done()
+			prCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+			defer cancel()
+			pr, err := m.gh.GetPR(prCtx, p.Repo, p.Number)
+			if err != nil {
+				if shipLog != nil {
+					shipLog.Printf("  enrich %s#%d: %v", p.Repo, p.Number, err)
+				}
+				return
+			}
+			if err := m.store.SavePR(toCached(*pr, role)); err != nil && shipLog != nil {
+				shipLog.Printf("  enrich save %s#%d: %v", p.Repo, p.Number, err)
+			}
+		}(p)
+	}
+	wg.Wait()
 }
 
 func (m Model) refreshServiceCmd(ctx context.Context, repo string) tea.Cmd {
