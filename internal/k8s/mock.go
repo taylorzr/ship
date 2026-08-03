@@ -86,17 +86,21 @@ func NewMock(specs map[string]MockSpec) *MockClient {
 	return &MockClient{Specs: specs}
 }
 
-func (m *MockClient) GetDeployment(ctx context.Context, context, namespace, name string) (*Deployment, error) {
+func (m *MockClient) GetWorkload(ctx context.Context, context, namespace, name, resource string) (*Workload, error) {
 	if len(m.Specs) == 0 {
 		return nil, fmt.Errorf("mock: no specs configured")
 	}
 	spec, ok := m.Specs[name]
 	if !ok {
 		if spec, ok = m.Specs["*"]; !ok {
-			return nil, fmt.Errorf("mock: no spec for deployment %q", name)
+			return nil, fmt.Errorf("mock: no spec for workload %q", name)
 		}
 	}
-	return &Deployment{
+	if resource == "" {
+		resource = "deployment"
+	}
+	return &Workload{
+		Kind:      resource,
 		Image:     spec.Image,
 		Container: name,
 		Health:    spec.Health,

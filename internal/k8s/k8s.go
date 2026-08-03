@@ -17,14 +17,17 @@ type Health struct {
 	FailedPods    int32    // pods in Failed phase
 }
 
-type Deployment struct {
+type Workload struct {
+	Kind      string // "deployment" or "rollout"
 	Image     string // full image ref, e.g. "123456789.dkr.ecr.us-east-1.amazonaws.com/podium-deploy-api:v10.1.0"
 	Container string
 	Health    Health
 }
 
+// Client reads the deployed image and health for a service's k8s workload.
+// resource is the workload kind ("deployment" or "rollout").
 type Client interface {
-	GetDeployment(ctx context.Context, context, namespace, name string) (*Deployment, error)
+	GetWorkload(ctx context.Context, context, namespace, name, resource string) (*Workload, error)
 }
 
 func ParseImageTag(image string) (string, string, error) {

@@ -30,7 +30,7 @@ func Resolve(ctx context.Context, k8sClient k8s.Client, ghClient *gh.Client, svc
 		branch = ghClient.DefaultBranch(ctx, svc.Repo)
 	}
 
-	dep, err := k8sClient.GetDeployment(ctx, svc.Context, svc.Namespace, svc.Workload)
+	dep, err := k8sClient.GetWorkload(ctx, svc.Context, svc.Namespace, svc.Workload, svc.ResourceType())
 	if err != nil {
 		r.Error = fmt.Sprintf("%s: k8s: %v", svc.Repo, err)
 		return r

@@ -12,14 +12,18 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/client-go/dynamic"
 	"k8s.io/client-go/kubernetes"
 	"k8s.io/client-go/tools/clientcmd"
 )
 
 type RealClient struct {
-	clientset kubernetes.Interface
-	context   string
-	loginCmd  string
+	clientset     kubernetes.Interface
+	dynamicClient dynamic.Interface
+	context       string
+	loginCmd      string
 }
 
 func NewRealClient(ctx context.Context, kubeconfig, context, loginCmd string) (*RealClient, error) {
@@ -63,7 +67,12 @@ func NewRealClient(ctx context.Context, kubeconfig, context, loginCmd string) (*
 			ch <- result{nil, fmt.Errorf("kubernetes client for %q: %w", actualCtx, err)}
 			return
 		}
-		ch <- result{&RealClient{clientset: clientset, context: actualCtx, loginCmd: loginCmd}, nil}
+		dyn, err := dynamic.NewForConfig(restCfg)
+		if err != nil {
+			ch <- result{nil, fmt.Errorf("dynamic client for %q: %w", actualCtx, err)}
+			return
+		}
+		ch <- result{&RealClient{clientset: clientset, dynamicClient: dyn, context: actualCtx, loginCmd: loginCmd}, nil}
 	}()
 
 	select {
@@ -74,19 +83,35 @@ func NewRealClient(ctx context.Context, kubeconfig, context, loginCmd string) (*
 	}
 }
 
-func (c *RealClient) GetDeployment(ctx context.Context, context, namespace, name string) (*Deployment, error) {
-	dep, err := c.getDeployment(ctx, namespace, name)
+func (c *RealClient) GetWorkload(ctx context.Context, context, namespace, name, resource string) (*Workload, error) {
+	var (
+		dep *Workload
+		err error
+	)
+	if resource == "" {
+		resource = "deployment"
+	}
+	switch resource {
+	case "rollout":
+		dep, err = c.getRollout(ctx, namespace, name)
+	default:
+		dep, err = c.getDeployment(ctx, namespace, name)
+	}
 	if err != nil && c.loginCmd != "" && isAuthErr(err) {
 		if lerr := relogin(c.loginCmd); lerr != nil {
 			err = fmt.Errorf("%w (login failed: %v)", err, lerr)
 		} else {
-			dep, err = c.getDeployment(ctx, namespace, name)
+			if resource == "rollout" {
+				dep, err = c.getRollout(ctx, namespace, name)
+			} else {
+				dep, err = c.getDeployment(ctx, namespace, name)
+			}
 		}
 	}
 	if err != nil {
-		msg := fmt.Sprintf("k8s %s: get deployment %s/%s", c.context, namespace, name)
+		msg := fmt.Sprintf("k8s %s: get %s %s/%s", c.context, resource, namespace, name)
 		if strings.Contains(err.Error(), "not found") {
-			msg += " — deployment may not exist, or your account may lack RBAC read access"
+			msg += " — workload may not exist, or your account may lack RBAC read access"
 		} else if strings.Contains(err.Error(), "Unauthorized") || strings.Contains(err.Error(), "forbidden") {
 			msg += " — token may be expired or missing RBAC permissions"
 		}
@@ -95,7 +120,7 @@ func (c *RealClient) GetDeployment(ctx context.Context, context, namespace, name
 	return dep, nil
 }
 
-func (c *RealClient) getDeployment(ctx context.Context, namespace, name string) (*Deployment, error) {
+func (c *RealClient) getDeployment(ctx context.Context, namespace, name string) (*Workload, error) {
 	dep, err := c.clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
@@ -105,9 +130,9 @@ func (c *RealClient) getDeployment(ctx context.Context, namespace, name string) 
 		return nil, fmt.Errorf("no containers in deployment %s/%s", namespace, name)
 	}
 
-	image := dep.Spec.Template.Spec.Containers[0].Image
-	d := &Deployment{
-		Image:     image,
+	d := &Workload{
+		Kind:      "deployment",
+		Image:     dep.Spec.Template.Spec.Containers[0].Image,
 		Container: dep.Spec.Template.Spec.Containers[0].Name,
 		Health: Health{
 			Ready:         dep.Status.ReadyReplicas == dep.Status.Replicas && dep.Status.Replicas > 0,
@@ -115,37 +140,6 @@ func (c *RealClient) getDeployment(ctx context.Context, namespace, name string) 
 			Replicas:      dep.Status.Replicas,
 		},
 	}
-	c.collectHealth(ctx, namespace, name, dep, d)
-	return d, nil
-}
-
-// collectHealth augments the deployment with pod restart counts and recent
-// warning events (OOM kills, backoff, failed scheduling, ...).
-func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, dep *appsv1.Deployment, d *Deployment) {
-	sel, err := metav1.LabelSelectorAsSelector(dep.Spec.Selector)
-	if err != nil {
-		return
-	}
-	pods, err := c.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: sel.String()})
-	if err != nil {
-		return
-	}
-
-	podNames := make(map[string]bool, len(pods.Items))
-	for i := range pods.Items {
-		pod := &pods.Items[i]
-		podNames[pod.Name] = true
-		switch pod.Status.Phase {
-		case corev1.PodPending:
-			d.Health.PendingPods++
-		case corev1.PodFailed:
-			d.Health.FailedPods++
-		}
-		for _, cs := range pod.Status.ContainerStatuses {
-			d.Health.Restarts += cs.RestartCount
-		}
-	}
-
 	// deployment-level conditions: stuck rollouts and replica failures are
 	// not visible via ready replicas alone.
 	for _, cond := range dep.Status.Conditions {
@@ -156,6 +150,117 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 			d.Health.Conditions = append(d.Health.Conditions, "ReplicaFailure")
 		case cond.Type == appsv1.DeploymentAvailable && cond.Status == corev1.ConditionFalse:
 			d.Health.Conditions = append(d.Health.Conditions, "Unavailable")
+		}
+	}
+	c.collectHealth(ctx, namespace, name, dep.Spec.Selector, "Deployment", &d.Health)
+	return d, nil
+}
+
+// rolloutGVR identifies Argo Rollouts CRDs, accessed via the dynamic client
+// so we don't pull in the argo-rollouts module.
+var rolloutGVR = schema.GroupVersionResource{
+	Group:    "argoproj.io",
+	Version:  "v1alpha1",
+	Resource: "rollouts",
+}
+
+// rollout is the subset of the Argo Rollout CRD that ship reads.
+type rollout struct {
+	Spec struct {
+		Selector *metav1.LabelSelector `json:"selector"`
+		Template struct {
+			Spec struct {
+				Containers []struct {
+					Name  string `json:"name"`
+					Image string `json:"image"`
+				} `json:"containers"`
+			} `json:"spec"`
+		} `json:"template"`
+	} `json:"spec"`
+	Status struct {
+		Replicas      int32              `json:"replicas"`
+		ReadyReplicas int32              `json:"readyReplicas"`
+		StableRS      string             `json:"stableRS"`
+		Conditions    []metav1.Condition `json:"conditions"`
+	} `json:"status"`
+}
+
+func (c *RealClient) getRollout(ctx context.Context, namespace, name string) (*Workload, error) {
+	u, err := c.dynamicClient.Resource(rolloutGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
+	if err != nil {
+		return nil, err
+	}
+
+	var ro rollout
+	if err := runtime.DefaultUnstructuredConverter.FromUnstructured(u.Object, &ro); err != nil {
+		return nil, fmt.Errorf("decode rollout %s/%s: %w", namespace, name, err)
+	}
+	if len(ro.Spec.Template.Spec.Containers) == 0 {
+		return nil, fmt.Errorf("no containers in rollout %s/%s", namespace, name)
+	}
+
+	// The rollout spec template is the *canary target*. The stable (prod)
+	// image lives in the ReplicaSet named by status.stableRS.
+	image := ro.Spec.Template.Spec.Containers[0].Image
+	if ro.Status.StableRS != "" {
+		if rs, err := c.clientset.AppsV1().ReplicaSets(namespace).Get(ctx, ro.Status.StableRS, metav1.GetOptions{}); err == nil && len(rs.Spec.Template.Spec.Containers) > 0 {
+			image = rs.Spec.Template.Spec.Containers[0].Image
+		}
+	}
+
+	w := &Workload{
+		Kind:      "rollout",
+		Image:     image,
+		Container: ro.Spec.Template.Spec.Containers[0].Name,
+		Health: Health{
+			Ready:         ro.Status.ReadyReplicas == ro.Status.Replicas && ro.Status.Replicas > 0,
+			ReadyReplicas: ro.Status.ReadyReplicas,
+			Replicas:      ro.Status.Replicas,
+		},
+	}
+	// rollout conditions follow the same shapes as deployments, plus
+	// Argo-specific Degraded when an analysis step fails.
+	for _, cond := range ro.Status.Conditions {
+		switch {
+		case cond.Type == "Progressing" && cond.Reason == "ProgressDeadlineExceeded":
+			w.Health.Conditions = append(w.Health.Conditions, "ProgressDeadlineExceeded")
+		case cond.Type == "ReplicaFailure" && cond.Status == metav1.ConditionTrue:
+			w.Health.Conditions = append(w.Health.Conditions, "ReplicaFailure")
+		case cond.Type == "Available" && cond.Status == metav1.ConditionFalse:
+			w.Health.Conditions = append(w.Health.Conditions, "Unavailable")
+		case cond.Type == "Degraded" && cond.Status == metav1.ConditionTrue:
+			w.Health.Conditions = append(w.Health.Conditions, "Degraded")
+		}
+	}
+	c.collectHealth(ctx, namespace, name, ro.Spec.Selector, "Rollout", &w.Health)
+	return w, nil
+}
+
+// collectHealth augments the workload with pod restart counts, Pending/Failed
+// pod phases, workload conditions, and recent warning events (OOM kills,
+// backoff, failed scheduling, ...).
+func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, sel *metav1.LabelSelector, kind string, h *Health) {
+	labelSel, err := metav1.LabelSelectorAsSelector(sel)
+	if err != nil {
+		return
+	}
+	pods, err := c.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSel.String()})
+	if err != nil {
+		return
+	}
+
+	podNames := make(map[string]bool, len(pods.Items))
+	for i := range pods.Items {
+		pod := &pods.Items[i]
+		podNames[pod.Name] = true
+		switch pod.Status.Phase {
+		case corev1.PodPending:
+			h.PendingPods++
+		case corev1.PodFailed:
+			h.FailedPods++
+		}
+		for _, cs := range pod.Status.ContainerStatuses {
+			h.Restarts += cs.RestartCount
 		}
 	}
 
@@ -174,8 +279,8 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 			continue
 		}
 		obj := ev.InvolvedObject
-		if obj.Kind == "Deployment" && obj.Name == name {
-			// deployment-level warning (e.g. FailedRollout)
+		if obj.Kind == kind && obj.Name == name {
+			// workload-level warning (e.g. FailedRollout)
 		} else if obj.Kind == "Pod" && podNames[obj.Name] {
 			// pod-level warning (e.g. OOMKilled)
 		} else {
@@ -189,7 +294,7 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 			continue
 		}
 		seen[reason] = true
-		d.Health.Events = append(d.Health.Events, reason)
+		h.Events = append(h.Events, reason)
 	}
 }
 

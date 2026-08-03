@@ -2025,6 +2025,8 @@ func shortEvent(reason string) string {
 		return "RepFail"
 	case "Unavailable":
 		return "Unavail"
+	case "Degraded":
+		return "Degrad"
 	case "Started", "Pulled", "Pulling", "Scheduled", "SuccessfulCreate", "MinimumReplicasAvailable":
 		return ""
 	default:
@@ -2359,6 +2361,7 @@ func (m Model) renderHelpOverlay() string {
 				{"⚠N", "pods failed"},
 				{"!OOM", "warning event"},
 				{"!Stuck", "rollout stuck"},
+				{"!Degrad", "analysis degraded"},
 			})
 		}
 	}

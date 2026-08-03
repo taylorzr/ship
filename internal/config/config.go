@@ -46,6 +46,7 @@ type ServiceConfig struct {
 	Context         string `toml:"context"`
 	Namespace       string `toml:"namespace"`
 	Workload        string `toml:"workload"`
+	Resource        string `toml:"resource"`
 	VersionStrategy string `toml:"version_strategy"`
 	VersionKey      string `toml:"version_key"`
 	Versioning      string `toml:"versioning"`
@@ -53,6 +54,15 @@ type ServiceConfig struct {
 	Branch          string `toml:"branch"`
 	SkipUntagged    bool   `toml:"skip_untagged"`
 	ReleaseSource   string `toml:"release_source"`
+}
+
+// ResourceType returns the k8s resource kind for the service, defaulting to
+// "deployment" when unset. Supported values: "deployment", "rollout".
+func (s ServiceConfig) ResourceType() string {
+	if s.Resource == "" {
+		return "deployment"
+	}
+	return s.Resource
 }
 
 type JiraConfig struct {
