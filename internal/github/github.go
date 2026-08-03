@@ -4,7 +4,10 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"math/rand/v2"
+	"net/http"
+	"net/url"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -34,19 +37,20 @@ type PR struct {
 
 type Client struct {
 	gql  *githubv4.Client
+	hc   *http.Client
 	user string
 }
 
 func NewClient(token string) *Client {
 	src := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
-	http := oauth2.NewClient(context.Background(), src)
+	hc := oauth2.NewClient(context.Background(), src)
 	// 60s: the search backend can be slow under load, and a 30s cap aborted
 	// requests that GitHub was about to answer (contributing to the "takes ~1
 	// min then fails" pattern). 502s themselves are GitHub-side; the search
-	// retry loop in search() handles those.
-	http.Timeout = 60 * time.Second
-	gql := githubv4.NewClient(http)
-	return &Client{gql: gql}
+	// retry loops handle those.
+	hc.Timeout = 60 * time.Second
+	gql := githubv4.NewClient(hc)
+	return &Client{gql: gql, hc: hc}
 }
 
 func (c *Client) User(ctx context.Context) (string, error) {
@@ -210,11 +214,139 @@ func (c *Client) search(ctx context.Context, query string) ([]PR, error) {
 	return nil, fmt.Errorf("github search %q: %w", query, lastErr)
 }
 
-// Search runs an arbitrary GitHub search query through the same path as the
-// section queries (including 5xx retries). Used by the my-prs/review-prs/
-// dep-prs debug commands.
+// Search runs an arbitrary GitHub search query through the GraphQL search
+// field (including 5xx retries). Used by the debug commands' --graphql mode to
+// compare against the REST path.
 func (c *Client) Search(ctx context.Context, query string) ([]PR, error) {
 	return c.search(ctx, query)
+}
+
+// SearchIssues runs a GitHub search query against the REST /search/issues
+// endpoint. The section queries use this instead of the GraphQL `search`
+// field: REST search is a different, far more robust backend and does no
+// per-result GraphQL expansion, so it avoids the persistent 502s the GraphQL
+// search field returns on large queries.
+//
+// REST search results are basic issue metadata only — no review decision,
+// mergeability, head SHA, or CI state. Those are filled in from the store
+// cache and refreshed per-row via GetPR.
+func (c *Client) SearchIssues(ctx context.Context, query string) ([]PR, error) {
+	const (
+		base     = "https://api.github.com/search/issues"
+		pageSize = 100
+	)
+	// GitHub caps search pagination at 1000 results.
+	var lastErr error
+	backoff := []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second}
+
+	for attempt := range 4 {
+		var all []PR
+		lastErr = nil
+		ok := true
+
+	retryLoop:
+		for page := 1; page <= 10; page++ {
+			u := fmt.Sprintf("%s?q=%s&per_page=%d&page=%d", base, url.QueryEscape(query), pageSize, page)
+			req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+			if err != nil {
+				return nil, err
+			}
+			req.Header.Set("Accept", "application/vnd.github+json")
+			req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+			resp, err := c.hc.Do(req)
+			if err != nil {
+				lastErr = err
+				ok = false
+				break retryLoop
+			}
+			body, err := io.ReadAll(resp.Body)
+			resp.Body.Close()
+			if err != nil {
+				lastErr = err
+				ok = false
+				break retryLoop
+			}
+			if resp.StatusCode >= 400 {
+				lastErr = fmt.Errorf("search/issues: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+				ok = false
+				break retryLoop
+			}
+
+			var result restSearchResult
+			if err := json.Unmarshal(body, &result); err != nil {
+				lastErr = err
+				ok = false
+				break retryLoop
+			}
+			for _, it := range result.Items {
+				all = append(all, prFromSearchItem(it))
+			}
+			if len(result.Items) < pageSize {
+				break retryLoop
+			}
+		}
+
+		if ok {
+			return all, nil
+		}
+
+		if attempt == 3 {
+			break
+		}
+
+		// only retry on 5xx errors
+		errStr := lastErr.Error()
+		if !strings.Contains(errStr, "502") && !strings.Contains(errStr, "503") &&
+			!strings.Contains(errStr, "504") && !strings.Contains(errStr, "5") {
+			return nil, lastErr
+		}
+
+		select {
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		case <-time.After(backoff[attempt] + time.Duration(rand.IntN(1000))*time.Millisecond):
+		}
+	}
+	return nil, fmt.Errorf("github search %q: %w", query, lastErr)
+}
+
+type restSearchResult struct {
+	TotalCount int
+	Items      []restSearchItem
+}
+
+type restSearchItem struct {
+	Number        int    `json:"number"`
+	Title         string `json:"title"`
+	State         string `json:"state"`
+	Draft         bool   `json:"draft"`
+	UpdatedAt     string `json:"updated_at"`
+	HTMLURL       string `json:"html_url"`
+	RepositoryURL string `json:"repository_url"`
+	PullRequest   struct {
+		MergedAt string `json:"merged_at"`
+	} `json:"pull_request"`
+	User struct {
+		Login string `json:"login"`
+	}
+}
+
+func prFromSearchItem(it restSearchItem) PR {
+	repo := strings.TrimPrefix(it.RepositoryURL, "https://api.github.com/repos/")
+	state := strings.ToUpper(it.State)
+	if it.PullRequest.MergedAt != "" {
+		state = "MERGED"
+	}
+	return PR{
+		Number:    it.Number,
+		Repo:      repo,
+		Title:     it.Title,
+		Author:    it.User.Login,
+		URL:       it.HTMLURL,
+		State:     state,
+		UpdatedAt: it.UpdatedAt,
+		IsDraft:   it.Draft,
+	}
 }
 
 // resolveRollup maps a commit's combined status-check state to the UI's CI
@@ -254,7 +386,7 @@ func (c *Client) MyPRs(ctx context.Context, owners []string) ([]PR, error) {
 	if err != nil {
 		return nil, err
 	}
-	return c.search(ctx, q)
+	return c.SearchIssues(ctx, q)
 }
 
 // MyPRsQuery builds the exact search query used for the My PRs section.
@@ -274,7 +406,7 @@ func (c *Client) ReviewRequested(ctx context.Context, owners []string) ([]PR, er
 	if err != nil {
 		return nil, err
 	}
-	return c.search(ctx, q)
+	return c.SearchIssues(ctx, q)
 }
 
 // ReviewRequestedQuery builds the exact search query used for the direct
@@ -292,7 +424,7 @@ func (c *Client) TeamReviewRequested(ctx context.Context, teams []string) ([]PR,
 	if err != nil {
 		return nil, err
 	}
-	return c.search(ctx, q)
+	return c.SearchIssues(ctx, q)
 }
 
 // TeamReviewRequestedQuery builds the exact search query used for the team
@@ -315,7 +447,7 @@ func (c *Client) AllReviewRequested(ctx context.Context) ([]PR, error) {
 	if err != nil {
 		return nil, err
 	}
-	return c.search(ctx, fmt.Sprintf("is:open is:pr review-requested:%s", user))
+	return c.SearchIssues(ctx, fmt.Sprintf("is:open is:pr review-requested:%s", user))
 }
 
 // GetPR fetches a single pull request by repo and number, returning the same
@@ -363,7 +495,7 @@ func (c *Client) DepPRs(ctx context.Context, repos, owners, teams, authors []str
 	seen := make(map[string]bool)
 	var all []PR
 	for _, q := range queries {
-		prs, err := c.search(ctx, q)
+		prs, err := c.SearchIssues(ctx, q)
 		if err != nil {
 			return nil, err
 		}

@@ -191,9 +191,10 @@ type CachedPR struct {
 }
 
 func (s *Store) SavePRs(prs []CachedPR, role string) error {
-	// The search query no longer carries CI state (dropped to avoid search
-	// backend 502s), so preserve the last known value when a new one is empty.
-	cached := s.allCIStates()
+	// REST search returns basic issue metadata only — no review decision,
+	// mergeability, or CI state — so preserve the last known values when the
+	// new ones are empty (they're refreshed per-row via GetPR).
+	cached := s.allPRDetails()
 
 	tx, err := s.db.Begin()
 	if err != nil {
@@ -215,8 +216,19 @@ func (s *Store) SavePRs(prs []CachedPR, role string) error {
 	defer stmt.Close()
 
 	for _, p := range prs {
-		if p.CIState == "" {
-			p.CIState = cached[fmt.Sprintf("%s#%d", p.Repo, p.Number)]
+		if d, ok := cached[fmt.Sprintf("%s#%d", p.Repo, p.Number)]; ok {
+			if p.ReviewDecision == "" {
+				p.ReviewDecision = d.review
+			}
+			if p.CIState == "" {
+				p.CIState = d.ci
+			}
+			if p.Mergeable == "" {
+				p.Mergeable = d.mergeable
+			}
+			if p.MergeState == "" {
+				p.MergeState = d.mergeState
+			}
 		}
 		if _, err := stmt.Exec(p.Number, p.Repo, p.Title, p.Author, p.Role,
 			p.URL, p.ReviewDecision, p.CIState, p.Mergeable, p.MergeState, p.UpdatedAt, p.IsDraft, p.HeadSHA); err != nil {
@@ -226,11 +238,15 @@ func (s *Store) SavePRs(prs []CachedPR, role string) error {
 	return tx.Commit()
 }
 
-// allCIStates snapshots the currently stored CI state per PR (keyed by
+type prDetails struct {
+	review, ci, mergeable, mergeState string
+}
+
+// allPRDetails snapshots the currently stored per-PR details (keyed by
 // "repo#number") before a save overwrites them.
-func (s *Store) allCIStates() map[string]string {
-	out := map[string]string{}
-	rows, err := s.db.Query(`SELECT repo, number, COALESCE(ci_state, '') FROM pr`)
+func (s *Store) allPRDetails() map[string]prDetails {
+	out := map[string]prDetails{}
+	rows, err := s.db.Query(`SELECT repo, number, COALESCE(review_decision, ''), COALESCE(ci_state, ''), COALESCE(mergeable, ''), COALESCE(merge_state, '') FROM pr`)
 	if err != nil {
 		return out
 	}
@@ -238,9 +254,9 @@ func (s *Store) allCIStates() map[string]string {
 	for rows.Next() {
 		var repo string
 		var num int
-		var state string
-		if rows.Scan(&repo, &num, &state) == nil {
-			out[fmt.Sprintf("%s#%d", repo, num)] = state
+		var d prDetails
+		if rows.Scan(&repo, &num, &d.review, &d.ci, &d.mergeable, &d.mergeState) == nil {
+			out[fmt.Sprintf("%s#%d", repo, num)] = d
 		}
 	}
 	return out

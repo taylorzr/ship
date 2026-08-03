@@ -62,6 +62,7 @@ var releasesRepo string
 var reviewMeOnly bool
 var reviewTeamOnly bool
 var depRepos, depOwners, depTeams []string
+var useGraphQL bool
 
 func init() {
 	rootCmd.AddCommand(countCmd)
@@ -77,6 +78,9 @@ func init() {
 	depPRsCmd.Flags().StringSliceVar(&depRepos, "repo", nil, "only run the query for this repo (repeatable)")
 	depPRsCmd.Flags().StringSliceVar(&depOwners, "owner", nil, "only run the query for this owner (repeatable)")
 	depPRsCmd.Flags().StringSliceVar(&depTeams, "team", nil, "only run the query for this team (repeatable)")
+	myPRsCmd.Flags().BoolVar(&useGraphQL, "graphql", false, "use the GraphQL search field (the flaky path) instead of REST")
+	reviewPRsCmd.Flags().BoolVar(&useGraphQL, "graphql", false, "use the GraphQL search field (the flaky path) instead of REST")
+	depPRsCmd.Flags().BoolVar(&useGraphQL, "graphql", false, "use the GraphQL search field (the flaky path) instead of REST")
 }
 
 func main() {
@@ -271,6 +275,8 @@ func runDepPRs(cmd *cobra.Command, args []string) error {
 
 // runPRQueries fires each query concurrently — mirroring the TUI's parallel
 // section refresh — and prints each one's query, timing, results, or error.
+// By default it uses the REST /search/issues path (the fix for the flaky
+// GraphQL search field); pass --graphql to exercise the old path instead.
 func runPRQueries(ctx context.Context, client *gh.Client, queries []string) error {
 	type prQueryResult struct {
 		query string
@@ -285,7 +291,13 @@ func runPRQueries(ctx context.Context, client *gh.Client, queries []string) erro
 		go func(i int, q string) {
 			defer wg.Done()
 			start := time.Now()
-			prs, err := client.Search(ctx, q)
+			var prs []gh.PR
+			var err error
+			if useGraphQL {
+				prs, err = client.Search(ctx, q)
+			} else {
+				prs, err = client.SearchIssues(ctx, q)
+			}
 			results[i] = prQueryResult{query: q, prs: prs, dur: time.Since(start), err: err}
 		}(i, q)
 	}
