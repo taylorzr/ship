@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"strings"
+	"time"
 )
 
 type Health struct {
@@ -12,7 +13,11 @@ type Health struct {
 	Replicas      int32
 	Restarts      int32
 	RestartCauses []string // last termination reason per restarted container, e.g. "OOMKilled", "Exit137"
-	Events        []string // recent Warning reasons, e.g. "OOMKilled", "BackOff"
+	Events        []string // Warning reasons within the warn window, e.g. "OOMKilled", "BackOff"
+	RecentEvents  []string // Warning reasons within the recent window (rendered red)
+	OldEvents     []string // Warning reasons within the history window (rendered muted)
+	Waiting       []string // container State.Waiting reasons, e.g. "ImagePullBackOff", "CrashLoopBackOff"
+	Progressing   bool     // workload is mid-rollout (a deploy is in progress)
 	Conditions    []string // deployment condition reasons, e.g. "ProgressDeadlineExceeded"
 	PendingPods   int32    // pods stuck in Pending phase (scheduling, etc.)
 	FailedPods    int32    // pods in Failed phase
@@ -29,6 +34,57 @@ type Workload struct {
 // resource is the workload kind ("deployment" or "rollout").
 type Client interface {
 	GetWorkload(ctx context.Context, context, namespace, name, resource string) (*Workload, error)
+}
+
+// EventTimebox configures how long collected warning events stay visible and
+// how they're bucketed for display: within Recent renders red, within Warn
+// renders yellow, within History renders muted, older events are dropped.
+type EventTimebox struct {
+	Recent  time.Duration
+	Warn    time.Duration
+	History time.Duration
+}
+
+// normalize fills in defaults for unset durations and clamps the buckets so
+// Warn >= Recent and History >= Warn even with a misconfigured caller.
+func (t EventTimebox) normalize() EventTimebox {
+	if t.Recent <= 0 {
+		t.Recent = time.Minute
+	}
+	if t.Warn <= 0 {
+		t.Warn = 10 * time.Minute
+	}
+	if t.History <= 0 {
+		t.History = 24 * time.Hour
+	}
+	if t.Warn < t.Recent {
+		t.Warn = t.Recent
+	}
+	if t.History < t.Warn {
+		t.History = t.Warn
+	}
+	return t
+}
+
+// DefaultTransientEvents are Warning event reasons that describe conditions
+// which may have since resolved (failed probes, restart backoff, scheduling
+// or mount hiccups). The collector keeps every event within the timebox; this
+// list only drives the display-side "hide transient" filter, so its default
+// value is a matter of taste rather than collection policy.
+var DefaultTransientEvents = []string{
+	"Unhealthy",
+	"FailedCreate",
+	"FailedCreatePodSandBox",
+	"FailedCreatePod",
+	"BackOff",
+	"CrashLoopBackOff",
+	"FailedScheduling",
+	"FailedMount",
+	"FailedAttachVolume",
+	"Killing",
+	"KillPodSandbox",
+	"NodeNotReady",
+	"NodeReady",
 }
 
 func ParseImageTag(image string) (string, string, error) {

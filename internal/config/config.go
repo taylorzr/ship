@@ -4,28 +4,34 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/BurntSushi/toml"
 )
 
 type Config struct {
-	GitHub          GitHubConfig   `toml:"github"`
-	K8s             K8sConfig      `toml:"k8s"`
-	RefreshInterval int            `toml:"refresh_interval"`
-	AI              AIConfig       `toml:"ai"`
-	Repos           []RepoConfig   `toml:"repo"`
+	GitHub          GitHubConfig    `toml:"github"`
+	K8s             K8sConfig       `toml:"k8s"`
+	RefreshInterval int             `toml:"refresh_interval"`
+	AI              AIConfig        `toml:"ai"`
+	Repos           []RepoConfig    `toml:"repo"`
 	Services        []ServiceConfig `toml:"service"`
-	Jira            []JiraConfig   `toml:"jira"`
+	Jira            []JiraConfig    `toml:"jira"`
 }
 
 type K8sConfig struct {
-	LoginCommand string `toml:"login_command"`
+	LoginCommand    string        `toml:"login_command"`
+	EventRecent     time.Duration `toml:"event_recent"`     // warning events <= this age render red
+	EventWarn       time.Duration `toml:"event_warn"`       // warning events <= this age render yellow
+	EventHistory    time.Duration `toml:"event_history"`    // warning events <= this age render muted; older are dropped
+	HideTransient   bool          `toml:"hide_transient"`   // hide transient warning events from the health column
+	TransientEvents []string      `toml:"transient_events"` // override the default transient event reason list
 }
 
 type GitHubConfig struct {
-	Owners            []string `toml:"owners"`
-	Teams             []string `toml:"teams"`
-	DepAuthors        []string `toml:"dep_authors"`
+	Owners             []string `toml:"owners"`
+	Teams              []string `toml:"teams"`
+	DepAuthors         []string `toml:"dep_authors"`
 	IgnoreContributors []string `toml:"ignore_contributors"`
 }
 
@@ -66,11 +72,11 @@ func (s ServiceConfig) ResourceType() string {
 }
 
 type JiraConfig struct {
-	Repo           string `toml:"repo"`
-	Project        string `toml:"project"`
-	DefaultType    string `toml:"default_type"`
-	EpicLinkField  string `toml:"epic_link_field"`
-	Site           string `toml:"site"`
+	Repo          string `toml:"repo"`
+	Project       string `toml:"project"`
+	DefaultType   string `toml:"default_type"`
+	EpicLinkField string `toml:"epic_link_field"`
+	Site          string `toml:"site"`
 }
 
 func DefaultPath() string {
@@ -82,8 +88,13 @@ func Load(path string) (*Config, error) {
 	cfg := &Config{
 		RefreshInterval: 300,
 		GitHub: GitHubConfig{
-			DepAuthors:        []string{"app/renovate", "app/dependabot"},
+			DepAuthors:         []string{"app/renovate", "app/dependabot"},
 			IgnoreContributors: []string{"github-actions[bot]", "dependabot[bot]", "renovate[bot]"},
+		},
+		K8s: K8sConfig{
+			EventRecent:  time.Minute,
+			EventWarn:    10 * time.Minute,
+			EventHistory: 24 * time.Hour,
 		},
 		AI: AIConfig{
 			ReviewProvider: "claude-cli",

@@ -17,7 +17,7 @@ type MockSpec struct {
 
 // ParseMockSpec decodes a --mock-k8s value of the form
 //
-//	image|restarts=3|causes=OOMKilling+Exit137|events=OOMKilling+BackOff|ready=false|replicas=2|ready_replicas=1|conditions=ProgressDeadlineExceeded|pending=1|failed=1
+//	image|restarts=3|causes=OOMKilling+Exit137|recent_events=OOMKilling|events=BackOff|old_events=Evicted|waiting=ImagePullBackOff|progressing=true|ready=false|replicas=2|ready_replicas=1|conditions=ProgressDeadlineExceeded|pending=1|failed=1
 //
 // Health fields are optional; image is everything before the first "|".
 // If no health fields are given the deployment is healthy. When `ready` is
@@ -61,6 +61,26 @@ func ParseMockSpec(v string) MockSpec {
 						spec.Health.Events = append(spec.Health.Events, e)
 					}
 				}
+			case "recent_events":
+				for _, e := range strings.Split(val, "+") {
+					if e != "" {
+						spec.Health.RecentEvents = append(spec.Health.RecentEvents, e)
+					}
+				}
+			case "old_events":
+				for _, e := range strings.Split(val, "+") {
+					if e != "" {
+						spec.Health.OldEvents = append(spec.Health.OldEvents, e)
+					}
+				}
+			case "waiting":
+				for _, w := range strings.Split(val, "+") {
+					if w != "" {
+						spec.Health.Waiting = append(spec.Health.Waiting, w)
+					}
+				}
+			case "progressing":
+				spec.Health.Progressing = val == "true" || val == "1"
 			case "conditions":
 				for _, c := range strings.Split(val, "+") {
 					if c != "" {

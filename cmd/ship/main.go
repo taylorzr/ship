@@ -364,7 +364,11 @@ func runReleases(cmd *cobra.Command, args []string) error {
 			fmt.Printf("(using mock k8s — service: %s, image: %s)\n\n", svc.Name, parsed.Image)
 		} else {
 			svcCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-			rc, err := k8s.NewRealClient(svcCtx, "", svc.Context, cfg.K8s.LoginCommand)
+			rc, err := k8s.NewRealClient(svcCtx, "", svc.Context, cfg.K8s.LoginCommand, k8s.EventTimebox{
+				Recent:  cfg.K8s.EventRecent,
+				Warn:    cfg.K8s.EventWarn,
+				History: cfg.K8s.EventHistory,
+			})
 			cancel()
 			if err != nil {
 				fmt.Printf("── %s ──\n  ✗ k8s: %v\n\n", svc.Repo, err)

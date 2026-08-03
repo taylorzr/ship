@@ -19,12 +19,12 @@ import (
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
+	"github.com/zach/ship/internal/ai"
 	"github.com/zach/ship/internal/config"
 	gh "github.com/zach/ship/internal/github"
 	"github.com/zach/ship/internal/k8s"
 	"github.com/zach/ship/internal/store"
 	"github.com/zach/ship/internal/version"
-	"github.com/zach/ship/internal/ai"
 )
 
 var shipLog *log.Logger
@@ -58,14 +58,15 @@ var (
 			Reverse(true).
 			Bold(true)
 
-	helpKey = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	headerStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
-	errorStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	helpKey       = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	headerStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
+	errorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	overflowStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	healthOK  = lipgloss.NewStyle().Foreground(lipgloss.Color("84"))
-	healthWarn = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
-	healthBad = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
-	dialogStyle = lipgloss.NewStyle().
+	healthOK      = lipgloss.NewStyle().Foreground(lipgloss.Color("84"))
+	healthWarn    = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
+	healthBad     = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	healthMuted   = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
+	dialogStyle   = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
 			BorderForeground(lipgloss.Color("205")).
 			Padding(1, 2).
@@ -96,27 +97,27 @@ func (m *Model) maxVisibleRows() int {
 }
 
 type row struct {
-	title     string
-	repo      string
-	num       int
-	url       string
-	ci        string
-	review    string
-	draft     bool
-	mergeable string
-	name      string // display name (releases section)
-	pending   string // pending versions (releases section)
-	sha       string // commit SHA
-	updatedAt string // RFC 3339 timestamp
-	depth     int    // nesting level for releases section
-	prodRef   string // prod tag/SHA for compare URLs
-	role      string // review role ("review-direct" or "review-team")
-	reviewed  bool   // AI review dispatched
-	reviewStale bool // AI review exists but head SHA changed
-	headSha   string // PR head SHA for stale check
+	title        string
+	repo         string
+	num          int
+	url          string
+	ci           string
+	review       string
+	draft        bool
+	mergeable    string
+	name         string // display name (releases section)
+	pending      string // pending versions (releases section)
+	sha          string // commit SHA
+	updatedAt    string // RFC 3339 timestamp
+	depth        int    // nesting level for releases section
+	prodRef      string // prod tag/SHA for compare URLs
+	role         string // review role ("review-direct" or "review-team")
+	reviewed     bool   // AI review dispatched
+	reviewStale  bool   // AI review exists but head SHA changed
+	headSha      string // PR head SHA for stale check
 	contributors string // version contributors (releases section)
-	mergeState string // PR merge state; "BEHIND" = needs backmerge
-	health     string // service deployment health summary
+	mergeState   string // PR merge state; "BEHIND" = needs backmerge
+	health       string // service deployment health summary
 }
 
 type section struct {
@@ -132,17 +133,17 @@ type section struct {
 }
 
 type keyMap struct {
-	Up          key.Binding
-	Down        key.Binding
-	SectionNext key.Binding
-	SectionPrev key.Binding
-	Enter       key.Binding
-	Merge       key.Binding
-	Close       key.Binding
-	DraftToggle  key.Binding
-	RefreshItem  key.Binding
-	Refresh      key.Binding
-	Quit        key.Binding
+	Up            key.Binding
+	Down          key.Binding
+	SectionNext   key.Binding
+	SectionPrev   key.Binding
+	Enter         key.Binding
+	Merge         key.Binding
+	Close         key.Binding
+	DraftToggle   key.Binding
+	RefreshItem   key.Binding
+	Refresh       key.Binding
+	Quit          key.Binding
 	FilterStarred key.Binding
 	SortToggle    key.Binding
 	Search        key.Binding
@@ -157,17 +158,17 @@ type keyMap struct {
 }
 
 var keys = keyMap{
-	Up:          key.NewBinding(key.WithKeys("k", "up"), key.WithHelp("k/↑", "move up")),
-	Down:        key.NewBinding(key.WithKeys("j", "down"), key.WithHelp("j/↓", "move down")),
-	SectionNext: key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next section")),
-	SectionPrev: key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("⇧+tab", "prev section")),
-	Enter:       key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open")),
-	Merge:       key.NewBinding(key.WithKeys("M"), key.WithHelp("M", "merge")),
-	Close:       key.NewBinding(key.WithKeys("C"), key.WithHelp("C", "close")),
-	DraftToggle:  key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "toggle pr draft")),
-	RefreshItem:  key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh item")),
-	Refresh:      key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "refresh all")),
-	Quit:        key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
+	Up:            key.NewBinding(key.WithKeys("k", "up"), key.WithHelp("k/↑", "move up")),
+	Down:          key.NewBinding(key.WithKeys("j", "down"), key.WithHelp("j/↓", "move down")),
+	SectionNext:   key.NewBinding(key.WithKeys("tab"), key.WithHelp("tab", "next section")),
+	SectionPrev:   key.NewBinding(key.WithKeys("shift+tab"), key.WithHelp("⇧+tab", "prev section")),
+	Enter:         key.NewBinding(key.WithKeys("enter"), key.WithHelp("enter", "open")),
+	Merge:         key.NewBinding(key.WithKeys("M"), key.WithHelp("M", "merge")),
+	Close:         key.NewBinding(key.WithKeys("C"), key.WithHelp("C", "close")),
+	DraftToggle:   key.NewBinding(key.WithKeys("D"), key.WithHelp("D", "toggle pr draft")),
+	RefreshItem:   key.NewBinding(key.WithKeys("r"), key.WithHelp("r", "refresh item")),
+	Refresh:       key.NewBinding(key.WithKeys("R"), key.WithHelp("R", "refresh all")),
+	Quit:          key.NewBinding(key.WithKeys("q", "ctrl+c"), key.WithHelp("q", "quit")),
 	FilterStarred: key.NewBinding(key.WithKeys("s"), key.WithHelp("s", "toggle starred")),
 	SortToggle:    key.NewBinding(key.WithKeys("a"), key.WithHelp("a", "toggle age-sort")),
 	Search:        key.NewBinding(key.WithKeys("/"), key.WithHelp("/", "search")),
@@ -206,29 +207,32 @@ type actionDoneMsg struct {
 }
 
 type Model struct {
-	cfg           *config.Config
-	store         *store.Store
-	gh            *gh.Client
-	width         int
-	height        int
-	sections      []section
-	cursor        int
-	total         int
-	spin          spinner.Model
-	loading       map[string]bool
-	sectionErrs   map[string]string
-	confirm       *confirmAction
-	lastRefreshed time.Time
-	sectionIdx    int
-	searching     bool
-	searchQuery   string
-	tagging       bool
-	tagQuery      string
-	tagMeta       tagState
-	showHelp      bool
-	gPending      bool
-	mockK8sSpecs map[string]k8s.MockSpec
-	refreshingItem struct { repo string; num int }
+	cfg            *config.Config
+	store          *store.Store
+	gh             *gh.Client
+	width          int
+	height         int
+	sections       []section
+	cursor         int
+	total          int
+	spin           spinner.Model
+	loading        map[string]bool
+	sectionErrs    map[string]string
+	confirm        *confirmAction
+	lastRefreshed  time.Time
+	sectionIdx     int
+	searching      bool
+	searchQuery    string
+	tagging        bool
+	tagQuery       string
+	tagMeta        tagState
+	showHelp       bool
+	gPending       bool
+	mockK8sSpecs   map[string]k8s.MockSpec
+	refreshingItem struct {
+		repo string
+		num  int
+	}
 }
 
 type tagState struct {
@@ -260,10 +264,10 @@ func New(cfg *config.Config, st *store.Store, ghClient *gh.Client, mockK8sSpecs 
 		loading["Team Review"] = false
 	}
 	m := Model{
-		cfg:         cfg,
-		store:       st,
-		gh:          ghClient,
-		spin:        s,
+		cfg:          cfg,
+		store:        st,
+		gh:           ghClient,
+		spin:         s,
 		loading:      loading,
 		sectionErrs:  map[string]string{},
 		mockK8sSpecs: mockK8sSpecs,
@@ -370,23 +374,23 @@ func (m *Model) loadFromCache() {
 	s := section{name: "My PRs", scrollOffset: so, draftFilter: df, showStarred: ss, sortNewest: sn}
 	for _, p := range prs {
 		r := row{
-				title:  p.Title,
-				repo:   p.Repo,
-				num:    p.Number,
-				url:    p.URL,
-				ci:     p.CIState,
-				review: p.ReviewDecision,
-				draft:  p.IsDraft,
-			updatedAt: p.UpdatedAt,
-			mergeable: p.Mergeable,
+			title:      p.Title,
+			repo:       p.Repo,
+			num:        p.Number,
+			url:        p.URL,
+			ci:         p.CIState,
+			review:     p.ReviewDecision,
+			draft:      p.IsDraft,
+			updatedAt:  p.UpdatedAt,
+			mergeable:  p.Mergeable,
 			mergeState: p.MergeState,
-			headSha: p.HeadSHA,
+			headSha:    p.HeadSHA,
 		}
 		m.loadReviewState(&r)
 		s.allRows = append(s.allRows, r)
 		s.rows = append(s.rows, r)
-		}
-		sections = append(sections, s)
+	}
+	sections = append(sections, s)
 
 	versions, _ := m.store.CachedVersions()
 	svcNames := make(map[string]string, len(m.cfg.Services))
@@ -498,18 +502,18 @@ func (m *Model) loadFromCache() {
 		}
 		seen[key] = true
 		r := row{
-			title:  p.Title,
-			repo:   p.Repo,
-			num:    p.Number,
-			url:    p.URL,
-			ci:     p.CIState,
-			review: p.ReviewDecision,
-			draft:  p.IsDraft,
-			updatedAt: p.UpdatedAt,
-			mergeable: p.Mergeable,
+			title:      p.Title,
+			repo:       p.Repo,
+			num:        p.Number,
+			url:        p.URL,
+			ci:         p.CIState,
+			review:     p.ReviewDecision,
+			draft:      p.IsDraft,
+			updatedAt:  p.UpdatedAt,
+			mergeable:  p.Mergeable,
 			mergeState: p.MergeState,
-			role:     "review-direct",
-			headSha: p.HeadSHA,
+			role:       "review-direct",
+			headSha:    p.HeadSHA,
 		}
 		m.loadReviewState(&r)
 		s2.allRows = append(s2.allRows, r)
@@ -522,18 +526,18 @@ func (m *Model) loadFromCache() {
 		}
 		seen[key] = true
 		r := row{
-			title:  p.Title,
-			repo:   p.Repo,
-			num:    p.Number,
-			url:    p.URL,
-			ci:     p.CIState,
-			review: p.ReviewDecision,
-			draft:  p.IsDraft,
-			updatedAt: p.UpdatedAt,
-			mergeable: p.Mergeable,
+			title:      p.Title,
+			repo:       p.Repo,
+			num:        p.Number,
+			url:        p.URL,
+			ci:         p.CIState,
+			review:     p.ReviewDecision,
+			draft:      p.IsDraft,
+			updatedAt:  p.UpdatedAt,
+			mergeable:  p.Mergeable,
 			mergeState: p.MergeState,
-			role:     "review-team",
-			headSha: p.HeadSHA,
+			role:       "review-team",
+			headSha:    p.HeadSHA,
 		}
 		m.loadReviewState(&r)
 		s2.allRows = append(s2.allRows, r)
@@ -546,17 +550,17 @@ func (m *Model) loadFromCache() {
 	s4 := section{name: "Dependencies", scrollOffset: so, draftFilter: df, showStarred: ss, sortNewest: sn}
 	for _, p := range deps {
 		r := row{
-			title:  p.Title,
-			repo:   p.Repo,
-			num:    p.Number,
-			url:    p.URL,
-			ci:     p.CIState,
-			review: p.ReviewDecision,
-			draft:  p.IsDraft,
-			updatedAt: p.UpdatedAt,
-			mergeable: p.Mergeable,
+			title:      p.Title,
+			repo:       p.Repo,
+			num:        p.Number,
+			url:        p.URL,
+			ci:         p.CIState,
+			review:     p.ReviewDecision,
+			draft:      p.IsDraft,
+			updatedAt:  p.UpdatedAt,
+			mergeable:  p.Mergeable,
 			mergeState: p.MergeState,
-			headSha: p.HeadSHA,
+			headSha:    p.HeadSHA,
 		}
 		m.loadReviewState(&r)
 		s4.allRows = append(s4.allRows, r)
@@ -839,7 +843,7 @@ func (m Model) refreshServiceCmd(ctx context.Context, repo string) tea.Cmd {
 			rc = k8s.NewMock(map[string]k8s.MockSpec{"*": spec})
 		} else {
 			var err error
-			rc, err = k8s.NewRealClient(svcCtx, "", svc.Context, m.cfg.K8s.LoginCommand)
+			rc, err = k8s.NewRealClient(svcCtx, "", svc.Context, m.cfg.K8s.LoginCommand, m.k8sTimebox())
 			if err != nil {
 				return refreshDoneMsg{source: "Services", err: err}
 			}
@@ -900,7 +904,7 @@ func (m Model) refreshItemCmd(ctx context.Context) tea.Cmd {
 				rc = k8s.NewMock(map[string]k8s.MockSpec{"*": spec})
 			} else {
 				var err error
-				rc, err = k8s.NewRealClient(svcCtx, "", svc.Context, m.cfg.K8s.LoginCommand)
+				rc, err = k8s.NewRealClient(svcCtx, "", svc.Context, m.cfg.K8s.LoginCommand, m.k8sTimebox())
 				if err != nil {
 					return refreshDoneMsg{source: s.name, err: err}
 				}
@@ -1002,7 +1006,7 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 					rc = k8s.NewMock(map[string]k8s.MockSpec{"*": spec})
 				} else {
 					var err error
-					rc, err = k8s.NewRealClient(svcCtx, "", svc.Context, m.cfg.K8s.LoginCommand)
+					rc, err = k8s.NewRealClient(svcCtx, "", svc.Context, m.cfg.K8s.LoginCommand, m.k8sTimebox())
 					if err != nil {
 						results <- svcResult{Repo: svc.Repo, Error: fmt.Sprintf("k8s: %v", err)}
 						return
@@ -1153,14 +1157,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					}
 					return m, m.createTagRelease(m.tagMeta.repo, tag, m.tagMeta.sha, m.tagMeta.branch)
 				}
-		case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+o"))):
-			tag := strings.TrimSpace(m.tagQuery)
-			m.tagging = false
-			m.tagQuery = ""
-			if tag != "" {
-				url := fmt.Sprintf("https://github.com/%s/releases/new?tag=%s&target=%s", m.tagMeta.repo, url.QueryEscape(tag), m.tagMeta.sha)
-				openBrowser(url)
-			}
+			case key.Matches(msg, key.NewBinding(key.WithKeys("ctrl+o"))):
+				tag := strings.TrimSpace(m.tagQuery)
+				m.tagging = false
+				m.tagQuery = ""
+				if tag != "" {
+					url := fmt.Sprintf("https://github.com/%s/releases/new?tag=%s&target=%s", m.tagMeta.repo, url.QueryEscape(tag), m.tagMeta.sha)
+					openBrowser(url)
+				}
 			case key.Matches(msg, key.NewBinding(key.WithKeys("backspace"))):
 				if len(m.tagQuery) > 0 {
 					m.tagQuery = m.tagQuery[:len(m.tagQuery)-1]
@@ -1256,7 +1260,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 		case key.Matches(msg, keys.RefreshItem):
 			if r := m.currentRow(); r != nil && r.repo != "" {
-				m.refreshingItem = struct{ repo string; num int }{repo: r.repo, num: r.num}
+				m.refreshingItem = struct {
+					repo string
+					num  int
+				}{repo: r.repo, num: r.num}
 				return m, m.refreshItemCmd(context.Background())
 			}
 			return m, nil
@@ -1397,11 +1404,11 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 						}
 						m.tagging = true
 						m.tagQuery = ""
-m.tagMeta = tagState{repo: r.repo, sha: r.sha, branch: branch, loading: true}
-					if shipLog != nil {
-						shipLog.Printf("T: set tagMeta.sha=%q (from r.sha=%q) branch=%q", m.tagMeta.sha, r.sha, branch)
-					}
-					return m, m.fetchTagMetaCmd(r.repo, versioning)
+						m.tagMeta = tagState{repo: r.repo, sha: r.sha, branch: branch, loading: true}
+						if shipLog != nil {
+							shipLog.Printf("T: set tagMeta.sha=%q (from r.sha=%q) branch=%q", m.tagMeta.sha, r.sha, branch)
+						}
+						return m, m.fetchTagMetaCmd(r.repo, versioning)
 					}
 				}
 			}
@@ -1482,7 +1489,10 @@ m.tagMeta = tagState{repo: r.repo, sha: r.sha, branch: branch, loading: true}
 
 	case refreshDoneMsg:
 		m.loading[msg.source] = false
-		m.refreshingItem = struct{ repo string; num int }{}
+		m.refreshingItem = struct {
+			repo string
+			num  int
+		}{}
 		if msg.err != nil {
 			if shipLog != nil {
 				shipLog.Printf("%s: %v", msg.source, msg.err)
@@ -1540,7 +1550,10 @@ m.tagMeta = tagState{repo: r.repo, sha: r.sha, branch: branch, loading: true}
 			return m, nil
 		case "draft-toggle":
 			if msg.repo != "" && msg.num > 0 {
-				m.refreshingItem = struct{ repo string; num int }{repo: msg.repo, num: msg.num}
+				m.refreshingItem = struct {
+					repo string
+					num  int
+				}{repo: msg.repo, num: msg.num}
 				return m, m.refreshItemCmd(context.Background())
 			}
 		}
@@ -1560,7 +1573,10 @@ m.tagMeta = tagState{repo: r.repo, sha: r.sha, branch: branch, loading: true}
 		}
 
 	case tagCreatedMsg:
-		m.refreshingItem = struct{ repo string; num int }{repo: msg.repo, num: 0}
+		m.refreshingItem = struct {
+			repo string
+			num  int
+		}{repo: msg.repo, num: 0}
 		return m, m.refreshReleases(context.Background())
 	}
 
@@ -1781,10 +1797,11 @@ func (m Model) View() string {
 			globalIdx += len(s.rows)
 		} else if len(s.rows) > 0 {
 			// compute column widths
-			maxName := 4  // "Name"
-			maxCur := 7   // "Current"
-			maxPen := 7   // "Pending"
-			maxCon := 11  // "Details"
+			maxName := 4 // "Name"
+			maxCur := 7  // "Current"
+			maxPen := 7  // "Pending"
+			maxCon := 11 // "Details"
+			ev := m.eventFilter()
 			for _, r := range s.rows {
 				if r.depth == 0 {
 					if w := lipgloss.Width(r.name); w > maxName {
@@ -1797,7 +1814,7 @@ func (m Model) View() string {
 				if w := lipgloss.Width(r.pending); w > maxPen {
 					maxPen = w
 				}
-				if w := lipgloss.Width(detailsText(r.health, r.contributors)); w > maxCon {
+				if w := lipgloss.Width(detailsText(r.health, r.contributors, ev)); w > maxCon {
 					maxCon = w
 				}
 			}
@@ -1860,26 +1877,26 @@ func (m Model) View() string {
 					if isRefreshing {
 						loadCol = padWidth(m.spin.View(), 4)
 					}
-				line = fmt.Sprintf("%s%s%s%s%s%s%s%s",
-					loadCol,
-					padWidth(truncateWidth(r.name, maxName), maxName),
-					sep,
-					padWidth(truncateWidth(r.title, maxCur), maxCur),
-					sep,
-					padWidth(truncateWidth(pending, maxPen), maxPen),
-					sep,
-					padWidth(truncateWidth(renderDetails(r.health, r.contributors, isSelected), maxCon), maxCon))
-			} else {
-				line = fmt.Sprintf("%s%s%s%s%s%s%s%s",
-					"    ",
-					padWidth("", maxName),
-					sep,
-					padWidth("", maxCur),
-					sep,
-					padWidth(truncateWidth(r.pending, maxPen), maxPen),
-					sep,
-					padWidth(truncateWidth(r.contributors, maxCon), maxCon))
-			}
+					line = fmt.Sprintf("%s%s%s%s%s%s%s%s",
+						loadCol,
+						padWidth(truncateWidth(r.name, maxName), maxName),
+						sep,
+						padWidth(truncateWidth(r.title, maxCur), maxCur),
+						sep,
+						padWidth(truncateWidth(pending, maxPen), maxPen),
+						sep,
+						padWidth(truncateWidth(renderDetails(r.health, r.contributors, isSelected, ev), maxCon), maxCon))
+				} else {
+					line = fmt.Sprintf("%s%s%s%s%s%s%s%s",
+						"    ",
+						padWidth("", maxName),
+						sep,
+						padWidth("", maxCur),
+						sep,
+						padWidth(truncateWidth(r.pending, maxPen), maxPen),
+						sep,
+						padWidth(truncateWidth(r.contributors, maxCon), maxCon))
+				}
 				if m.width > 0 {
 					line = truncateWidth(line, m.width)
 				}
@@ -1964,19 +1981,23 @@ func serializePendingTags(tags []gh.PendingTag) (pending string, contribs string
 // serializeHealth turns service health into a compact on-disk string so the
 // Services column survives cache reloads.
 func serializeHealth(h k8s.Health) string {
-	if h.Replicas == 0 && h.Restarts == 0 && len(h.RestartCauses) == 0 && len(h.Events) == 0 && len(h.Conditions) == 0 && h.PendingPods == 0 && h.FailedPods == 0 {
+	if h.Replicas == 0 && h.Restarts == 0 && len(h.RestartCauses) == 0 && len(h.Events) == 0 && len(h.RecentEvents) == 0 && len(h.OldEvents) == 0 && len(h.Waiting) == 0 && len(h.Conditions) == 0 && h.PendingPods == 0 && h.FailedPods == 0 && !h.Progressing {
 		return ""
 	}
 	events := strings.Join(h.Events, ",")
 	conditions := strings.Join(h.Conditions, ",")
 	causes := strings.Join(h.RestartCauses, ",")
-	return fmt.Sprintf("%v|%d|%d|%d|%s|%s|%d|%d|%s", h.Ready, h.ReadyReplicas, h.Replicas, h.Restarts, events, conditions, h.PendingPods, h.FailedPods, causes)
+	recent := strings.Join(h.RecentEvents, ",")
+	old := strings.Join(h.OldEvents, ",")
+	waiting := strings.Join(h.Waiting, ",")
+	return fmt.Sprintf("%v|%d|%d|%d|%s|%s|%d|%d|%s|%s|%s|%s|%v", h.Ready, h.ReadyReplicas, h.Replicas, h.Restarts, events, conditions, h.PendingPods, h.FailedPods, causes, recent, old, waiting, h.Progressing)
 }
 
-// parseHealth decodes a value produced by serializeHealth.
+// parseHealth decodes a value produced by serializeHealth. Older cache rows
+// with fewer fields are still accepted.
 func parseHealth(s string) k8s.Health {
 	var h k8s.Health
-	parts := strings.SplitN(s, "|", 9)
+	parts := strings.SplitN(s, "|", 13)
 	if len(parts) < 5 {
 		return h
 	}
@@ -1999,6 +2020,18 @@ func parseHealth(s string) k8s.Health {
 	if len(parts) > 8 && parts[8] != "" {
 		h.RestartCauses = strings.Split(parts[8], ",")
 	}
+	if len(parts) > 9 && parts[9] != "" {
+		h.RecentEvents = strings.Split(parts[9], ",")
+	}
+	if len(parts) > 10 && parts[10] != "" {
+		h.OldEvents = strings.Split(parts[10], ",")
+	}
+	if len(parts) > 11 && parts[11] != "" {
+		h.Waiting = strings.Split(parts[11], ",")
+	}
+	if len(parts) > 12 {
+		fmt.Sscanf(parts[12], "%t", &h.Progressing)
+	}
 	return h
 }
 
@@ -2011,23 +2044,66 @@ const (
 	segOK = iota
 	segWarn
 	segBad
+	segMuted
 )
 
+// eventFilter controls whether transient warning reasons are hidden from the
+// health column, and if so, which reasons count as transient. When enabled,
+// filtered events are replaced by a muted "~N" count so hiding is never silent.
+type eventFilter struct {
+	hide      bool
+	transient map[string]bool
+}
+
+// k8sTimebox maps the configured event timeboxes onto the k8s client. Zero
+// values fall back to the k8s defaults (1m/10m/24h).
+func (m *Model) k8sTimebox() k8s.EventTimebox {
+	return k8s.EventTimebox{
+		Recent:  m.cfg.K8s.EventRecent,
+		Warn:    m.cfg.K8s.EventWarn,
+		History: m.cfg.K8s.EventHistory,
+	}
+}
+
+// eventFilter resolves the transient-event display filter from config. The
+// configured list, when set, replaces the built-in default.
+func (m *Model) eventFilter() eventFilter {
+	f := eventFilter{hide: m.cfg.K8s.HideTransient}
+	if !f.hide {
+		return f
+	}
+	reasons := k8s.DefaultTransientEvents
+	if len(m.cfg.K8s.TransientEvents) > 0 {
+		reasons = m.cfg.K8s.TransientEvents
+	}
+	f.transient = make(map[string]bool, len(reasons))
+	for _, r := range reasons {
+		f.transient[r] = true
+	}
+	return f
+}
+
 // healthSegments splits a workload's health into display parts so callers can
-// style each individually: the ✓ is the health check, ↻N restarts and their
-// causes are warnings (yellow) while the workload is otherwise healthy, and
-// everything else (events, conditions, pending, failed, not-ready) is a red
-// health problem. When the workload is currently unhealthy the restarts are
-// red too — they're part of the active problem, not a past warning.
-func healthSegments(h k8s.Health) []healthSeg {
+// style each individually. Green ✓ is current readiness. Yellow is history:
+// ↻N restarts, their causes, and warning events in the warn window. Red is
+// current problems: ✗ not-ready (when not mid-rollout), deployment conditions,
+// pending, failed, stuck containers, and events in the recent window. Muted is
+// older events in the history window. Restarts turn red only when the workload
+// is currently in trouble; a rollout in progress shows a green ⟳ instead of
+// the readiness check.
+func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
+	problems := (!h.Ready && !h.Progressing) || len(h.Conditions) > 0 || h.PendingPods > 0 || h.FailedPods > 0 || len(h.Waiting) > 0
 	restartKind := segWarn
-	if !h.Ready || len(h.Events) > 0 || len(h.Conditions) > 0 || h.PendingPods > 0 || h.FailedPods > 0 {
+	if problems {
 		restartKind = segBad
 	}
 	var segs []healthSeg
-	if h.Ready {
+	switch {
+	case h.Progressing && !problems:
+		segs = append(segs, healthSeg{"⟳", segOK})
+	case h.Ready:
 		segs = append(segs, healthSeg{"✓", segOK})
-	} else if h.Replicas > 0 {
+	case h.Replicas > 0:
 		segs = append(segs, healthSeg{"✗", segBad})
 	}
 	if h.Restarts > 0 {
@@ -2038,13 +2114,30 @@ func healthSegments(h k8s.Health) []healthSeg {
 			segs = append(segs, healthSeg{"!" + s, restartKind})
 		}
 	}
-	for _, e := range h.Events {
-		if s := shortEvent(e); s != "" {
+	hidden := 0
+	addEvents := func(list []string, kind int) {
+		for _, e := range list {
+			s := shortEvent(e)
+			if s == "" {
+				continue
+			}
+			if ev.hide && ev.transient[e] {
+				hidden++
+				continue
+			}
+			segs = append(segs, healthSeg{"!" + s, kind})
+		}
+	}
+	addEvents(h.RecentEvents, segBad)
+	addEvents(h.Events, segWarn)
+	addEvents(h.OldEvents, segMuted)
+	for _, c := range h.Conditions {
+		if s := shortEvent(c); s != "" {
 			segs = append(segs, healthSeg{"!" + s, segBad})
 		}
 	}
-	for _, c := range h.Conditions {
-		if s := shortEvent(c); s != "" {
+	for _, w := range h.Waiting {
+		if s := shortEvent(w); s != "" {
 			segs = append(segs, healthSeg{"!" + s, segBad})
 		}
 	}
@@ -2054,23 +2147,28 @@ func healthSegments(h k8s.Health) []healthSeg {
 	if h.FailedPods > 0 {
 		segs = append(segs, healthSeg{fmt.Sprintf("⚠%d", h.FailedPods), segBad})
 	}
+	if hidden > 0 {
+		segs = append(segs, healthSeg{fmt.Sprintf("~%d", hidden), segMuted})
+	}
 	return segs
 }
 
 func healthEmpty(h k8s.Health) bool {
 	return h.Replicas == 0 && h.Restarts == 0 && len(h.RestartCauses) == 0 &&
-		len(h.Events) == 0 && len(h.Conditions) == 0 && h.PendingPods == 0 && h.FailedPods == 0
+		len(h.Events) == 0 && len(h.RecentEvents) == 0 && len(h.OldEvents) == 0 && len(h.Waiting) == 0 &&
+		len(h.Conditions) == 0 && h.PendingPods == 0 && h.FailedPods == 0 && !h.Progressing
 }
 
 // formatHealth renders the cached health string as a compact plain-text column
-// value: ✓ healthy, ✗ not ready, ↻N restarts, !Reason warning events, ⏳N
-// pending, ⚠N failed, !Condition deployment conditions, !Cause restarts.
-func formatHealth(health string) string {
+// value: ✓ healthy, ⟳ deploying, ✗ not ready, ↻N restarts, !Reason events
+// (colored by age in the TUI), ⏳N pending, ⚠N failed, !Condition deployment
+// conditions, !Cause restarts.
+func formatHealth(health string, ev eventFilter) string {
 	h := parseHealth(health)
 	if healthEmpty(h) {
 		return ""
 	}
-	segs := healthSegments(h)
+	segs := healthSegments(h, ev)
 	parts := make([]string, len(segs))
 	for i, s := range segs {
 		parts[i] = s.text
@@ -2091,6 +2189,8 @@ func shortEvent(reason string) string {
 		return "Mount"
 	case "FailedCreate", "FailedCreatePodSandBox", "FailedCreatePod":
 		return "Create"
+	case "ImagePullBackOff", "ErrImagePull", "ErrImageNeverPull", "InvalidImageName", "RegistryUnavailable", "ImageInspectError", "ErrImagePullTimeout", "FailedToRetrieveImagePullSecret":
+		return "Pull"
 	case "Evicted", "Evicting":
 		return "Evicted"
 	case "Unhealthy":
@@ -2119,9 +2219,9 @@ func shortEvent(reason string) string {
 
 // detailsText renders the plain (unstyled) Details column value: the health
 // summary plus any contributor names, used for width computation.
-func detailsText(health, contributors string) string {
+func detailsText(health, contributors string, ev eventFilter) string {
 	var parts []string
-	if h := formatHealth(health); h != "" {
+	if h := formatHealth(health, ev); h != "" {
 		parts = append(parts, h)
 	}
 	if contributors != "" {
@@ -2130,16 +2230,17 @@ func detailsText(health, contributors string) string {
 	return strings.Join(parts, " · ")
 }
 
-// renderHealthColored styles each health segment individually: the ✓ is green
-// when ready, restart counts and their causes are yellow while the workload is
-// otherwise healthy (red when it isn't), and active problems (events,
-// conditions, pending, failed, not-ready) are red.
-func renderHealthColored(health string) string {
+// renderHealthColored styles each health segment individually: green ✓ (or a
+// green ⟳ mid-rollout), yellow history (restarts, causes, warn-window events),
+// red current problems (not-ready, conditions, pending, failed, stuck
+// containers, recent events), and muted older events. When the workload is
+// currently in trouble the restarts are red too.
+func renderHealthColored(health string, ev eventFilter) string {
 	h := parseHealth(health)
 	if healthEmpty(h) {
 		return ""
 	}
-	segs := healthSegments(h)
+	segs := healthSegments(h, ev)
 	parts := make([]string, len(segs))
 	for i, s := range segs {
 		switch s.kind {
@@ -2147,6 +2248,8 @@ func renderHealthColored(health string) string {
 			parts[i] = healthWarn.Render(s.text)
 		case segBad:
 			parts[i] = healthBad.Render(s.text)
+		case segMuted:
+			parts[i] = healthMuted.Render(s.text)
 		default:
 			parts[i] = healthOK.Render(s.text)
 		}
@@ -2156,14 +2259,14 @@ func renderHealthColored(health string) string {
 
 // renderDetails styles the Details column. The color is skipped on the
 // selected row so the reverse highlight spans the full line.
-func renderDetails(health, contributors string, isSelected bool) string {
+func renderDetails(health, contributors string, isSelected bool, ev eventFilter) string {
 	if health == "" {
 		return contributors
 	}
 	if isSelected {
-		return detailsText(health, contributors)
+		return detailsText(health, contributors, ev)
 	}
-	healthText := renderHealthColored(health)
+	healthText := renderHealthColored(health, ev)
 	if contributors == "" {
 		return healthText
 	}
@@ -2461,11 +2564,13 @@ func (m Model) renderHelpOverlay() string {
 			legend = helpSection("legend", [][2]string{
 				{"✓", "healthy"},
 				{"✗", "not ready"},
+				{"⟳", "deploying"},
 				{"↻N", "restarts"},
 				{"!Cause", "last restart cause"},
 				{"⏳N", "pods pending"},
 				{"⚠N", "pods failed"},
-				{"!OOM", "warning event"},
+				{"!OOM", "event (red fresh · yellow recent · dim older)"},
+				{"~N", "transient events hidden"},
 				{"!Stuck", "rollout stuck"},
 				{"!Degrad", "analysis degraded"},
 			})
@@ -2638,7 +2743,8 @@ func (m Model) openBrowse() {
 	openBrowser(u)
 }
 
-func orJoin(parts []string) string {	switch len(parts) {
+func orJoin(parts []string) string {
+	switch len(parts) {
 	case 0:
 		return ""
 	case 1:

@@ -43,9 +43,10 @@ type RealClient struct {
 	dynamicClient dynamic.Interface
 	context       string
 	loginCmd      string
+	timebox       EventTimebox
 }
 
-func NewRealClient(ctx context.Context, kubeconfig, context, loginCmd string) (*RealClient, error) {
+func NewRealClient(ctx context.Context, kubeconfig, context, loginCmd string, tb EventTimebox) (*RealClient, error) {
 	type result struct {
 		client *RealClient
 		err    error
@@ -96,7 +97,7 @@ func NewRealClient(ctx context.Context, kubeconfig, context, loginCmd string) (*
 			ch <- result{nil, fmt.Errorf("dynamic client for %q: %w", actualCtx, err)}
 			return
 		}
-		ch <- result{&RealClient{clientset: clientset, dynamicClient: dyn, context: actualCtx, loginCmd: loginCmd}, nil}
+		ch <- result{&RealClient{clientset: clientset, dynamicClient: dyn, context: actualCtx, loginCmd: loginCmd, timebox: tb.normalize()}, nil}
 	}()
 
 	select {
@@ -170,6 +171,8 @@ func (c *RealClient) getDeployment(ctx context.Context, namespace, name string) 
 		switch {
 		case cond.Type == appsv1.DeploymentProgressing && cond.Reason == "ProgressDeadlineExceeded":
 			d.Health.Conditions = append(d.Health.Conditions, "ProgressDeadlineExceeded")
+		case cond.Type == appsv1.DeploymentProgressing && cond.Status == corev1.ConditionTrue && progressingReasons[cond.Reason]:
+			d.Health.Progressing = true
 		case cond.Type == appsv1.DeploymentReplicaFailure && cond.Status == corev1.ConditionTrue:
 			d.Health.Conditions = append(d.Health.Conditions, "ReplicaFailure")
 		case cond.Type == appsv1.DeploymentAvailable && cond.Status == corev1.ConditionFalse:
@@ -248,6 +251,8 @@ func (c *RealClient) getRollout(ctx context.Context, namespace, name string) (*W
 		switch {
 		case cond.Type == "Progressing" && cond.Reason == "ProgressDeadlineExceeded":
 			w.Health.Conditions = append(w.Health.Conditions, "ProgressDeadlineExceeded")
+		case cond.Type == "Progressing" && cond.Status == metav1.ConditionTrue && progressingReasons[cond.Reason]:
+			w.Health.Progressing = true
 		case cond.Type == "ReplicaFailure" && cond.Status == metav1.ConditionTrue:
 			w.Health.Conditions = append(w.Health.Conditions, "ReplicaFailure")
 		case cond.Type == "Available" && cond.Status == metav1.ConditionFalse:
@@ -260,25 +265,25 @@ func (c *RealClient) getRollout(ctx context.Context, namespace, name string) (*W
 	return w, nil
 }
 
-// transientReasons are Warning event reasons that describe conditions which
-// may have since resolved (failed probes, failed pod/sandbox creation,
-// restart backoff, scheduling/mount hiccups). They're only surfaced when the
-// affected pod is still in a bad state, so a pod that failed a startup probe
-// and then became healthy doesn't keep reporting !Unhealthy.
-var transientReasons = map[string]bool{
-	"Unhealthy":             true,
-	"FailedCreate":          true,
-	"FailedCreatePodSandBox": true,
-	"FailedCreatePod":       true,
-	"BackOff":               true,
-	"CrashLoopBackOff":      true,
-	"FailedScheduling":      true,
-	"FailedMount":           true,
-	"FailedAttachVolume":    true,
-	"Killing":               true,
-	"KillPodSandbox":        true,
-	"NodeNotReady":          true,
-	"NodeReady":             true,
+// progressingReasons are the Deployment/Rollout "Progressing" condition
+// reasons that indicate a rollout is actively underway. NewReplicaSetAvailable
+// (rollout complete), ProgressDeadlineExceeded (stuck), and DeploymentPaused
+// are deliberately excluded.
+var progressingReasons = map[string]bool{
+	"NewReplicaSetCreated": true,
+	"FoundNewReplicaSet":   true,
+	"NewReplicaSetUpdated": true,
+	"ReplicaSetUpdated":    true,
+	"DeploymentUpdated":    true,
+	"DeploymentResumed":    true,
+}
+
+// benignWaitingReasons are container State.Waiting reasons that are normal
+// startup, not problems. Everything else surfaced by the waiting pass is a
+// real stuck state (ImagePullBackOff, CrashLoopBackOff, ...).
+var benignWaitingReasons = map[string]bool{
+	"ContainerCreating": true,
+	"PodInitializing":   true,
 }
 
 // terminationCause returns a human label for why a container last terminated,
@@ -319,8 +324,8 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 	}
 
 	podNames := make(map[string]bool, len(pods.Items))
-	podReady := make(map[string]bool, len(pods.Items))
 	seenCauses := make(map[string]bool)
+	seenWaiting := make(map[string]bool)
 	for i := range pods.Items {
 		pod := &pods.Items[i]
 		podNames[pod.Name] = true
@@ -330,21 +335,20 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 		case corev1.PodFailed:
 			h.FailedPods++
 		}
-		ready := pod.Status.Phase == corev1.PodRunning
-		if ready {
-			for _, cs := range pod.Status.ContainerStatuses {
-				if !cs.Ready {
-					ready = false
-					break
-				}
-			}
-		}
-		podReady[pod.Name] = ready
 		for _, cs := range pod.Status.ContainerStatuses {
 			h.Restarts += cs.RestartCount
 			if cause := terminationCause(cs); cause != "" && !seenCauses[cause] {
 				seenCauses[cause] = true
 				h.RestartCauses = append(h.RestartCauses, cause)
+			}
+			// Current-state waiting reasons (ImagePullBackOff, CrashLoopBackOff,
+			// ...) mark a container that is stuck right now. Benign startup
+			// states are skipped.
+			if cs.State.Waiting != nil {
+				if reason := cs.State.Waiting.Reason; reason != "" && !benignWaitingReasons[reason] && !seenWaiting[reason] {
+					seenWaiting[reason] = true
+					h.Waiting = append(h.Waiting, reason)
+				}
 			}
 		}
 	}
@@ -353,26 +357,27 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 	if err != nil {
 		return
 	}
-	cutoff := metav1.NewTime(metav1.Now().Add(-24 * time.Hour))
+	// Events describe things that happened, so they're bucketed purely by age:
+	// kubelet updates an event's LastTimestamp every time it recurs, so an
+	// ongoing problem keeps refreshing into the recent (red) bucket while a
+	// resolved one ages through yellow and muted before being dropped at the
+	// history window. Transient reasons are kept too — hiding them is a
+	// display-side preference, not a collection policy.
+	now := metav1.Now()
+	recentCutoff := metav1.NewTime(now.Add(-c.timebox.Recent))
+	warnCutoff := metav1.NewTime(now.Add(-c.timebox.Warn))
+	historyCutoff := metav1.NewTime(now.Add(-c.timebox.History))
 	seen := map[string]bool{}
 	for i := range events.Items {
 		ev := &events.Items[i]
 		if ev.Type != "Warning" {
 			continue
 		}
-		if ev.LastTimestamp.Before(&cutoff) {
-			continue
-		}
 		obj := ev.InvolvedObject
 		if obj.Kind == kind && obj.Name == name {
 			// workload-level warning (e.g. FailedRollout)
 		} else if obj.Kind == "Pod" && podNames[obj.Name] {
-			// pod-level warning (e.g. OOMKilled). Skip transient reasons
-			// when the pod has since become ready (e.g. a startup probe
-			// that failed during rollout then succeeded).
-			if podReady[obj.Name] && transientReasons[ev.Reason] {
-				continue
-			}
+			// pod-level warning (e.g. OOMKilled)
 		} else {
 			continue
 		}
@@ -384,7 +389,14 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 			continue
 		}
 		seen[reason] = true
-		h.Events = append(h.Events, reason)
+		switch {
+		case !ev.LastTimestamp.Before(&recentCutoff):
+			h.RecentEvents = append(h.RecentEvents, reason)
+		case !ev.LastTimestamp.Before(&warnCutoff):
+			h.Events = append(h.Events, reason)
+		case !ev.LastTimestamp.Before(&historyCutoff):
+			h.OldEvents = append(h.OldEvents, reason)
+		}
 	}
 }
 
