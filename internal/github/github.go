@@ -203,6 +203,13 @@ func (c *Client) search(ctx context.Context, query string) ([]PR, error) {
 	return nil, fmt.Errorf("github search %q: %w", query, lastErr)
 }
 
+// Search runs an arbitrary GitHub search query through the same path as the
+// section queries (including 5xx retries). Used by the my-prs/review-prs/
+// dep-prs debug commands.
+func (c *Client) Search(ctx context.Context, query string) ([]PR, error) {
+	return c.search(ctx, query)
+}
+
 // resolveRollup maps a commit's combined status-check state to the UI's CI
 // column. An empty state means the commit has no checks at all.
 func resolveRollup(nodes []commitNode) string {
@@ -236,24 +243,53 @@ func (c *Client) ownerFilter(ctx context.Context, owners []string) string {
 }
 
 func (c *Client) MyPRs(ctx context.Context, owners []string) ([]PR, error) {
-	user, err := c.User(ctx)
+	q, err := c.MyPRsQuery(ctx, owners)
 	if err != nil {
 		return nil, err
 	}
-	return c.search(ctx, fmt.Sprintf("is:open is:pr author:%s archived:false%s", user, c.ownerFilter(ctx, owners)))
+	return c.search(ctx, q)
+}
+
+// MyPRsQuery builds the exact search query used for the My PRs section.
+func (c *Client) MyPRsQuery(ctx context.Context, owners []string) (string, error) {
+	user, err := c.User(ctx)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("is:open is:pr author:%s archived:false%s", user, c.ownerFilter(ctx, owners)), nil
 }
 
 func (c *Client) ReviewRequested(ctx context.Context, owners []string) ([]PR, error) {
-	user, err := c.User(ctx)
+	q, err := c.ReviewRequestedQuery(ctx, owners)
 	if err != nil {
 		return nil, err
 	}
-	return c.search(ctx, fmt.Sprintf("is:open is:pr user-review-requested:%s%s", user, c.ownerFilter(ctx, owners)))
+	return c.search(ctx, q)
+}
+
+// ReviewRequestedQuery builds the exact search query used for the direct
+// (user-review-requested) portion of the To Review section.
+func (c *Client) ReviewRequestedQuery(ctx context.Context, owners []string) (string, error) {
+	user, err := c.User(ctx)
+	if err != nil {
+		return "", err
+	}
+	return fmt.Sprintf("is:open is:pr user-review-requested:%s%s", user, c.ownerFilter(ctx, owners)), nil
 }
 
 func (c *Client) TeamReviewRequested(ctx context.Context, teams []string) ([]PR, error) {
+	q, err := c.TeamReviewRequestedQuery(ctx, teams)
+	if err != nil {
+		return nil, err
+	}
+	return c.search(ctx, q)
+}
+
+// TeamReviewRequestedQuery builds the exact search query used for the team
+// portion of the To Review section: all teams ANDed into a single query.
+func (c *Client) TeamReviewRequestedQuery(ctx context.Context, teams []string) (string, error) {
 	if len(teams) == 0 {
-		return nil, nil
+		return "", nil
 	}
 	var q strings.Builder
 	q.WriteString("is:open is:pr")
@@ -261,7 +297,7 @@ func (c *Client) TeamReviewRequested(ctx context.Context, teams []string) ([]PR,
 		q.WriteString(" team-review-requested:")
 		q.WriteString(t)
 	}
-	return c.search(ctx, q.String())
+	return q.String(), nil
 }
 
 func (c *Client) AllReviewRequested(ctx context.Context) ([]PR, error) {
@@ -310,31 +346,9 @@ func (c *Client) GetPR(ctx context.Context, repo string, number int) (*PR, error
 }
 
 func (c *Client) DepPRs(ctx context.Context, repos, owners, teams, authors []string) ([]PR, error) {
-	var authorQ strings.Builder
-	for _, a := range authors {
-		authorQ.WriteString(" author:")
-		authorQ.WriteString(a)
-	}
-	// GitHub can't OR different qualifier types in one query, so each scope
-	// is a separate search and the results are unioned. When teams are
-	// configured, skip the org-wide owner search — it returns too many
-	// results across the entire org, and team-review-requested already
-	// provides the right scoping.
-	var queries []string
-	for _, repo := range repos {
-		queries = append(queries, fmt.Sprintf("is:open is:pr repo:%s%s", repo, authorQ.String()))
-	}
-	if len(teams) == 0 {
-		for _, o := range owners {
-			qualifier := " org:" + o
-			if c.OwnerType(ctx, o) == "user" {
-				qualifier = " user:" + o
-			}
-			queries = append(queries, fmt.Sprintf("is:open is:pr%s%s", qualifier, authorQ.String()))
-		}
-	}
-	for _, t := range teams {
-		queries = append(queries, fmt.Sprintf("is:open is:pr team-review-requested:%s%s", t, authorQ.String()))
+	queries, err := c.DepQueries(ctx, repos, owners, teams, authors)
+	if err != nil {
+		return nil, err
 	}
 	seen := make(map[string]bool)
 	var all []PR
@@ -352,6 +366,37 @@ func (c *Client) DepPRs(ctx context.Context, repos, owners, teams, authors []str
 		}
 	}
 	return all, nil
+}
+
+// DepQueries builds the exact list of search queries the Dependencies section
+// runs: one per repo, one per owner when no teams are configured, and one per
+// team. GitHub can't OR different qualifier types in one query, so each scope
+// is its own query and the results are unioned. When teams are configured, the
+// org-wide owner search is skipped — it returns too many results across the
+// entire org, and team-review-requested already provides the right scoping.
+func (c *Client) DepQueries(ctx context.Context, repos, owners, teams, authors []string) ([]string, error) {
+	var authorQ strings.Builder
+	for _, a := range authors {
+		authorQ.WriteString(" author:")
+		authorQ.WriteString(a)
+	}
+	var queries []string
+	for _, repo := range repos {
+		queries = append(queries, fmt.Sprintf("is:open is:pr repo:%s%s", repo, authorQ.String()))
+	}
+	if len(teams) == 0 {
+		for _, o := range owners {
+			qualifier := " org:" + o
+			if c.OwnerType(ctx, o) == "user" {
+				qualifier = " user:" + o
+			}
+			queries = append(queries, fmt.Sprintf("is:open is:pr%s%s", qualifier, authorQ.String()))
+		}
+	}
+	for _, t := range teams {
+		queries = append(queries, fmt.Sprintf("is:open is:pr team-review-requested:%s%s", t, authorQ.String()))
+	}
+	return queries, nil
 }
 
 func (c *Client) GetHeadSha(ctx context.Context, repo string, number int) (string, error) {

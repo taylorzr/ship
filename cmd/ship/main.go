@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+	"sync"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
@@ -38,15 +39,44 @@ var releasesCmd = &cobra.Command{
 	RunE:  runReleases,
 }
 
+var myPRsCmd = &cobra.Command{
+	Use:   "my-prs",
+	Short: "Run the My PRs GitHub search query and print results",
+	RunE:  runMyPRs,
+}
+
+var reviewPRsCmd = &cobra.Command{
+	Use:   "review-prs",
+	Short: "Run the To Review GitHub search queries and print results",
+	RunE:  runReviewPRs,
+}
+
+var depPRsCmd = &cobra.Command{
+	Use:   "dep-prs",
+	Short: "Run the Dependencies GitHub search queries and print results",
+	RunE:  runDepPRs,
+}
+
 var mockK8sSpecs map[string]string
 var releasesRepo string
+var reviewMeOnly bool
+var reviewTeamOnly bool
+var depRepos, depOwners, depTeams []string
 
 func init() {
 	rootCmd.AddCommand(countCmd)
 	rootCmd.AddCommand(releasesCmd)
+	rootCmd.AddCommand(myPRsCmd)
+	rootCmd.AddCommand(reviewPRsCmd)
+	rootCmd.AddCommand(depPRsCmd)
 	rootCmd.Flags().StringToStringVar(&mockK8sSpecs, "mock-k8s", nil, "mock k8s per service (e.g. svc1=repo/app:v10.1.0,svc2=repo/other:v2.0.0|restarts=3|events=OOMKilling+BackOff)")
 	releasesCmd.Flags().StringToStringVar(&mockK8sSpecs, "mock-k8s", nil, "mock k8s per service (e.g. svc1=repo/app:v10.1.0,svc2=repo/other:v2.0.0|restarts=3|events=OOMKilling+BackOff)")
 	releasesCmd.Flags().StringVar(&releasesRepo, "repo", "", "filter to a specific repo (e.g. taylorzr/kitty-meow)")
+	reviewPRsCmd.Flags().BoolVar(&reviewMeOnly, "me", false, "only run the user-review-requested query")
+	reviewPRsCmd.Flags().BoolVar(&reviewTeamOnly, "team", false, "only run the team-review-requested query")
+	depPRsCmd.Flags().StringSliceVar(&depRepos, "repo", nil, "only run the query for this repo (repeatable)")
+	depPRsCmd.Flags().StringSliceVar(&depOwners, "owner", nil, "only run the query for this owner (repeatable)")
+	depPRsCmd.Flags().StringSliceVar(&depTeams, "team", nil, "only run the query for this team (repeatable)")
 }
 
 func main() {
@@ -159,6 +189,126 @@ func ghToken() (string, error) {
 		return "", fmt.Errorf("run `gh auth login` first: %w", err)
 	}
 	return strings.TrimSpace(string(out)), nil
+}
+
+func loadClient() (*config.Config, *gh.Client, error) {
+	cfg, err := config.Load("")
+	if err != nil {
+		return nil, nil, fmt.Errorf("config: %w", err)
+	}
+	token, err := ghToken()
+	if err != nil {
+		return nil, nil, fmt.Errorf("gh auth: %w", err)
+	}
+	return cfg, gh.NewClient(token), nil
+}
+
+func runMyPRs(cmd *cobra.Command, args []string) error {
+	cfg, client, err := loadClient()
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	q, err := client.MyPRsQuery(ctx, cfg.GitHub.Owners)
+	if err != nil {
+		return err
+	}
+	return runPRQueries(ctx, client, []string{q})
+}
+
+func runReviewPRs(cmd *cobra.Command, args []string) error {
+	cfg, client, err := loadClient()
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	var queries []string
+	if !reviewTeamOnly {
+		q, err := client.ReviewRequestedQuery(ctx, cfg.GitHub.Owners)
+		if err != nil {
+			return err
+		}
+		queries = append(queries, q)
+	}
+	if !reviewMeOnly && len(cfg.GitHub.Teams) > 0 {
+		q, err := client.TeamReviewRequestedQuery(ctx, cfg.GitHub.Teams)
+		if err != nil {
+			return err
+		}
+		if q != "" {
+			queries = append(queries, q)
+		}
+	}
+	if len(queries) == 0 {
+		fmt.Println("no queries to run (check --me/--team flags and configured teams)")
+		return nil
+	}
+	return runPRQueries(ctx, client, queries)
+}
+
+func runDepPRs(cmd *cobra.Command, args []string) error {
+	cfg, client, err := loadClient()
+	if err != nil {
+		return err
+	}
+	ctx := context.Background()
+	repos, owners, teams := depRepos, depOwners, depTeams
+	if len(repos) == 0 && len(owners) == 0 && len(teams) == 0 {
+		repos = cfg.StarredRepos()
+		owners = cfg.GitHub.Owners
+		teams = cfg.GitHub.Teams
+	}
+	queries, err := client.DepQueries(ctx, repos, owners, teams, cfg.GitHub.DepAuthors)
+	if err != nil {
+		return err
+	}
+	if len(queries) == 0 {
+		fmt.Println("no dep queries to run (configure starred repos, owners, or teams)")
+		return nil
+	}
+	return runPRQueries(ctx, client, queries)
+}
+
+// runPRQueries fires each query concurrently — mirroring the TUI's parallel
+// section refresh — and prints each one's query, timing, results, or error.
+func runPRQueries(ctx context.Context, client *gh.Client, queries []string) error {
+	type prQueryResult struct {
+		query string
+		prs   []gh.PR
+		dur   time.Duration
+		err   error
+	}
+	results := make([]prQueryResult, len(queries))
+	var wg sync.WaitGroup
+	for i, q := range queries {
+		wg.Add(1)
+		go func(i int, q string) {
+			defer wg.Done()
+			start := time.Now()
+			prs, err := client.Search(ctx, q)
+			results[i] = prQueryResult{query: q, prs: prs, dur: time.Since(start), err: err}
+		}(i, q)
+	}
+	wg.Wait()
+
+	failed := false
+	for _, r := range results {
+		fmt.Printf("\n── %s ──\n", r.query)
+		if r.err != nil {
+			fmt.Printf("  ✗ %v (%v)\n", r.err, r.dur.Truncate(time.Millisecond))
+			failed = true
+			continue
+		}
+		fmt.Printf("  %d PRs (%v)\n", len(r.prs), r.dur.Truncate(time.Millisecond))
+		for _, p := range r.prs {
+			fmt.Printf("  #%d %-32s %-12s ci:%-7s merge:%-6s %s  %s\n",
+				p.Number, p.Repo, p.Author, p.CIState, p.Mergeable, p.UpdatedAt, p.Title)
+		}
+	}
+	if failed {
+		return fmt.Errorf("one or more queries failed")
+	}
+	return nil
 }
 
 func runReleases(cmd *cobra.Command, args []string) error {
