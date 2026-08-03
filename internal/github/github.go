@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math/rand/v2"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -39,7 +40,11 @@ type Client struct {
 func NewClient(token string) *Client {
 	src := oauth2.StaticTokenSource(&oauth2.Token{AccessToken: token})
 	http := oauth2.NewClient(context.Background(), src)
-	http.Timeout = 30 * time.Second
+	// 60s: the search backend can be slow under load, and a 30s cap aborted
+	// requests that GitHub was about to answer (contributing to the "takes ~1
+	// min then fails" pattern). 502s themselves are GitHub-side; the search
+	// retry loop in search() handles those.
+	http.Timeout = 60 * time.Second
 	gql := githubv4.NewClient(http)
 	return &Client{gql: gql}
 }
@@ -64,7 +69,9 @@ func (c *Client) User(ctx context.Context) (string, error) {
 // state (SUCCESS/FAILURE/PENDING/EXPECTED/ERROR) is precomputed by GitHub, so
 // we ask for that single scalar instead of expanding every check-run and
 // status-context node. Expanding the contexts connection per PR is what
-// tripped persistent HTTP 502s on large search queries.
+// tripped persistent HTTP 502s on large search queries. This node is only used
+// by GetPR (a single PR, cheap); the search query deliberately avoids it so
+// search results are pure scalars.
 type commitNode struct {
 	Commit struct {
 		StatusCheckRollup struct {
@@ -73,6 +80,10 @@ type commitNode struct {
 	}
 }
 
+// prNode is the search result shape. It intentionally contains no nested
+// connections: GitHub's search backend 502s when results carry per-item
+// connections (the status-check rollup was the last one). CI state is filled
+// in from the store cache and refreshed per-row via GetPR.
 type prNode struct {
 	PullRequest struct {
 		Number           int
@@ -87,9 +98,6 @@ type prNode struct {
 		UpdatedAt        githubv4.DateTime
 		HeadRefOid       string
 		Repository       struct{ NameWithOwner string }
-		Commits          struct {
-			Nodes []commitNode
-		} `graphql:"commits(last: 1)"`
 	} `graphql:"... on PullRequest"`
 }
 
@@ -127,7 +135,8 @@ type getPRResult struct {
 
 func (c *Client) search(ctx context.Context, query string) ([]PR, error) {
 	var lastErr error
-	backoff := []time.Duration{time.Second, 2 * time.Second, 4 * time.Second}
+	// jittered backoff so retries don't stampede a busy search backend
+	backoff := []time.Duration{2 * time.Second, 5 * time.Second, 10 * time.Second}
 
 	for attempt := range 4 {
 		var all []PR
@@ -155,7 +164,6 @@ func (c *Client) search(ctx context.Context, query string) ([]PR, error) {
 
 			for _, n := range q.Search.Nodes {
 				pr := n.PullRequest
-				ciState := resolveRollup(pr.Commits.Nodes)
 				all = append(all, PR{
 					Number:         pr.Number,
 					Repo:           pr.Repository.NameWithOwner,
@@ -163,7 +171,6 @@ func (c *Client) search(ctx context.Context, query string) ([]PR, error) {
 					Author:         pr.Author.Login,
 					URL:            pr.URL,
 					ReviewDecision: string(pr.ReviewDecision),
-					CIState:        ciState,
 					Mergeable:      string(pr.Mergeable),
 					MergeState:     string(pr.MergeStateStatus),
 					State:          string(pr.State),
@@ -197,7 +204,7 @@ func (c *Client) search(ctx context.Context, query string) ([]PR, error) {
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()
-		case <-time.After(backoff[attempt]):
+		case <-time.After(backoff[attempt] + time.Duration(rand.IntN(1000))*time.Millisecond):
 		}
 	}
 	return nil, fmt.Errorf("github search %q: %w", query, lastErr)
@@ -251,12 +258,15 @@ func (c *Client) MyPRs(ctx context.Context, owners []string) ([]PR, error) {
 }
 
 // MyPRsQuery builds the exact search query used for the My PRs section.
+// Note: no `archived:false` qualifier — it's one of GitHub's slowest search
+// qualifiers (forces an index-wide scan) and `is:open` already excludes closed
+// and merged PRs, so it was a documented source of search-backend 502s.
 func (c *Client) MyPRsQuery(ctx context.Context, owners []string) (string, error) {
 	user, err := c.User(ctx)
 	if err != nil {
 		return "", err
 	}
-	return fmt.Sprintf("is:open is:pr author:%s archived:false%s", user, c.ownerFilter(ctx, owners)), nil
+	return fmt.Sprintf("is:open is:pr author:%s%s", user, c.ownerFilter(ctx, owners)), nil
 }
 
 func (c *Client) ReviewRequested(ctx context.Context, owners []string) ([]PR, error) {

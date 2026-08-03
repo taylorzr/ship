@@ -191,6 +191,10 @@ type CachedPR struct {
 }
 
 func (s *Store) SavePRs(prs []CachedPR, role string) error {
+	// The search query no longer carries CI state (dropped to avoid search
+	// backend 502s), so preserve the last known value when a new one is empty.
+	cached := s.allCIStates()
+
 	tx, err := s.db.Begin()
 	if err != nil {
 		return err
@@ -211,12 +215,35 @@ func (s *Store) SavePRs(prs []CachedPR, role string) error {
 	defer stmt.Close()
 
 	for _, p := range prs {
+		if p.CIState == "" {
+			p.CIState = cached[fmt.Sprintf("%s#%d", p.Repo, p.Number)]
+		}
 		if _, err := stmt.Exec(p.Number, p.Repo, p.Title, p.Author, p.Role,
 			p.URL, p.ReviewDecision, p.CIState, p.Mergeable, p.MergeState, p.UpdatedAt, p.IsDraft, p.HeadSHA); err != nil {
 			return err
 		}
 	}
 	return tx.Commit()
+}
+
+// allCIStates snapshots the currently stored CI state per PR (keyed by
+// "repo#number") before a save overwrites them.
+func (s *Store) allCIStates() map[string]string {
+	out := map[string]string{}
+	rows, err := s.db.Query(`SELECT repo, number, COALESCE(ci_state, '') FROM pr`)
+	if err != nil {
+		return out
+	}
+	defer rows.Close()
+	for rows.Next() {
+		var repo string
+		var num int
+		var state string
+		if rows.Scan(&repo, &num, &state) == nil {
+			out[fmt.Sprintf("%s#%d", repo, num)] = state
+		}
+	}
+	return out
 }
 
 func (s *Store) SavePR(pr CachedPR) error {
