@@ -171,6 +171,8 @@ func (c *RealClient) getDeployment(ctx context.Context, namespace, name string) 
 		switch {
 		case cond.Type == appsv1.DeploymentProgressing && cond.Reason == "ProgressDeadlineExceeded":
 			d.Health.Conditions = append(d.Health.Conditions, "ProgressDeadlineExceeded")
+		case cond.Type == appsv1.DeploymentProgressing && cond.Reason == "DeploymentPaused":
+			d.Health.Paused = true
 		case cond.Type == appsv1.DeploymentProgressing && cond.Status == corev1.ConditionTrue && progressingReasons[cond.Reason]:
 			d.Health.Progressing = true
 		case cond.Type == appsv1.DeploymentReplicaFailure && cond.Status == corev1.ConditionTrue:
@@ -251,6 +253,8 @@ func (c *RealClient) getRollout(ctx context.Context, namespace, name string) (*W
 		switch {
 		case cond.Type == "Progressing" && cond.Reason == "ProgressDeadlineExceeded":
 			w.Health.Conditions = append(w.Health.Conditions, "ProgressDeadlineExceeded")
+		case cond.Type == "Progressing" && cond.Reason == "DeploymentPaused":
+			w.Health.Paused = true
 		case cond.Type == "Progressing" && cond.Status == metav1.ConditionTrue && progressingReasons[cond.Reason]:
 			w.Health.Progressing = true
 		case cond.Type == "ReplicaFailure" && cond.Status == metav1.ConditionTrue:

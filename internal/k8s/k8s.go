@@ -18,6 +18,7 @@ type Health struct {
 	OldEvents     []string // Warning reasons within the history window (rendered muted)
 	Waiting       []string // container State.Waiting reasons, e.g. "ImagePullBackOff", "CrashLoopBackOff"
 	Progressing   bool     // workload is mid-rollout (a deploy is in progress)
+	Paused        bool     // rollout paused awaiting manual approval (DeploymentPaused condition reason)
 	Conditions    []string // deployment condition reasons, e.g. "ProgressDeadlineExceeded"
 	PendingPods   int32    // pods stuck in Pending phase (scheduling, etc.)
 	FailedPods    int32    // pods in Failed phase

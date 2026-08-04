@@ -66,6 +66,7 @@ var (
 	healthOK      = lipgloss.NewStyle().Foreground(lipgloss.Color("84"))
 	healthWarn    = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
 	healthBad     = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
+	healthInfo    = lipgloss.NewStyle().Foreground(lipgloss.Color("75"))
 	healthMuted   = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	dialogStyle   = lipgloss.NewStyle().
 			Border(lipgloss.RoundedBorder()).
@@ -2304,7 +2305,7 @@ func serializePendingTags(tags []gh.PendingTag) (pending string, contribs string
 // serializeHealth turns service health into a compact on-disk string so the
 // Services column survives cache reloads.
 func serializeHealth(h k8s.Health) string {
-	if h.Replicas == 0 && h.Restarts == 0 && len(h.RestartCauses) == 0 && len(h.Events) == 0 && len(h.RecentEvents) == 0 && len(h.OldEvents) == 0 && len(h.Waiting) == 0 && len(h.Conditions) == 0 && h.PendingPods == 0 && h.FailedPods == 0 && !h.Progressing {
+	if h.Replicas == 0 && h.Restarts == 0 && len(h.RestartCauses) == 0 && len(h.Events) == 0 && len(h.RecentEvents) == 0 && len(h.OldEvents) == 0 && len(h.Waiting) == 0 && len(h.Conditions) == 0 && h.PendingPods == 0 && h.FailedPods == 0 && !h.Progressing && !h.Paused {
 		return ""
 	}
 	events := strings.Join(h.Events, ",")
@@ -2313,14 +2314,14 @@ func serializeHealth(h k8s.Health) string {
 	recent := strings.Join(h.RecentEvents, ",")
 	old := strings.Join(h.OldEvents, ",")
 	waiting := strings.Join(h.Waiting, ",")
-	return fmt.Sprintf("%v|%d|%d|%d|%s|%s|%d|%d|%s|%s|%s|%s|%v", h.Ready, h.ReadyReplicas, h.Replicas, h.Restarts, events, conditions, h.PendingPods, h.FailedPods, causes, recent, old, waiting, h.Progressing)
+	return fmt.Sprintf("%v|%d|%d|%d|%s|%s|%d|%d|%s|%s|%s|%s|%v|%v", h.Ready, h.ReadyReplicas, h.Replicas, h.Restarts, events, conditions, h.PendingPods, h.FailedPods, causes, recent, old, waiting, h.Progressing, h.Paused)
 }
 
 // parseHealth decodes a value produced by serializeHealth. Older cache rows
 // with fewer fields are still accepted.
 func parseHealth(s string) k8s.Health {
 	var h k8s.Health
-	parts := strings.SplitN(s, "|", 13)
+	parts := strings.SplitN(s, "|", 14)
 	if len(parts) < 5 {
 		return h
 	}
@@ -2355,6 +2356,9 @@ func parseHealth(s string) k8s.Health {
 	if len(parts) > 12 {
 		fmt.Sscanf(parts[12], "%t", &h.Progressing)
 	}
+	if len(parts) > 13 {
+		fmt.Sscanf(parts[13], "%t", &h.Paused)
+	}
 	return h
 }
 
@@ -2368,6 +2372,7 @@ const (
 	segWarn
 	segBad
 	segMuted
+	segInfo
 )
 
 // eventFilter controls whether transient warning reasons are hidden from the
@@ -2408,13 +2413,14 @@ func (m *Model) eventFilter() eventFilter {
 }
 
 // healthSegments splits a workload's health into display parts so callers can
-// style each individually. Green ✓ is current readiness. Yellow is history:
-// ↻N restarts, their causes, and warning events in the warn window. Red is
-// current problems: ✗ not-ready (when not mid-rollout), deployment conditions,
-// pending, failed, stuck containers, and events in the recent window. Muted is
-// older events in the history window. Restarts turn red only when the workload
-// is currently in trouble; a rollout in progress shows a green ⟳ instead of
-// the readiness check.
+// style each individually. Green ✓ is current readiness. Blue ⏸ is a paused
+// rollout awaiting manual approval. Yellow is history: ↻N restarts, their
+// causes, and warning events in the warn window. Red is current problems:
+// ✗ not-ready (when not mid-rollout), deployment conditions, pending, failed,
+// stuck containers, and events in the recent window. Muted is older events in
+// the history window. Restarts turn red only when the workload is currently in
+// trouble; a rollout in progress shows a green ⟳ instead of the readiness
+// check.
 func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 	problems := (!h.Ready && !h.Progressing) || len(h.Conditions) > 0 || h.PendingPods > 0 || h.FailedPods > 0 || len(h.Waiting) > 0
 	restartKind := segWarn
@@ -2429,6 +2435,9 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 		segs = append(segs, healthSeg{"✓", segOK})
 	case h.Replicas > 0:
 		segs = append(segs, healthSeg{"✗", segBad})
+	}
+	if h.Paused {
+		segs = append(segs, healthSeg{"⏸DeploymentPaused", segInfo})
 	}
 	if h.Restarts > 0 {
 		segs = append(segs, healthSeg{fmt.Sprintf("↻%d", h.Restarts), restartKind})
@@ -2480,13 +2489,13 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 func healthEmpty(h k8s.Health) bool {
 	return h.Replicas == 0 && h.Restarts == 0 && len(h.RestartCauses) == 0 &&
 		len(h.Events) == 0 && len(h.RecentEvents) == 0 && len(h.OldEvents) == 0 && len(h.Waiting) == 0 &&
-		len(h.Conditions) == 0 && h.PendingPods == 0 && h.FailedPods == 0 && !h.Progressing
+		len(h.Conditions) == 0 && h.PendingPods == 0 && h.FailedPods == 0 && !h.Progressing && !h.Paused
 }
 
 // formatHealth renders the cached health string as a compact plain-text column
-// value: ✓ healthy, ⟳ deploying, ✗ not ready, ↻N restarts, ↻OOMKilled restart
-// causes, ⚠ error events (colored by age in the TUI), 🔁 waiting/retrying,
-// ⏳N pending, 💀N failed, ⚠ conditions.
+// value: ✓ healthy, ⟳ deploying, ✗ not ready, ⏸DeploymentPaused paused,
+// ↻N restarts, ↻OOMKilled restart causes, ⚠ error events (colored by age in
+// the TUI), 🔁 waiting/retrying, ⏳N pending, 💀N failed, ⚠ conditions.
 func formatHealth(health string, ev eventFilter) string {
 	h := parseHealth(health)
 	if healthEmpty(h) {
@@ -2571,6 +2580,8 @@ func renderHealthColored(health string, ev eventFilter) string {
 			parts[i] = healthBad.Render(s.text)
 		case segMuted:
 			parts[i] = healthMuted.Render(s.text)
+		case segInfo:
+			parts[i] = healthInfo.Render(s.text)
 		default:
 			parts[i] = healthOK.Render(s.text)
 		}
@@ -2793,7 +2804,11 @@ func (m Model) viewHelp() string {
 const helpKeyWidth = 13
 
 func helpKeyEntry(key, desc string) string {
-	padded := key + strings.Repeat(" ", helpKeyWidth-len(key))
+	pad := helpKeyWidth - lipgloss.Width(key)
+	if pad < 1 {
+		pad = 1
+	}
+	padded := key + strings.Repeat(" ", pad)
 	return "  " + helpKey.Render(padded) + " " + helpKey.Render(desc) + "\n"
 }
 
@@ -2894,6 +2909,7 @@ func (m Model) renderHelpOverlay() string {
 				{"⟳", "deploying"},
 				{"↻N", "restarts"},
 				{"↻OOMKilled", "last restart cause"},
+				{"⏸DeploymentPaused", "paused (manual approval)"},
 				{"⏳N", "pods pending"},
 				{"💀N", "pods failed (dead)"},
 				{"⚠OOMKilling", "error event (red fresh · yellow recent · dim older)"},
