@@ -14,9 +14,22 @@ type Config struct {
 	K8s             K8sConfig       `toml:"k8s"`
 	RefreshInterval int             `toml:"refresh_interval"`
 	AI              AIConfig        `toml:"ai"`
+	Notify          NotifyConfig    `toml:"notify"`
 	Repos           []RepoConfig    `toml:"repo"`
 	Services        []ServiceConfig `toml:"service"`
 	Jira            []JiraConfig    `toml:"jira"`
+}
+
+type NotifyConfig struct {
+	Enabled        bool `toml:"enabled"`
+	NewReview      bool `toml:"new_review"`
+	MyReviewChange bool `toml:"my_review_change"`
+	MyCIFail       bool `toml:"my_ci_fail"`
+	MyMergeable    bool `toml:"my_mergeable"`
+	PendingTag     bool `toml:"pending_tag"`
+	Health         bool `toml:"health"`
+	DepPR          bool `toml:"dep_pr"`
+	NewComment     bool `toml:"new_comment"`
 }
 
 type K8sConfig struct {
@@ -99,6 +112,17 @@ func Load(path string) (*Config, error) {
 		AI: AIConfig{
 			ReviewProvider: "claude-cli",
 			ReviewModel:    "opus",
+		},
+		Notify: NotifyConfig{
+			Enabled:        true,
+			NewReview:      true,
+			MyReviewChange: true,
+			MyCIFail:       true,
+			MyMergeable:    true,
+			PendingTag:     true,
+			Health:         true,
+			DepPR:          true,
+			NewComment:     true,
 		},
 	}
 

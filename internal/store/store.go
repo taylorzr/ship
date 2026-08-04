@@ -101,6 +101,35 @@ func (s *Store) migrate() error {
 			reviewed_at TEXT,
 			PRIMARY KEY (repo, number)
 		);
+
+		CREATE TABLE IF NOT EXISTS notification (
+			id         INTEGER PRIMARY KEY AUTOINCREMENT,
+			kind       TEXT,
+			repo       TEXT,
+			number     INTEGER,
+			title      TEXT,
+			message    TEXT,
+			detail     TEXT,
+			url        TEXT,
+			created_at TEXT,
+			dismissed  INTEGER NOT NULL DEFAULT 0
+		);
+
+		CREATE TABLE IF NOT EXISTS notification_snapshot (
+			id    INTEGER PRIMARY KEY CHECK (id = 1),
+			state TEXT
+		);
+
+		CREATE TABLE IF NOT EXISTS pr_activity (
+			repo               TEXT,
+			number             INTEGER,
+			role               TEXT,
+			last_comment_author TEXT DEFAULT '',
+			last_comment_at    TEXT DEFAULT '',
+			last_review_state  TEXT DEFAULT '',
+			last_review_at     TEXT DEFAULT '',
+			PRIMARY KEY (repo, number, role)
+		);
 	`)
 	if err != nil {
 		return err
@@ -372,6 +401,109 @@ func (s *Store) CachedVersions() ([]CachedVersion, error) {
 			return nil, err
 		}
 		out = append(out, v)
+	}
+	return out, nil
+}
+
+type Notification struct {
+	ID        int64
+	Kind      string
+	Repo      string
+	Number    int
+	Title     string
+	Message   string
+	Detail    string
+	URL       string
+	CreatedAt string
+	Dismissed bool
+}
+
+func (s *Store) AddNotification(n Notification) (int64, error) {
+	res, err := s.db.Exec(`INSERT INTO notification (kind, repo, number, title, message, detail, url, created_at, dismissed)
+		VALUES (?, ?, ?, ?, ?, ?, ?, ?, 0)`,
+		n.Kind, n.Repo, n.Number, n.Title, n.Message, n.Detail, n.URL, n.CreatedAt)
+	if err != nil {
+		return 0, err
+	}
+	return res.LastInsertId()
+}
+
+func (s *Store) Notifications() ([]Notification, error) {
+	rows, err := s.db.Query(`SELECT id, kind, repo, number, title, message, detail, url, created_at, dismissed FROM notification ORDER BY id DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Notification
+	for rows.Next() {
+		var n Notification
+		var dismissed int
+		if err := rows.Scan(&n.ID, &n.Kind, &n.Repo, &n.Number, &n.Title, &n.Message, &n.Detail, &n.URL, &n.CreatedAt, &dismissed); err != nil {
+			return nil, err
+		}
+		n.Dismissed = dismissed != 0
+		out = append(out, n)
+	}
+	return out, nil
+}
+
+func (s *Store) DeleteNotification(id int64) error {
+	_, err := s.db.Exec(`DELETE FROM notification WHERE id = ?`, id)
+	return err
+}
+
+func (s *Store) ClearNotifications() error {
+	_, err := s.db.Exec(`DELETE FROM notification`)
+	return err
+}
+
+func (s *Store) SaveSnapshot(state string) error {
+	_, err := s.db.Exec(`INSERT INTO notification_snapshot (id, state) VALUES (1, ?)
+		ON CONFLICT(id) DO UPDATE SET state = excluded.state`, state)
+	return err
+}
+
+func (s *Store) LoadSnapshot() (string, error) {
+	var state string
+	err := s.db.QueryRow(`SELECT COALESCE(state, '') FROM notification_snapshot WHERE id = 1`).Scan(&state)
+	if err == sql.ErrNoRows {
+		return "", nil
+	}
+	return state, err
+}
+
+type Activity struct {
+	Repo              string
+	Number            int
+	Role              string
+	LastCommentAuthor string
+	LastCommentAt     string
+	LastReviewState   string
+	LastReviewAt      string
+}
+
+func (s *Store) SaveActivity(a Activity) error {
+	_, err := s.db.Exec(`INSERT OR REPLACE INTO pr_activity (repo, number, role, last_comment_author, last_comment_at, last_review_state, last_review_at)
+		VALUES (?, ?, ?, ?, ?, ?, ?)`,
+		a.Repo, a.Number, a.Role, a.LastCommentAuthor, a.LastCommentAt, a.LastReviewState, a.LastReviewAt)
+	return err
+}
+
+func (s *Store) ActivityMarkers() ([]Activity, error) {
+	rows, err := s.db.Query(`SELECT repo, number, role, COALESCE(last_comment_author, ''), COALESCE(last_comment_at, ''), COALESCE(last_review_state, ''), COALESCE(last_review_at, '') FROM pr_activity`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var out []Activity
+	for rows.Next() {
+		var a Activity
+		if err := rows.Scan(&a.Repo, &a.Number, &a.Role, &a.LastCommentAuthor, &a.LastCommentAt, &a.LastReviewState, &a.LastReviewAt); err != nil {
+			return nil, err
+		}
+		out = append(out, a)
 	}
 	return out, nil
 }

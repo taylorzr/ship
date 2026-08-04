@@ -34,6 +34,14 @@ type PR struct {
 	UpdatedAt      string
 	IsDraft        bool
 	HeadRefOid     string
+
+	// Latest review/issue-comment activity (from GetPR's enriched query),
+	// used by the notification detector. Times are RFC3339.
+	LatestReviewAuthor  string
+	LatestReviewState   string
+	LatestReviewAt      string
+	LatestCommentAuthor string
+	LatestCommentAt     string
 }
 
 type Client struct {
@@ -160,6 +168,19 @@ type getPRResult struct {
 			Commits          struct {
 				Nodes []commitNode
 			} `graphql:"commits(last: 1)"`
+			Reviews struct {
+				Nodes []struct {
+					Author    struct{ Login string }
+					State     githubv4.PullRequestReviewState
+					CreatedAt githubv4.DateTime
+				}
+			} `graphql:"reviews(last: 3)"`
+			Comments struct {
+				Nodes []struct {
+					Author    struct{ Login string }
+					CreatedAt githubv4.DateTime
+				}
+			} `graphql:"comments(last: 3)"`
 		} `graphql:"pullRequest(number: $number)"`
 	} `graphql:"repository(owner: $owner, name: $name)"`
 }
@@ -497,6 +518,19 @@ func (c *Client) GetPR(ctx context.Context, repo string, number int) (*PR, error
 	if pr.Number == 0 {
 		return nil, fmt.Errorf("PR #%d not found in %s", number, repo)
 	}
+	latestReviewAuthor, latestReviewState, latestReviewAt := "", "", ""
+	if len(pr.Reviews.Nodes) > 0 {
+		n := pr.Reviews.Nodes[0]
+		latestReviewAuthor = n.Author.Login
+		latestReviewState = string(n.State)
+		latestReviewAt = n.CreatedAt.Format("2006-01-02T15:04:05Z")
+	}
+	latestCommentAuthor, latestCommentAt := "", ""
+	if len(pr.Comments.Nodes) > 0 {
+		n := pr.Comments.Nodes[0]
+		latestCommentAuthor = n.Author.Login
+		latestCommentAt = n.CreatedAt.Format("2006-01-02T15:04:05Z")
+	}
 	return &PR{
 		Number:         pr.Number,
 		Repo:           pr.Repository.NameWithOwner,
@@ -511,6 +545,12 @@ func (c *Client) GetPR(ctx context.Context, repo string, number int) (*PR, error
 		UpdatedAt:      pr.UpdatedAt.Format("2006-01-02T15:04:05Z"),
 		IsDraft:        pr.IsDraft,
 		HeadRefOid:     pr.HeadRefOid,
+
+		LatestReviewAuthor:  latestReviewAuthor,
+		LatestReviewState:   latestReviewState,
+		LatestReviewAt:      latestReviewAt,
+		LatestCommentAuthor: latestCommentAuthor,
+		LatestCommentAt:     latestCommentAt,
 	}, nil
 }
 

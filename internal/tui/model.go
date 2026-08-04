@@ -23,6 +23,7 @@ import (
 	"github.com/zach/ship/internal/config"
 	gh "github.com/zach/ship/internal/github"
 	"github.com/zach/ship/internal/k8s"
+	"github.com/zach/ship/internal/notify"
 	"github.com/zach/ship/internal/store"
 	"github.com/zach/ship/internal/version"
 )
@@ -84,9 +85,32 @@ func (m *Model) maxVisibleRows() int {
 	if n == 0 {
 		return 15
 	}
-	// overhead: title + help + per-section (name + header) + active section actions
-	overhead := 2 + 2*n + 1
-	perSection := (m.height - overhead) / n
+	// chrome: title + one header per section + blank line + help footer
+	chrome := 1 + n + 1 + 1
+	for _, s := range m.sections {
+		if _, ok := m.sectionErrs[s.name]; ok {
+			chrome++ // section error line
+		}
+		if s.name == "To Review" {
+			if _, ok := m.sectionErrs["Team Review"]; ok {
+				chrome++ // team review error shown under To Review
+			}
+		}
+		if len(s.rows) == 0 {
+			if !m.loading[s.name] && s.name != "Services" && s.name != "Releases" {
+				chrome++ // "- no results -"
+			}
+			continue
+		}
+		if s.rows[0].num > 0 {
+			chrome++ // PR column header
+		}
+		chrome++ // "↓ N more below"
+		if s.scrollOffset > 0 {
+			chrome++ // "↑ N more above"
+		}
+	}
+	perSection := (m.height - chrome) / n
 	if perSection < 1 {
 		return 1
 	}
@@ -155,6 +179,7 @@ type keyMap struct {
 	Browse        key.Binding
 	HelpToggle    key.Binding
 	TagAction     key.Binding
+	Notifications key.Binding
 }
 
 var keys = keyMap{
@@ -180,6 +205,7 @@ var keys = keyMap{
 	Browse:        key.NewBinding(key.WithKeys("B"), key.WithHelp("B", "browse on GitHub")),
 	HelpToggle:    key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 	TagAction:     key.NewBinding(key.WithKeys("T"), key.WithHelp("T", "tag/release")),
+	Notifications: key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "notifications")),
 }
 
 type refreshDoneMsg struct {
@@ -229,6 +255,9 @@ type Model struct {
 	showHelp       bool
 	gPending       bool
 	mockK8sSpecs   map[string]k8s.MockSpec
+	notifications  []notify.Event
+	notifCursor    int
+	showNotif      bool
 	refreshingItem struct {
 		repo string
 		num  int
@@ -271,8 +300,16 @@ func New(cfg *config.Config, st *store.Store, ghClient *gh.Client, mockK8sSpecs 
 		loading:      loading,
 		sectionErrs:  map[string]string{},
 		mockK8sSpecs: mockK8sSpecs,
+		cursor:       -1,
 	}
 	m.loadFromCache()
+	m.reloadNotifications()
+	// Reset the diff baseline so the first refresh cycle of this session only
+	// seeds state instead of flooding the panel with events that piled up while
+	// the TUI was closed.
+	if st != nil {
+		st.SaveSnapshot("")
+	}
 	return m
 }
 
@@ -341,7 +378,7 @@ func (m *Model) applyFilters() {
 	} else {
 		start := m.sectionOffset(m.sectionIdx)
 		end := m.sectionEnd(m.sectionIdx)
-		if m.cursor < start || m.cursor >= end {
+		if m.cursor != -1 && (m.cursor < start || m.cursor >= end) {
 			m.cursor = start
 		}
 	}
@@ -390,7 +427,6 @@ func (m *Model) loadFromCache() {
 		s.allRows = append(s.allRows, r)
 		s.rows = append(s.rows, r)
 	}
-	sections = append(sections, s)
 
 	versions, _ := m.store.CachedVersions()
 	svcNames := make(map[string]string, len(m.cfg.Services))
@@ -489,6 +525,7 @@ func (m *Model) loadFromCache() {
 		}
 	}
 	sections = append(sections, s3)
+	sections = append(sections, s)
 
 	so, df, ss, sn, htr, sf := m.sectionProp("To Review")
 	dir, _ := m.store.CachedPRs("review-direct")
@@ -575,6 +612,188 @@ func (m *Model) loadFromCache() {
 
 func (m *Model) markRefreshed() {
 	m.lastRefreshed = time.Now()
+}
+
+// detectNotifications runs after a full refresh cycle completes: it diffs the
+// freshly-refreshed store state against the last-known snapshot, emits events,
+// auto-dismisses resolved ones, and stores the new snapshot. The first cycle
+// only seeds the baseline so a fresh start never floods the panel.
+func (m *Model) detectNotifications() {
+	cur := m.currentSnapshot()
+	prevBlob, err := m.store.LoadSnapshot()
+	if err != nil {
+		return
+	}
+	if prevBlob == "" {
+		b, _ := json.Marshal(cur)
+		m.store.SaveSnapshot(string(b))
+		return
+	}
+	var prev notify.Snapshot
+	if err := json.Unmarshal([]byte(prevBlob), &prev); err != nil {
+		return
+	}
+	for _, e := range notify.Diff(prev, cur) {
+		if !m.notifyEnabled(e.Kind) {
+			continue
+		}
+		n := store.Notification{
+			Kind:      string(e.Kind),
+			Repo:      e.Repo,
+			Number:    e.Number,
+			Title:     e.Title,
+			Message:   e.Message,
+			Detail:    e.Detail,
+			URL:       e.URL,
+			CreatedAt: time.Now().Format(time.RFC3339),
+		}
+		if _, err := m.store.AddNotification(n); err != nil && shipLog != nil {
+			shipLog.Printf("notify: add: %v", err)
+		}
+	}
+	notifs, err := m.store.Notifications()
+	if err == nil {
+		for _, n := range notifs {
+			if notify.IsResolved(notifyEvent(n), cur) {
+				if err := m.store.DeleteNotification(n.ID); err != nil && shipLog != nil {
+					shipLog.Printf("notify: dismiss %d: %v", n.ID, err)
+				}
+			}
+		}
+	}
+	b, _ := json.Marshal(cur)
+	m.store.SaveSnapshot(string(b))
+	m.reloadNotifications()
+}
+
+func (m *Model) reloadNotifications() {
+	notifs, err := m.store.Notifications()
+	if err != nil {
+		m.notifications = nil
+		return
+	}
+	m.notifications = make([]notify.Event, len(notifs))
+	for i, n := range notifs {
+		m.notifications[i] = notifyEvent(n)
+	}
+	if m.notifCursor >= len(m.notifications) {
+		m.notifCursor = 0
+	}
+}
+
+func notifyEvent(n store.Notification) notify.Event {
+	at, _ := time.Parse(time.RFC3339, n.CreatedAt)
+	return notify.Event{
+		ID: n.ID, Kind: notify.Kind(n.Kind), Repo: n.Repo, Number: n.Number,
+		Title: n.Title, Message: n.Message, Detail: n.Detail, URL: n.URL,
+		CreatedAt: at, Dismissed: n.Dismissed,
+	}
+}
+
+func (m *Model) notifyEnabled(k notify.Kind) bool {
+	c := m.cfg.Notify
+	if !c.Enabled {
+		return false
+	}
+	switch k {
+	case notify.KindReviewRequested:
+		return c.NewReview
+	case notify.KindReviewChange:
+		return c.MyReviewChange
+	case notify.KindCIFailed:
+		return c.MyCIFail
+	case notify.KindMergeable:
+		return c.MyMergeable
+	case notify.KindPendingTag:
+		return c.PendingTag
+	case notify.KindHealth:
+		return c.Health
+	case notify.KindDepPR:
+		return c.DepPR
+	case notify.KindNewComment:
+		return c.NewComment
+	}
+	return false
+}
+
+// currentSnapshot builds the detector snapshot from the store's freshly
+// refreshed rows. PR rows are keyed by repo#number#role; activity markers are
+// merged per PR (enrich only records "mine" activity from real people).
+func (m *Model) currentSnapshot() notify.Snapshot {
+	snap := notify.Snapshot{
+		PRs:      map[string]notify.PRState{},
+		Versions: map[string]notify.VersionState{},
+		Activity: map[string]notify.ActivityState{},
+	}
+	prs, _ := m.store.CachedPRs("")
+	for _, p := range prs {
+		snap.PRs[notify.PRKey(p.Repo, p.Number, p.Role)] = notify.PRState{
+			Role:      p.Role,
+			Title:     p.Title,
+			Review:    p.ReviewDecision,
+			CI:        p.CIState,
+			Mergeable: p.Mergeable,
+		}
+	}
+	vers, _ := m.store.CachedVersions()
+	for _, v := range vers {
+		snap.Versions[v.Repo] = notify.VersionState{
+			Problems:    healthProblems(parseHealth(v.Health)),
+			PendingTags: parsePendingTagNames(v.PendingTags),
+			Untagged:    countUntagged(v.UntaggedCommits),
+		}
+	}
+	acts, _ := m.store.ActivityMarkers()
+	for _, a := range acts {
+		key := fmt.Sprintf("%s#%d", a.Repo, a.Number)
+		snap.Activity[key] = notify.ActivityState{
+			CommentAuthor: a.LastCommentAuthor,
+			CommentAt:     a.LastCommentAt,
+			ReviewState:   a.LastReviewState,
+			ReviewAt:      a.LastReviewAt,
+		}
+	}
+	return snap
+}
+
+// healthProblems mirrors the TUI's "something to be concerned about" predicate
+// for a deployment: not ready and not deploying, failing conditions, pending or
+// failed pods, waiting containers, or fresh warning events.
+func healthProblems(h k8s.Health) bool {
+	return (!h.Ready && !h.Progressing) || len(h.Conditions) > 0 || h.PendingPods > 0 ||
+		h.FailedPods > 0 || len(h.Waiting) > 0 || len(h.RecentEvents) > 0 || len(h.Events) > 0
+}
+
+// parsePendingTagNames extracts the tag names from the cached "tag|title, tag|title" list.
+func parsePendingTagNames(pending string) []string {
+	if pending == "" {
+		return nil
+	}
+	var tags []string
+	for _, entry := range strings.Split(pending, ", ") {
+		if entry == "" {
+			continue
+		}
+		if parts := strings.SplitN(entry, "|", 2); len(parts) == 2 {
+			tags = append(tags, parts[0])
+		} else {
+			tags = append(tags, entry)
+		}
+	}
+	return tags
+}
+
+// countUntagged returns the number of untagged commits ahead of prod from the
+// cached JSON array.
+func countUntagged(untagged string) int {
+	if untagged == "" {
+		return 0
+	}
+	var commits []struct{ SHA string }
+	if err := json.Unmarshal([]byte(untagged), &commits); err != nil {
+		return 0
+	}
+	return len(commits)
 }
 
 func (m *Model) recalcTotal() {
@@ -792,6 +1011,16 @@ func (m Model) enrichPRDetails(ctx context.Context, role string, prs []gh.PR) {
 	if len(prs) == 0 {
 		return
 	}
+	// Resolve the signed-in login once (gh caches it) so every goroutine below
+	// can compare against it without fanning out GraphQL queries.
+	self := ""
+	if role == "mine" {
+		selfCtx, cancel := context.WithTimeout(ctx, 10*time.Second)
+		defer cancel()
+		if u, err := m.gh.User(selfCtx); err == nil {
+			self = u
+		}
+	}
 	var wg sync.WaitGroup
 	for _, p := range prs {
 		wg.Add(1)
@@ -809,9 +1038,53 @@ func (m Model) enrichPRDetails(ctx context.Context, role string, prs []gh.PR) {
 			if err := m.store.SavePR(toCached(*pr, role)); err != nil && shipLog != nil {
 				shipLog.Printf("  enrich save %s#%d: %v", p.Repo, p.Number, err)
 			}
+			// Record comment/review activity for the notification detector.
+			// Only track "mine" PRs, and only other people's activity (never
+			// our own comments, and never bot noise), so a marker change
+			// always means a new comment worth notifying about.
+			if role == "mine" && !m.isIgnoredActivity(pr, self) {
+				act := store.Activity{
+					Repo:   pr.Repo,
+					Number: pr.Number,
+					Role:   role,
+				}
+				if !selfAuthor(self, pr.LatestCommentAuthor) && pr.LatestCommentAuthor != "" {
+					act.LastCommentAuthor = pr.LatestCommentAuthor
+					act.LastCommentAt = pr.LatestCommentAt
+				}
+				if !selfAuthor(self, pr.LatestReviewAuthor) && pr.LatestReviewAuthor != "" {
+					act.LastReviewState = pr.LatestReviewState
+					act.LastReviewAt = pr.LatestReviewAt
+				}
+				if err := m.store.SaveActivity(act); err != nil && shipLog != nil {
+					shipLog.Printf("  enrich activity %s#%d: %v", pr.Repo, pr.Number, err)
+				}
+			}
 		}(p)
 	}
 	wg.Wait()
+}
+
+// selfAuthor reports whether the activity author is the signed-in user.
+func selfAuthor(self, login string) bool {
+	return login != "" && strings.EqualFold(login, self)
+}
+
+// isIgnoredActivity reports whether a PR's latest comment/review came from a
+// bot in IgnoreContributors. When it did, the activity marker is left blank so
+// the detector only ever sees real people.
+func (m Model) isIgnoredActivity(pr *gh.PR, self string) bool {
+	for _, ig := range m.cfg.GitHub.IgnoreContributors {
+		if strings.EqualFold(pr.LatestCommentAuthor, ig) || strings.EqualFold(pr.LatestReviewAuthor, ig) {
+			return true
+		}
+	}
+	if self != "" {
+		if strings.EqualFold(pr.LatestCommentAuthor, self) || strings.EqualFold(pr.LatestReviewAuthor, self) {
+			return true
+		}
+	}
+	return false
 }
 
 func (m Model) refreshServiceCmd(ctx context.Context, repo string) tea.Cmd {
@@ -1177,6 +1450,41 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		if m.showNotif {
+			m.gPending = false
+			switch {
+			case key.Matches(msg, key.NewBinding(key.WithKeys("esc", "n", "q"))):
+				m.showNotif = false
+			case key.Matches(msg, key.NewBinding(key.WithKeys("up", "k"))):
+				if m.notifCursor > 0 {
+					m.notifCursor--
+				}
+			case key.Matches(msg, key.NewBinding(key.WithKeys("down", "j"))):
+				if m.notifCursor < len(m.notifications)-1 {
+					m.notifCursor++
+				}
+			case key.Matches(msg, key.NewBinding(key.WithKeys("enter", "o"))):
+				if len(m.notifications) > 0 {
+					if url := m.notifications[m.notifCursor].URL; url != "" {
+						openBrowser(url)
+					}
+				}
+			case key.Matches(msg, key.NewBinding(key.WithKeys("x"))):
+				if len(m.notifications) > 0 {
+					id := m.notifications[m.notifCursor].ID
+					if err := m.store.DeleteNotification(id); err != nil && shipLog != nil {
+						shipLog.Printf("notify: clear %d: %v", id, err)
+					}
+					m.reloadNotifications()
+				}
+			case key.Matches(msg, key.NewBinding(key.WithKeys("c"))):
+				if err := m.store.ClearNotifications(); err != nil && shipLog != nil {
+					shipLog.Printf("notify: clear all: %v", err)
+				}
+				m.reloadNotifications()
+			}
+			return m, nil
+		}
 		switch {
 		case key.Matches(msg, keys.Quit):
 			return m, tea.Quit
@@ -1474,6 +1782,9 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.HelpToggle):
 			m.showHelp = !m.showHelp
 			return m, nil
+		case key.Matches(msg, keys.Notifications):
+			m.showNotif = !m.showNotif
+			return m, nil
 		case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
 			if m.showHelp {
 				m.showHelp = false
@@ -1509,6 +1820,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		if m.allDone() {
 			m.markRefreshed()
+			m.detectNotifications()
 		}
 
 	case autoRefreshMsg:
@@ -1945,7 +2257,18 @@ func (m Model) View() string {
 		}
 	}
 
-	if m.width > 0 && m.height > 0 && m.confirm == nil && !m.tagging && !m.showHelp {
+	if m.showNotif {
+		panel := m.renderNotificationsPanel()
+		if m.width > 0 && m.height > 0 {
+			content = lipgloss.Place(m.width, m.height,
+				lipgloss.Center, lipgloss.Center,
+				panel)
+		} else {
+			content = strings.Repeat("\n", 5) + panel
+		}
+	}
+
+	if m.width > 0 && m.height > 0 && m.confirm == nil && !m.tagging && !m.showHelp && !m.showNotif {
 		content = lipgloss.NewStyle().MaxHeight(m.height).Render(content)
 	}
 
@@ -2461,6 +2784,11 @@ func (m Model) viewHelp() string {
 	if n := k8s.InFlight(); n > 0 {
 		line += helpKey.Render(fmt.Sprintf("  %d k8s", n))
 	}
+	if n := len(m.notifications); n > 0 {
+		line += helpKey.Render(fmt.Sprintf("  🔔 %d", n))
+	} else if m.showNotif {
+		line += helpKey.Render("  🔔 0")
+	}
 	line += "  " + helpKey.Render("?:") + " " + helpKey.Render("help")
 	return line
 }
@@ -2487,6 +2815,7 @@ func (m Model) renderHelpOverlay() string {
 		{"j/k", "move up/down"},
 		{"tab/shift+tab", "next/prev section"},
 		{"gg/G", "top/bottom"},
+		{"n", "notifications"},
 		{"q", "quit"},
 	})
 
@@ -2582,16 +2911,107 @@ func (m Model) renderHelpOverlay() string {
 	if filters != "" {
 		left += "\n" + filters
 	}
-	right := actions
-	if legend != "" {
-		right += "\n" + legend
+	if actions != "" {
+		left += "\n" + actions
 	}
+	right := legend
 	if right != "" {
 		left = lipgloss.NewStyle().PaddingRight(6).Render(left)
 		left = lipgloss.JoinHorizontal(lipgloss.Top, left, right)
 	}
 
 	return dialogStyle.Width(0).Render(dialogTitle.Render("Keys") + "\n\n" + left + "\n\n" + dialogHelp.Render("? or esc to close"))
+}
+
+func (m Model) renderNotificationsPanel() string {
+	var b strings.Builder
+	count := len(m.notifications)
+	b.WriteString(dialogTitle.Render(fmt.Sprintf("Notifications (%d)", count)))
+	b.WriteString("\n\n")
+	if count == 0 {
+		b.WriteString(helpKey.Render("No notifications."))
+	} else {
+		maxW := m.width
+		if maxW > 90 {
+			maxW = 90
+		}
+		if maxW < 60 {
+			maxW = 60
+		}
+		for i, e := range m.notifications {
+			sel := i == m.notifCursor
+			badge := notifBadge(e.Kind)
+			repo := e.Repo
+			if e.Number > 0 {
+				repo = fmt.Sprintf("%s#%d", e.Repo, e.Number)
+			}
+			title := e.Message
+			if e.Title != "" {
+				title = e.Title
+			}
+			line := fmt.Sprintf("%s %s  %s", badge, repo, title)
+			if !e.CreatedAt.IsZero() {
+				line += "  " + helpKey.Render("("+notifAge(e.CreatedAt)+")")
+			}
+			line = truncateWidth(line, maxW)
+			if sel {
+				line = selectedStyle.Render(line)
+			} else {
+				line = rowStyle.Render(line)
+			}
+			b.WriteString(line)
+			if e.Detail != "" {
+				d := "    " + e.Detail
+				d = truncateWidth(d, maxW)
+				if sel {
+					d = selectedStyle.Render(d)
+				} else {
+					d = helpKey.Render(d)
+				}
+				b.WriteString("\n" + d)
+			}
+			b.WriteString("\n")
+		}
+	}
+	b.WriteString("\n")
+	b.WriteString(dialogHelp.Render("j/k move · enter open · x clear · c clear all · esc close"))
+	return dialogStyle.Width(0).Render(b.String())
+}
+
+func notifBadge(k notify.Kind) string {
+	switch k {
+	case notify.KindReviewRequested:
+		return "📥"
+	case notify.KindReviewChange:
+		return "🔁"
+	case notify.KindCIFailed:
+		return "💥"
+	case notify.KindMergeable:
+		return "✅"
+	case notify.KindPendingTag:
+		return "🏷"
+	case notify.KindHealth:
+		return "🩺"
+	case notify.KindDepPR:
+		return "⬆"
+	case notify.KindNewComment:
+		return "💬"
+	}
+	return "•"
+}
+
+func notifAge(t time.Time) string {
+	d := time.Since(t)
+	switch {
+	case d < time.Minute:
+		return "just now"
+	case d < time.Hour:
+		return fmt.Sprintf("%dm", int(d.Minutes()))
+	case d < 24*time.Hour:
+		return fmt.Sprintf("%dh", int(d.Hours()))
+	default:
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
+	}
 }
 
 func (m Model) renderTagInput() string {
