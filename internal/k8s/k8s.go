@@ -55,7 +55,7 @@ func (t EventTimebox) normalize() EventTimebox {
 		t.Warn = 10 * time.Minute
 	}
 	if t.History <= 0 {
-		t.History = 24 * time.Hour
+		t.History = time.Hour
 	}
 	if t.Warn < t.Recent {
 		t.Warn = t.Recent

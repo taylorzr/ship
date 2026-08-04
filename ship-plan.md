@@ -83,7 +83,7 @@ teams  = ["fanduel/podium"]               # team-review-requested scope: team re
 login_command = "aws sso login"           # run to re-auth when k8s requests fail with expired creds
 event_recent  = "1m"                      # warning events <= this age render red
 event_warn    = "10m"                     # warning events <= this age render yellow
-event_history = "24h"                     # warning events <= this age render muted; older are dropped
+event_history = "1h"                      # warning events <= this age render muted; older are dropped (k8s default TTL; raise if the cluster retains longer)
 hide_transient = false                    # hide transient warning events (failed probes, backoff, ...) from the health column
 transient_events = []                     # override the default transient event reason list
 

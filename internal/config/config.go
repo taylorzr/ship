@@ -94,7 +94,7 @@ func Load(path string) (*Config, error) {
 		K8s: K8sConfig{
 			EventRecent:  time.Minute,
 			EventWarn:    10 * time.Minute,
-			EventHistory: 24 * time.Hour,
+			EventHistory: time.Hour,
 		},
 		AI: AIConfig{
 			ReviewProvider: "claude-cli",

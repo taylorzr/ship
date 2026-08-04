@@ -2056,7 +2056,8 @@ type eventFilter struct {
 }
 
 // k8sTimebox maps the configured event timeboxes onto the k8s client. Zero
-// values fall back to the k8s defaults (1m/10m/24h).
+// values fall back to the k8s defaults (1m/10m/1h), matching the k8s event
+// TTL; raise event_history when the cluster retains events longer.
 func (m *Model) k8sTimebox() k8s.EventTimebox {
 	return k8s.EventTimebox{
 		Recent:  m.cfg.K8s.EventRecent,
