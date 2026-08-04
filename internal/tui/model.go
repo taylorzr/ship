@@ -2435,7 +2435,7 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 	}
 	for _, c := range h.RestartCauses {
 		if s := shortEvent(c); s != "" {
-			segs = append(segs, healthSeg{"!" + s, restartKind})
+			segs = append(segs, healthSeg{"↻" + s, restartKind})
 		}
 	}
 	hidden := 0
@@ -2449,7 +2449,7 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 				hidden++
 				continue
 			}
-			segs = append(segs, healthSeg{"!" + s, kind})
+			segs = append(segs, healthSeg{reasonPrefix(s) + s, kind})
 		}
 	}
 	addEvents(h.RecentEvents, segBad)
@@ -2457,19 +2457,19 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 	addEvents(h.OldEvents, segMuted)
 	for _, c := range h.Conditions {
 		if s := shortEvent(c); s != "" {
-			segs = append(segs, healthSeg{"!" + s, segBad})
+			segs = append(segs, healthSeg{reasonPrefix(s) + s, segBad})
 		}
 	}
 	for _, w := range h.Waiting {
 		if s := shortEvent(w); s != "" {
-			segs = append(segs, healthSeg{"!" + s, segBad})
+			segs = append(segs, healthSeg{reasonPrefix(s) + s, segBad})
 		}
 	}
 	if h.PendingPods > 0 {
 		segs = append(segs, healthSeg{fmt.Sprintf("⏳%d", h.PendingPods), segBad})
 	}
 	if h.FailedPods > 0 {
-		segs = append(segs, healthSeg{fmt.Sprintf("⚠%d", h.FailedPods), segBad})
+		segs = append(segs, healthSeg{fmt.Sprintf("💀%d", h.FailedPods), segBad})
 	}
 	if hidden > 0 {
 		segs = append(segs, healthSeg{fmt.Sprintf("~%d", hidden), segMuted})
@@ -2484,9 +2484,9 @@ func healthEmpty(h k8s.Health) bool {
 }
 
 // formatHealth renders the cached health string as a compact plain-text column
-// value: ✓ healthy, ⟳ deploying, ✗ not ready, ↻N restarts, !Reason events
-// (colored by age in the TUI), ⏳N pending, ⚠N failed, !Condition deployment
-// conditions, !Cause restarts.
+// value: ✓ healthy, ⟳ deploying, ✗ not ready, ↻N restarts, ↻OOMKilled restart
+// causes, ⚠ error events (colored by age in the TUI), 🔁 waiting/retrying,
+// ⏳N pending, 💀N failed, ⚠ conditions.
 func formatHealth(health string, ev eventFilter) string {
 	h := parseHealth(health)
 	if healthEmpty(h) {
@@ -2500,45 +2500,42 @@ func formatHealth(health string, ev eventFilter) string {
 	return strings.Join(parts, " ")
 }
 
-// shortEvent abbreviates a k8s event or condition reason to a short token.
+// shortEvent filters benign k8s event/condition reasons that don't deserve a
+// segment, passing everything else through verbatim so the exact reason is
+// always visible in the health column.
 func shortEvent(reason string) string {
 	switch reason {
-	case "OOMKilling", "OOMKilled":
-		return "OOM"
-	case "BackOff", "CrashLoopBackOff":
-		return "BackOff"
-	case "FailedScheduling":
-		return "Pend"
-	case "FailedMount", "FailedAttachVolume":
-		return "Mount"
-	case "FailedCreate", "FailedCreatePodSandBox", "FailedCreatePod":
-		return "Create"
-	case "ImagePullBackOff", "ErrImagePull", "ErrImageNeverPull", "InvalidImageName", "RegistryUnavailable", "ImageInspectError", "ErrImagePullTimeout", "FailedToRetrieveImagePullSecret":
-		return "Pull"
-	case "Evicted", "Evicting":
-		return "Evicted"
-	case "Unhealthy":
-		return "Unhealthy"
-	case "NodeNotReady", "NodeReady":
-		return "Node"
-	case "Killing", "KillPodSandbox":
-		return "Kill"
-	case "ProgressDeadlineExceeded":
-		return "Stuck"
-	case "ReplicaFailure":
-		return "RepFail"
-	case "Unavailable":
-		return "Unavail"
-	case "Degraded":
-		return "Degrad"
 	case "Started", "Pulled", "Pulling", "Scheduled", "SuccessfulCreate", "MinimumReplicasAvailable":
 		return ""
 	default:
-		if len(reason) > 7 {
-			return reason[:7]
-		}
 		return reason
 	}
+}
+
+// waitingReasons are k8s reasons that mean a container/pod is stuck retrying
+// (image pull, backoff, rescheduling) rather than hard-failed.
+var waitingReasons = map[string]bool{
+	"BackOff":                         true,
+	"CrashLoopBackOff":                true,
+	"ImagePullBackOff":                true,
+	"ErrImagePull":                    true,
+	"ErrImageNeverPull":               true,
+	"InvalidImageName":                true,
+	"RegistryUnavailable":             true,
+	"ImageInspectError":               true,
+	"ErrImagePullTimeout":             true,
+	"FailedToRetrieveImagePullSecret": true,
+	"FailedScheduling":                true,
+}
+
+// reasonPrefix picks the symbol prefix for a reason: 🔁 for waiting/retry
+// states, ⚠ for everything else bad. Restart causes use their own ↻ marker
+// (see healthSegments).
+func reasonPrefix(s string) string {
+	if waitingReasons[s] {
+		return "🔁"
+	}
+	return "⚠"
 }
 
 // detailsText renders the plain (unstyled) Details column value: the health
@@ -2896,13 +2893,14 @@ func (m Model) renderHelpOverlay() string {
 				{"✗", "not ready"},
 				{"⟳", "deploying"},
 				{"↻N", "restarts"},
-				{"!Cause", "last restart cause"},
+				{"↻OOMKilled", "last restart cause"},
 				{"⏳N", "pods pending"},
-				{"⚠N", "pods failed"},
-				{"!OOM", "event (red fresh · yellow recent · dim older)"},
+				{"💀N", "pods failed (dead)"},
+				{"⚠OOMKilling", "error event (red fresh · yellow recent · dim older)"},
+				{"🔁CrashLoopBackOff", "waiting / will retry"},
 				{"~N", "transient events hidden"},
-				{"!Stuck", "rollout stuck"},
-				{"!Degrad", "analysis degraded"},
+				{"⚠ProgressDeadlineExceeded", "rollout stuck"},
+				{"⚠Degraded", "analysis degraded"},
 			})
 		}
 	}
