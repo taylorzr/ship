@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"runtime"
 	"strings"
 	"sync"
 	"time"
@@ -57,12 +58,20 @@ var depPRsCmd = &cobra.Command{
 	RunE:  runDepPRs,
 }
 
+var doctorCmd = &cobra.Command{
+	Use:     "doctor",
+	Aliases: []string{"healthcheck"},
+	Short:   "Diagnose tooling and auth (GitHub, k8s)",
+	RunE:    runDoctor,
+}
+
 var mockK8sSpecs map[string]string
 var releasesRepo string
 var reviewMeOnly bool
 var reviewTeamOnly bool
 var depRepos, depOwners, depTeams []string
 var useGraphQL bool
+var doctorLive bool
 
 func init() {
 	rootCmd.AddCommand(countCmd)
@@ -70,6 +79,7 @@ func init() {
 	rootCmd.AddCommand(myPRsCmd)
 	rootCmd.AddCommand(reviewPRsCmd)
 	rootCmd.AddCommand(depPRsCmd)
+	rootCmd.AddCommand(doctorCmd)
 	rootCmd.Flags().StringToStringVar(&mockK8sSpecs, "mock-k8s", nil, "mock k8s per service (e.g. svc1=repo/app:v10.1.0,svc2=repo/other:v2.0.0|restarts=3|events=OOMKilling+BackOff)")
 	releasesCmd.Flags().StringToStringVar(&mockK8sSpecs, "mock-k8s", nil, "mock k8s per service (e.g. svc1=repo/app:v10.1.0,svc2=repo/other:v2.0.0|restarts=3|events=OOMKilling+BackOff)")
 	releasesCmd.Flags().StringVar(&releasesRepo, "repo", "", "filter to a specific repo (e.g. taylorzr/kitty-meow)")
@@ -81,6 +91,7 @@ func init() {
 	myPRsCmd.Flags().BoolVar(&useGraphQL, "graphql", false, "use the GraphQL search field (the flaky path) instead of REST")
 	reviewPRsCmd.Flags().BoolVar(&useGraphQL, "graphql", false, "use the GraphQL search field (the flaky path) instead of REST")
 	depPRsCmd.Flags().BoolVar(&useGraphQL, "graphql", false, "use the GraphQL search field (the flaky path) instead of REST")
+	doctorCmd.Flags().BoolVar(&doctorLive, "live", false, "exercise real k8s login/connectivity per service (default: kubeconfig only)")
 }
 
 func main() {
@@ -418,4 +429,168 @@ func printVersion(r *version.Result) {
 		fmt.Printf("    %s  %s\n", c.SHA[:7], c.Message)
 	}
 	fmt.Println()
+}
+
+func runDoctor(cmd *cobra.Command, args []string) error {
+	cfg, err := config.Load("")
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+
+	failures, warnings := 0, 0
+	check := func(name, detail string, ok, hard bool) {
+		mark := "✓"
+		if !ok {
+			if hard {
+				mark = "✗"
+				failures++
+			} else {
+				mark = "⚠"
+				warnings++
+			}
+		}
+		if detail == "" {
+			fmt.Printf("  %s %s\n", mark, name)
+		} else {
+			fmt.Printf("  %s %-10s %s\n", mark, name, detail)
+		}
+	}
+
+	fmt.Println("── tooling ──")
+	if p, err := exec.LookPath("gh"); err == nil {
+		check("gh", p, true, true)
+	} else {
+		check("gh", "not found — GitHub queries will fail (install the gh CLI)", false, true)
+	}
+	if p, err := exec.LookPath("k9s"); err == nil {
+		check("k9s", p, true, true)
+	} else {
+		check("k9s", "not found — Services Enter-to-open k9s will fail", false, true)
+	}
+	if term := detectTerminal(); term != "" {
+		check("terminal", term, true, false)
+	} else {
+		check("terminal", "no kitty/$TERMINAL/emulator found — open-in-terminal actions disabled", false, false)
+	}
+
+	fmt.Println("── github ──")
+	token, err := ghToken()
+	if err != nil {
+		check("auth", "gh auth login required: "+err.Error(), false, true)
+	} else {
+		client := gh.NewClient(token)
+		gctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		user, err := client.User(gctx)
+		cancel()
+		if err != nil {
+			check("auth", "token invalid: "+err.Error(), false, true)
+		} else {
+			check("auth", "authenticated as @"+user, true, true)
+		}
+	}
+
+	fmt.Println("── k8s ──")
+	timebox := k8s.EventTimebox{
+		Recent:  cfg.K8s.EventRecent,
+		Warn:    cfg.K8s.EventWarn,
+		History: cfg.K8s.EventHistory,
+	}
+	byCtx := map[string][]string{}
+	for _, svc := range cfg.Services {
+		byCtx[svc.Context] = append(byCtx[svc.Context], svc.Name)
+	}
+	if len(byCtx) == 0 {
+		byCtx[""] = []string{"default context"}
+	}
+	for cctx, names := range byCtx {
+		svcCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+		_, err := k8s.NewRealClient(svcCtx, "", cctx, cfg.K8s.LoginCommand, timebox)
+		cancel()
+		if err != nil {
+			check("kubeconfig", fmt.Sprintf("context %q: %v", cctx, err), false, true)
+		} else {
+			check("kubeconfig", fmt.Sprintf("context %q (%s)", cctx, strings.Join(names, ", ")), true, true)
+		}
+	}
+
+	if doctorLive {
+		if len(cfg.Services) == 0 {
+			fmt.Println("  (no services configured — nothing to exercise with --live)")
+		} else {
+			type liveResult struct {
+				name   string
+				detail string
+				ok     bool
+			}
+			results := make([]liveResult, len(cfg.Services))
+			var wg sync.WaitGroup
+			for i, svc := range cfg.Services {
+				wg.Add(1)
+				go func(i int, svc config.ServiceConfig) {
+					defer wg.Done()
+					r := liveResult{name: svc.Name}
+					liveCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+					rc, err := k8s.NewRealClient(liveCtx, "", svc.Context, cfg.K8s.LoginCommand, timebox)
+					if err == nil {
+						_, err = rc.GetWorkload(liveCtx, svc.Context, svc.Namespace, svc.Workload, svc.ResourceType())
+					}
+					cancel()
+					switch {
+					case err == nil:
+						r.ok, r.detail = true, fmt.Sprintf("%s/%s: reachable", svc.Namespace, svc.Workload)
+					case strings.Contains(err.Error(), "not found"):
+						r.ok, r.detail = true, fmt.Sprintf("%s/%s: ok (workload not found)", svc.Namespace, svc.Workload)
+					case isAuthHealthErr(err):
+						r.ok, r.detail = false, fmt.Sprintf("%s/%s: auth: %v", svc.Namespace, svc.Workload, err)
+					default:
+						r.ok, r.detail = false, fmt.Sprintf("%s/%s: %v", svc.Namespace, svc.Workload, err)
+					}
+					results[i] = r
+				}(i, svc)
+			}
+			wg.Wait()
+			for _, r := range results {
+				check(r.name, r.detail, r.ok, true)
+			}
+		}
+	}
+
+	fmt.Println()
+	if failures > 0 {
+		return fmt.Errorf("doctor: %d check(s) failed", failures)
+	}
+	if warnings > 0 {
+		fmt.Printf("doctor: ok (%d warning(s))\n", warnings)
+	} else {
+		fmt.Println("doctor: ok")
+	}
+	return nil
+}
+
+// detectTerminal reports which terminal ship would use to open k9s or AI
+// review windows, or "" if none is available.
+func detectTerminal() string {
+	if os.Getenv("KITTY_WINDOW_ID") != "" || os.Getenv("KITTY_PID") != "" {
+		return "kitty"
+	}
+	if t := os.Getenv("TERMINAL"); t != "" {
+		return t
+	}
+	if runtime.GOOS == "darwin" {
+		return "Terminal.app"
+	}
+	for _, emu := range []string{"x-terminal-emulator", "xterm", "gnome-terminal", "alacritty", "konsole"} {
+		if _, err := exec.LookPath(emu); err == nil {
+			return emu
+		}
+	}
+	return ""
+}
+
+// isAuthHealthErr mirrors internal/k8s.isAuthErr plus the login-failure hint
+// so the doctor can classify --live failures as auth problems.
+func isAuthHealthErr(err error) bool {
+	msg := err.Error()
+	return strings.Contains(msg, "Unauthorized") || strings.Contains(msg, "forbidden") ||
+		strings.Contains(msg, "getting credentials") || strings.Contains(msg, "login failed")
 }
