@@ -3276,6 +3276,12 @@ func (m Model) openK9s(svc config.ServiceConfig) {
 func launchTerminal(args []string, title string) error {
 	if os.Getenv("KITTY_WINDOW_ID") != "" {
 		kittyArgs := []string{"@", "launch", "--location=vsplit", "--title=" + title}
+		for _, kv := range os.Environ() {
+			if strings.HasPrefix(kv, "KITTY_") || !strings.Contains(kv, "=") {
+				continue
+			}
+			kittyArgs = append(kittyArgs, "--env", kv)
+		}
 		cmd := exec.Command("kitty", append(kittyArgs, args...)...)
 		if err := cmd.Start(); err != nil {
 			return err
