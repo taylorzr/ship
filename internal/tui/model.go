@@ -301,7 +301,7 @@ func New(cfg *config.Config, st *store.Store, ghClient *gh.Client, mockK8sSpecs 
 		loading:      loading,
 		sectionErrs:  map[string]string{},
 		mockK8sSpecs: mockK8sSpecs,
-		cursor:       -1,
+		cursor:       0,
 	}
 	m.loadFromCache()
 	m.reloadNotifications()
@@ -379,7 +379,7 @@ func (m *Model) applyFilters() {
 	} else {
 		start := m.sectionOffset(m.sectionIdx)
 		end := m.sectionEnd(m.sectionIdx)
-		if m.cursor != -1 && (m.cursor < start || m.cursor >= end) {
+		if m.cursor < start || m.cursor >= end {
 			m.cursor = start
 		}
 	}
@@ -2212,28 +2212,26 @@ func (m Model) View() string {
 				r := s.rows[i]
 				isSelected := globalIdx+i == m.cursor
 				isRefreshing := m.refreshingItem.repo == r.repo && m.refreshingItem.num == r.num
-				var line string
+				loadCol := "   "
+				if isRefreshing && r.depth == 0 {
+					loadCol = padWidth(m.spin.View(), 3)
+				}
+				var rest string
 				if r.depth == 0 {
 					pending := r.pending
-					if !isSelected && (strings.HasPrefix(pending, "+") || pending == "-") {
+					if strings.HasPrefix(pending, "+") || pending == "-" {
 						pending = helpKey.Render(pending)
 					}
-					loadCol := "    "
-					if isRefreshing {
-						loadCol = padWidth(m.spin.View(), 4)
-					}
-					line = fmt.Sprintf("%s%s%s%s%s%s%s%s",
-						loadCol,
+					rest = fmt.Sprintf("%s%s%s%s%s%s%s",
 						padWidth(truncateWidth(r.name, maxName), maxName),
 						sep,
 						padWidth(truncateWidth(r.title, maxCur), maxCur),
 						sep,
 						padWidth(truncateWidth(pending, maxPen), maxPen),
 						sep,
-						padWidth(truncateWidth(renderDetails(r.health, r.contributors, isSelected, ev), maxCon), maxCon))
+						padWidth(truncateWidth(renderDetails(r.health, r.contributors, ev), maxCon), maxCon))
 				} else {
-					line = fmt.Sprintf("%s%s%s%s%s%s%s%s",
-						"    ",
+					rest = fmt.Sprintf("%s%s%s%s%s%s%s",
 						padWidth("", maxName),
 						sep,
 						padWidth("", maxCur),
@@ -2242,13 +2240,13 @@ func (m Model) View() string {
 						sep,
 						padWidth(truncateWidth(r.contributors, maxCon), maxCon))
 				}
-				if m.width > 0 {
-					line = truncateWidth(line, m.width)
+				if m.width > 4 {
+					rest = truncateWidth(rest, m.width-4)
 				}
 				if isSelected {
-					b.WriteString(selectedStyle.Render(line))
+					b.WriteString(selectedStyle.Render(loadCol) + " " + rest)
 				} else {
-					b.WriteString(rowStyle.Render(line))
+					b.WriteString(loadCol + " " + rest)
 				}
 				b.WriteString("\n")
 			}
@@ -2493,7 +2491,7 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 			}
 			text := reasonPrefix(s) + s
 			if hasAge {
-				text += " (-" + relativeDur(age) + ")"
+				text += "(-" + relativeDur(age) + ")"
 			}
 			segs = append(segs, healthSeg{text, kind})
 		}
@@ -2643,14 +2641,12 @@ func renderHealthColored(health string, ev eventFilter) string {
 	return strings.Join(parts, " ")
 }
 
-// renderDetails styles the Details column. The color is skipped on the
-// selected row so the reverse highlight spans the full line.
-func renderDetails(health, contributors string, isSelected bool, ev eventFilter) string {
+// renderDetails styles the Details column. The health segments keep their
+// colors on the selected row too — the highlight lives in the left margin, so
+// the full-line reverse no longer applies here.
+func renderDetails(health, contributors string, ev eventFilter) string {
 	if health == "" {
 		return contributors
-	}
-	if isSelected {
-		return detailsText(health, contributors, ev)
 	}
 	healthText := renderHealthColored(health, ev)
 	if contributors == "" {
@@ -2811,9 +2807,10 @@ func renderRow(r row, selected bool, refreshing bool, refreshIcon string, repoWi
 
 	left := padWidth(aiIcon, 4) + icon + "  " + rev
 
+	margin := padWidth(left, 10)
+
 	const ageWidth = 6
 
-	var line string
 	if r.num > 0 {
 		title := r.title
 		if r.draft {
@@ -2825,15 +2822,18 @@ func renderRow(r row, selected bool, refreshing bool, refreshIcon string, repoWi
 		if titleWidth < 1 {
 			titleWidth = 1
 		}
-		line = fmt.Sprintf("%s%s%s  #%-5d  %s  %s",
-			padWidth(left, 10), padWidth(sync, 5), padWidth(repo, repoWidth), r.num, padWidth(truncateWidth(title, titleWidth), titleWidth), padWidth(ts, ageWidth))
-	} else {
-		line = r.title
-		if maxWidth > 0 {
-			line = truncateWidth(line, maxWidth)
+		rest := fmt.Sprintf("%s%s  #%-5d  %s  %s",
+			padWidth(sync, 5), padWidth(repo, repoWidth), r.num, padWidth(truncateWidth(title, titleWidth), titleWidth), padWidth(ts, ageWidth))
+		if selected {
+			return selectedStyle.Render(margin[:3]) + margin[3:] + rest
 		}
+		return margin + rest
 	}
 
+	line := r.title
+	if maxWidth > 0 {
+		line = truncateWidth(line, maxWidth)
+	}
 	if selected {
 		return selectedStyle.Render(line)
 	}

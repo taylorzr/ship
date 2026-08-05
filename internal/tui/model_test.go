@@ -1,13 +1,20 @@
 package tui
 
 import (
+	"fmt"
 	"strconv"
 	"strings"
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/lipgloss"
+	"github.com/muesli/termenv"
 	"github.com/zach/ship/internal/k8s"
 )
+
+func forceColor() {
+	lipgloss.SetColorProfile(termenv.ANSI256)
+}
 
 func TestEventReasonAge(t *testing.T) {
 	if reason, age, ok := eventReasonAge("Unhealthy"); ok || age != 0 || reason != "Unhealthy" {
@@ -38,7 +45,7 @@ func TestEventReasonAgeEmitsAgedSegment(t *testing.T) {
 	segs := healthSegments(h, eventFilter{})
 	found := false
 	for _, s := range segs {
-		if strings.HasPrefix(s.text, "⚠Unhealthy (-") && strings.HasSuffix(s.text, "m)") {
+		if strings.HasPrefix(s.text, "⚠Unhealthy(-") && strings.HasSuffix(s.text, "m)") {
 			found = true
 		}
 	}
@@ -62,5 +69,46 @@ func TestHealthRoundTripPreservesEventAges(t *testing.T) {
 	}
 	if len(got.OldEvents) != 1 || got.OldEvents[0] != "Unhealthy@654321" {
 		t.Fatalf("OldEvents after round-trip = %v", got.OldEvents)
+	}
+}
+
+func TestRenderRowMarginOnlyHighlight(t *testing.T) {
+	forceColor()
+	r := row{
+		title:     "fix the thing",
+		repo:      "org/app",
+		num:       123,
+		ci:        "success",
+		updatedAt: "2026-08-05T12:00:00Z",
+	}
+	const repoWidth = 30
+	const maxWidth = 120
+
+	ts := relativeTime(r.updatedAt)
+	titleWidth := maxWidth - repoWidth - 33
+	rest := fmt.Sprintf("%s%s  #%-5d  %s  %s",
+		padWidth(" ", 5), padWidth("org/app", repoWidth), 123,
+		padWidth(truncateWidth("fix the thing", titleWidth), titleWidth), padWidth(ts, 6))
+
+	margin := padWidth("    ✓  ·", 10)
+	unselected := renderRow(r, false, false, "⠁", repoWidth, maxWidth)
+	expected := margin + rest
+	if unselected != expected {
+		t.Fatalf("unselected row:\n got %q\nwant %q", unselected, expected)
+	}
+
+	selected := renderRow(r, true, false, "⠁", repoWidth, maxWidth)
+	wantSelected := selectedStyle.Render(margin[:3]) + margin[3:] + rest
+	if selected != wantSelected {
+		t.Fatalf("selected row:\n got %q\nwant %q", selected, wantSelected)
+	}
+}
+
+func TestRenderRowTitleOnlyStillHighlights(t *testing.T) {
+	forceColor()
+	r := row{title: "some plain section row"}
+	got := renderRow(r, true, false, "⠁", 30, 120)
+	if got != selectedStyle.Render("some plain section row") {
+		t.Fatalf("title-only selected row:\n got %q", got)
 	}
 }
