@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 )
 
 // MockSpec describes a fake deployment for a single service. The Image is
@@ -56,11 +57,7 @@ func ParseMockSpec(v string) MockSpec {
 					spec.Health.ReadyReplicas = int32(n)
 				}
 			case "events":
-				for _, e := range strings.Split(val, "+") {
-					if e != "" {
-						spec.Health.Events = append(spec.Health.Events, e)
-					}
-				}
+				spec.Health.Events = mockEvents(strings.Split(val, "+"))
 			case "recent_events":
 				for _, e := range strings.Split(val, "+") {
 					if e != "" {
@@ -68,11 +65,7 @@ func ParseMockSpec(v string) MockSpec {
 					}
 				}
 			case "old_events":
-				for _, e := range strings.Split(val, "+") {
-					if e != "" {
-						spec.Health.OldEvents = append(spec.Health.OldEvents, e)
-					}
-				}
+				spec.Health.OldEvents = mockEvents(strings.Split(val, "+"))
 			case "waiting":
 				for _, w := range strings.Split(val, "+") {
 					if w != "" {
@@ -104,6 +97,27 @@ func ParseMockSpec(v string) MockSpec {
 		spec.Health.Ready = spec.Health.ReadyReplicas == spec.Health.Replicas && spec.Health.Replicas > 0
 	}
 	return spec
+}
+
+// mockEvents resolves event entries that may carry a relative age (e.g.
+// "BackOff@3m", "Unhealthy@15m") into the "reason@<unix>" form the display
+// expects, resolving the age against now. Bare reasons pass through unchanged.
+func mockEvents(vals []string) []string {
+	var out []string
+	for _, v := range vals {
+		if v == "" {
+			continue
+		}
+		reason, durStr, ok := strings.Cut(v, "@")
+		if ok {
+			if dur, err := time.ParseDuration(durStr); err == nil {
+				out = append(out, fmt.Sprintf("%s@%d", reason, time.Now().Add(-dur).Unix()))
+				continue
+			}
+		}
+		out = append(out, v)
+	}
+	return out
 }
 
 type MockClient struct {

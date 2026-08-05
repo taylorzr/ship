@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"net/http"
 	"os/exec"
+	"sort"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -371,7 +372,7 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 	recentCutoff := metav1.NewTime(now.Add(-c.timebox.Recent))
 	warnCutoff := metav1.NewTime(now.Add(-c.timebox.Warn))
 	historyCutoff := metav1.NewTime(now.Add(-c.timebox.History))
-	seen := map[string]bool{}
+	latest := map[string]metav1.Time{}
 	for i := range events.Items {
 		ev := &events.Items[i]
 		if ev.Type != "Warning" {
@@ -389,17 +390,30 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 		if reason == "" {
 			continue
 		}
-		if seen[reason] {
-			continue
+		if prev, ok := latest[reason]; !ok || ev.LastTimestamp.After(prev.Time) {
+			latest[reason] = ev.LastTimestamp
 		}
-		seen[reason] = true
+	}
+	reasons := make([]string, 0, len(latest))
+	for reason := range latest {
+		reasons = append(reasons, reason)
+	}
+	sort.Slice(reasons, func(i, j int) bool {
+		ti, tj := latest[reasons[i]].Time, latest[reasons[j]].Time
+		if ti.Equal(tj) {
+			return reasons[i] < reasons[j]
+		}
+		return ti.After(tj)
+	})
+	for _, reason := range reasons {
+		t := latest[reason]
 		switch {
-		case !ev.LastTimestamp.Before(&recentCutoff):
+		case !t.Before(&recentCutoff):
 			h.RecentEvents = append(h.RecentEvents, reason)
-		case !ev.LastTimestamp.Before(&warnCutoff):
-			h.Events = append(h.Events, reason)
-		case !ev.LastTimestamp.Before(&historyCutoff):
-			h.OldEvents = append(h.OldEvents, reason)
+		case !t.Before(&warnCutoff):
+			h.Events = append(h.Events, fmt.Sprintf("%s@%d", reason, t.Unix()))
+		case !t.Before(&historyCutoff):
+			h.OldEvents = append(h.OldEvents, fmt.Sprintf("%s@%d", reason, t.Unix()))
 		}
 	}
 }

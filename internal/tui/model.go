@@ -2482,15 +2482,20 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 	hidden := 0
 	addEvents := func(list []string, kind int) {
 		for _, e := range list {
-			s := shortEvent(e)
+			reason, age, hasAge := eventReasonAge(e)
+			s := shortEvent(reason)
 			if s == "" {
 				continue
 			}
-			if ev.hide && ev.transient[e] {
+			if ev.hide && ev.transient[reason] {
 				hidden++
 				continue
 			}
-			segs = append(segs, healthSeg{reasonPrefix(s) + s, kind})
+			text := reasonPrefix(s) + s
+			if hasAge {
+				text += " (-" + relativeDur(age) + ")"
+			}
+			segs = append(segs, healthSeg{text, kind})
 		}
 	}
 	addEvents(h.RecentEvents, segBad)
@@ -2551,6 +2556,22 @@ func shortEvent(reason string) string {
 	default:
 		return reason
 	}
+}
+
+// eventReasonAge splits an event entry into its reason and how long ago it last
+// occurred. Warn and old events carry their collection timestamp as
+// "reason@<unix seconds>"; recent events and cached rows without one return
+// ok=false so the display renders the bare reason.
+func eventReasonAge(entry string) (string, time.Duration, bool) {
+	reason, ts, ok := strings.Cut(entry, "@")
+	if !ok {
+		return entry, 0, false
+	}
+	secs, err := strconv.ParseInt(ts, 10, 64)
+	if err != nil {
+		return reason, 0, false
+	}
+	return reason, time.Since(time.Unix(secs, 0)), true
 }
 
 // waitingReasons are k8s reasons that mean a container/pod is stuck retrying
@@ -2738,6 +2759,15 @@ func relativeTime(s string) string {
 		return ""
 	}
 	d := time.Since(t)
+	if d >= 7*24*time.Hour {
+		return t.Format("Jan 2")
+	}
+	return relativeDur(d)
+}
+
+// relativeDur renders a duration compactly with the most granular whole unit
+// ("<1m", "5m", "2h", "3d"), used for how-long-ago labels on events.
+func relativeDur(d time.Duration) string {
 	switch {
 	case d < time.Minute:
 		return "<1m"
@@ -2745,10 +2775,8 @@ func relativeTime(s string) string {
 		return fmt.Sprintf("%dm", int(d.Minutes()))
 	case d < 24*time.Hour:
 		return fmt.Sprintf("%dh", int(d.Hours()))
-	case d < 7*24*time.Hour:
-		return fmt.Sprintf("%dd", int(d.Hours()/24))
 	default:
-		return t.Format("Jan 2")
+		return fmt.Sprintf("%dd", int(d.Hours()/24))
 	}
 }
 
@@ -2996,7 +3024,7 @@ func (m Model) renderHelpOverlay() string {
 				{"⟳/⏸", healthInfo, "Progressing · DeploymentPaused"},
 				{"✗", healthBad, "unhealthy · failed pods · conditions · events ≤" + shortDur(tb.Recent)},
 				{"↻⌛", healthWarn, "restarts · pending · events ≤" + shortDur(tb.Warn)},
-				{"~", healthMuted, "older events ≤" + shortDur(tb.History) + " · dropped after"},
+				{"~", healthMuted, "older events ≤" + shortDur(tb.History) + " · age shown · dropped after"},
 			})
 		}
 	}
