@@ -866,7 +866,7 @@ func visibleRows(s section) int {
 }
 
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.spin.Tick, m.autoRefreshTick()}
+	cmds := []tea.Cmd{m.spin.Tick, m.autoRefreshTick(), m.activeRefreshTick()}
 	m.sectionErrs = map[string]string{}
 	for k := range m.loading {
 		m.loading[k] = true
@@ -1357,6 +1357,18 @@ func (m Model) autoRefreshTick() tea.Cmd {
 
 type autoRefreshMsg time.Time
 
+func (m Model) activeRefreshTick() tea.Cmd {
+	interval := m.cfg.ActiveRefreshInterval
+	if interval <= 0 {
+		return nil
+	}
+	return tea.Tick(time.Duration(interval)*time.Second, func(t time.Time) tea.Msg {
+		return activeRefreshMsg(t)
+	})
+}
+
+type activeRefreshMsg time.Time
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -1833,6 +1845,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, m.fullRefreshCmd()
 		}
 		return m, m.autoRefreshTick()
+
+	case activeRefreshMsg:
+		if m.cfg.ActiveRefreshInterval > 0 && m.allDone() && m.refreshingItem.repo == "" &&
+			m.sections[m.sectionIdx].name == "Services" {
+			if r := m.currentRow(); r != nil && r.repo != "" && r.health != "" && parseHealth(r.health).Progressing {
+				m.refreshingItem = struct {
+					repo string
+					num  int
+				}{repo: r.repo, num: r.num}
+				return m, tea.Batch(m.refreshServiceCmd(context.Background(), r.repo), m.activeRefreshTick())
+			}
+		}
+		return m, m.activeRefreshTick()
 
 	case actionDoneMsg:
 		m.sectionErrs = map[string]string{}

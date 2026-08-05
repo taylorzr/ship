@@ -10,14 +10,15 @@ import (
 )
 
 type Config struct {
-	GitHub          GitHubConfig    `toml:"github"`
-	K8s             K8sConfig       `toml:"k8s"`
-	RefreshInterval int             `toml:"refresh_interval"`
-	AI              AIConfig        `toml:"ai"`
-	Notify          NotifyConfig    `toml:"notify"`
-	Repos           []RepoConfig    `toml:"repo"`
-	Services        []ServiceConfig `toml:"service"`
-	Jira            []JiraConfig    `toml:"jira"`
+	GitHub               GitHubConfig    `toml:"github"`
+	K8s                  K8sConfig       `toml:"k8s"`
+	RefreshInterval      int             `toml:"refresh_interval"`
+	ActiveRefreshInterval int            `toml:"refresh_active_interval"`
+	AI                   AIConfig        `toml:"ai"`
+	Notify               NotifyConfig    `toml:"notify"`
+	Repos                []RepoConfig    `toml:"repo"`
+	Services             []ServiceConfig `toml:"service"`
+	Jira                 []JiraConfig    `toml:"jira"`
 }
 
 type NotifyConfig struct {
@@ -99,7 +100,8 @@ func DefaultPath() string {
 
 func Load(path string) (*Config, error) {
 	cfg := &Config{
-		RefreshInterval: 300,
+		RefreshInterval:      300,
+		ActiveRefreshInterval: 5,
 		GitHub: GitHubConfig{
 			DepAuthors:         []string{"app/renovate", "app/dependabot"},
 			IgnoreContributors: []string{"github-actions[bot]", "dependabot[bot]", "renovate[bot]"},
