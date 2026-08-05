@@ -2442,10 +2442,10 @@ func (m *Model) eventFilter() eventFilter {
 }
 
 // healthSegments splits a workload's health into display parts so callers can
-// style each individually. Plain ✓ is current readiness. Blue is deployment
+// style each individually. Plain ✔ is current readiness. Blue is deployment
 // state: ⟳ Progressing, ⏸DeploymentPaused awaiting manual approval. Yellow is
 // history and waiting: ↻N restarts, their causes, warning events in the warn
-// window, and pending pods. Red is current problems: ✗ not-ready (when not
+// window, and pending pods. Red is current problems: ✖ not-ready (when not
 // mid-rollout), deployment conditions, failed, stuck containers, and events in
 // the recent window. Muted is older events in the history window. Restarts turn
 // red only when the workload is currently in trouble; a rollout in progress
@@ -2461,9 +2461,9 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 	case h.Progressing && !problems:
 		segs = append(segs, healthSeg{"⟳", segInfo})
 	case h.Ready:
-		segs = append(segs, healthSeg{"✓", segOK})
+		segs = append(segs, healthSeg{"✔", segOK})
 	case h.Replicas > 0:
-		segs = append(segs, healthSeg{"✗", segBad})
+		segs = append(segs, healthSeg{"✖", segBad})
 	}
 	if h.Paused {
 		segs = append(segs, healthSeg{"⏸DeploymentPaused", segInfo})
@@ -2527,7 +2527,7 @@ func healthEmpty(h k8s.Health) bool {
 }
 
 // formatHealth renders the cached health string as a compact plain-text column
-// value: ✓ healthy, ⟳ Progressing, ✗ not ready, ⏸DeploymentPaused paused,
+// value: ✔ healthy, ⟳ Progressing, ✖ not ready, ⏸DeploymentPaused paused,
 // ↻N restarts, ↻OOMKilled restart causes, ⚠ error events (colored by age in
 // the TUI), ∞ waiting/retrying, ⌛N pending, 💀N failed, ⚠ conditions.
 func formatHealth(health string, ev eventFilter) string {
@@ -2611,7 +2611,7 @@ func detailsText(health, contributors string, ev eventFilter) string {
 	return strings.Join(parts, " · ")
 }
 
-// renderHealthColored styles each health segment individually: plain ✓ (or a
+// renderHealthColored styles each health segment individually: plain ✔ (or a
 // blue ⟳ mid-rollout), yellow history/waiting (restarts, causes, warn-window
 // events, pending pods), red current problems (not-ready, conditions, failed,
 // stuck containers, recent events), and muted older events. When the workload
@@ -3016,8 +3016,8 @@ func (m Model) renderHelpOverlay() string {
 			}
 			actions = helpSection("actions", svcEntries)
 			legend = helpSection("legend", [][2]string{
-				{"✓", "healthy"},
-				{"✗", "unhealthy"},
+				{"✔", "healthy"},
+				{"✖", "unhealthy"},
 				{"⟳/⏸", "Progressing · DeploymentPaused"},
 				{"↻N", "restarts"},
 				{"↻OOMKilled", "last restart cause"},
