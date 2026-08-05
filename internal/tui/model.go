@@ -1530,7 +1530,14 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			m.advanceSection(-1)
 		case key.Matches(msg, keys.Enter):
 			r := m.currentRow()
-			if r != nil && r.url != "" {
+			if r != nil && m.sections[m.sectionIdx].name == "Services" && r.depth == 0 && r.repo != "" {
+				for _, svc := range m.cfg.Services {
+					if svc.Repo == r.repo {
+						m.openK9s(svc)
+						break
+					}
+				}
+			} else if r != nil && r.url != "" {
 				openBrowser(r.url)
 			} else if r != nil && m.sections[m.sectionIdx].name == "Services" && r.depth > 0 && r.sha != "" && r.repo != "" {
 				openBrowser(fmt.Sprintf("https://github.com/%s/commit/%s", r.repo, r.sha))
@@ -2956,7 +2963,7 @@ func (m Model) renderHelpOverlay() string {
 			})
 		case "Services":
 			svcEntries := [][2]string{
-				{"enter", "open in browser"},
+				{"enter", "open k9s"},
 				{"r", "refresh item"},
 				{"R", "refresh all"},
 				{"d", "open diff in browser"},
@@ -3236,6 +3243,92 @@ func openBrowser(url string) {
 	if cmd != nil {
 		cmd.Start()
 	}
+}
+
+// openK9s launches k9s for the service's context/namespace in a new terminal,
+// starting in the Deployments or Rollouts view to match the workload kind.
+func (m Model) openK9s(svc config.ServiceConfig) {
+	args := []string{"k9s"}
+	if svc.Context != "" {
+		args = append(args, "--context", svc.Context)
+	}
+	if svc.Namespace != "" {
+		args = append(args, "--namespace", svc.Namespace)
+	}
+	if svc.ResourceType() == "rollout" {
+		args = append(args, "--command", "rollout")
+	} else {
+		args = append(args, "--command", "deploy")
+	}
+	if err := launchTerminal(args, "k9s: "+svc.Name); err != nil {
+		if shipLog != nil {
+			shipLog.Printf("open k9s: %v", err)
+		}
+	}
+}
+
+// launchTerminal runs args in a new terminal. Inside kitty it opens a split
+// pane; otherwise it falls back to $TERMINAL, Terminal.app on macOS, or a
+// common Linux terminal emulator.
+func launchTerminal(args []string, title string) error {
+	if os.Getenv("KITTY_WINDOW_ID") != "" {
+		kittyArgs := []string{"@", "launch", "--location=vsplit", "--title=" + title}
+		cmd := exec.Command("kitty", append(kittyArgs, args...)...)
+		if err := cmd.Start(); err != nil {
+			return err
+		}
+		return nil
+	}
+	if t := os.Getenv("TERMINAL"); t != "" {
+		parts := strings.Fields(t)
+		cmd := exec.Command(parts[0], append(parts[1:], args...)...)
+		if err := cmd.Start(); err != nil {
+			return err
+		}
+		return nil
+	}
+	if runtime.GOOS == "darwin" {
+		script := fmt.Sprintf(`tell application "Terminal" to do script %q`, joinArgs(args))
+		cmd := exec.Command("osascript", "-e", script)
+		if err := cmd.Start(); err != nil {
+			return err
+		}
+		return nil
+	}
+	for _, emu := range [][]string{
+		{"x-terminal-emulator", "-e"},
+		{"xterm", "-e"},
+		{"gnome-terminal", "--"},
+		{"alacritty", "-e"},
+		{"konsole", "-e"},
+	} {
+		if _, err := exec.LookPath(emu[0]); err != nil {
+			continue
+		}
+		cmd := exec.Command(emu[0], append(emu[1:], args...)...)
+		if err := cmd.Start(); err != nil {
+			return err
+		}
+		return nil
+	}
+	return fmt.Errorf("no terminal emulator found")
+}
+
+// joinArgs joins a command line for a terminal that takes a single program
+// argument, quoting any value that isn't a plain word.
+func joinArgs(args []string) string {
+	var b strings.Builder
+	for _, a := range args {
+		if b.Len() > 0 {
+			b.WriteByte(' ')
+		}
+		if strings.Trim(a, "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_./:") == "" {
+			b.WriteString(a)
+		} else {
+			b.WriteString(fmt.Sprintf("%q", a))
+		}
+	}
+	return b.String()
 }
 
 func (m Model) openBrowse() {
