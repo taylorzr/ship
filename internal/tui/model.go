@@ -2413,14 +2413,14 @@ func (m *Model) eventFilter() eventFilter {
 }
 
 // healthSegments splits a workload's health into display parts so callers can
-// style each individually. Green ✓ is current readiness. Blue ⏸ is a paused
-// rollout awaiting manual approval. Yellow is history: ↻N restarts, their
-// causes, and warning events in the warn window. Red is current problems:
-// ✗ not-ready (when not mid-rollout), deployment conditions, pending, failed,
-// stuck containers, and events in the recent window. Muted is older events in
-// the history window. Restarts turn red only when the workload is currently in
-// trouble; a rollout in progress shows a green ⟳ instead of the readiness
-// check.
+// style each individually. Green ✓ is current readiness. Blue is deployment
+// state: ⟳ deploying, ⏸DeploymentPaused awaiting manual approval. Yellow is
+// history and waiting: ↻N restarts, their causes, warning events in the warn
+// window, and pending pods. Red is current problems: ✗ not-ready (when not
+// mid-rollout), deployment conditions, failed, stuck containers, and events in
+// the recent window. Muted is older events in the history window. Restarts turn
+// red only when the workload is currently in trouble; a rollout in progress
+// shows a blue ⟳ instead of the readiness check.
 func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 	problems := (!h.Ready && !h.Progressing) || len(h.Conditions) > 0 || h.PendingPods > 0 || h.FailedPods > 0 || len(h.Waiting) > 0
 	restartKind := segWarn
@@ -2430,7 +2430,7 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 	var segs []healthSeg
 	switch {
 	case h.Progressing && !problems:
-		segs = append(segs, healthSeg{"⟳", segOK})
+		segs = append(segs, healthSeg{"⟳", segInfo})
 	case h.Ready:
 		segs = append(segs, healthSeg{"✓", segOK})
 	case h.Replicas > 0:
@@ -2475,7 +2475,7 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 		}
 	}
 	if h.PendingPods > 0 {
-		segs = append(segs, healthSeg{fmt.Sprintf("⏳%d", h.PendingPods), segBad})
+		segs = append(segs, healthSeg{fmt.Sprintf("⌛%d", h.PendingPods), segWarn})
 	}
 	if h.FailedPods > 0 {
 		segs = append(segs, healthSeg{fmt.Sprintf("💀%d", h.FailedPods), segBad})
@@ -2495,7 +2495,7 @@ func healthEmpty(h k8s.Health) bool {
 // formatHealth renders the cached health string as a compact plain-text column
 // value: ✓ healthy, ⟳ deploying, ✗ not ready, ⏸DeploymentPaused paused,
 // ↻N restarts, ↻OOMKilled restart causes, ⚠ error events (colored by age in
-// the TUI), 🔁 waiting/retrying, ⏳N pending, 💀N failed, ⚠ conditions.
+// the TUI), ↺ waiting/retrying, ⌛N pending, 💀N failed, ⚠ conditions.
 func formatHealth(health string, ev eventFilter) string {
 	h := parseHealth(health)
 	if healthEmpty(h) {
@@ -2537,12 +2537,13 @@ var waitingReasons = map[string]bool{
 	"FailedScheduling":                true,
 }
 
-// reasonPrefix picks the symbol prefix for a reason: 🔁 for waiting/retry
+// reasonPrefix picks the symbol prefix for a reason: ↺ for waiting/retry
 // states, ⚠ for everything else bad. Restart causes use their own ↻ marker
-// (see healthSegments).
+// (see healthSegments). Text glyphs only: emoji glyphs (🔁, ⏳, 💀, ⚠) ignore
+// ANSI foreground colors, so they'd never match the segment color.
 func reasonPrefix(s string) string {
 	if waitingReasons[s] {
-		return "🔁"
+		return "↺"
 	}
 	return "⚠"
 }
@@ -2561,10 +2562,10 @@ func detailsText(health, contributors string, ev eventFilter) string {
 }
 
 // renderHealthColored styles each health segment individually: green ✓ (or a
-// green ⟳ mid-rollout), yellow history (restarts, causes, warn-window events),
-// red current problems (not-ready, conditions, pending, failed, stuck
-// containers, recent events), and muted older events. When the workload is
-// currently in trouble the restarts are red too.
+// blue ⟳ mid-rollout), yellow history/waiting (restarts, causes, warn-window
+// events, pending pods), red current problems (not-ready, conditions, failed,
+// stuck containers, recent events), and muted older events. When the workload
+// is currently in trouble the restarts are red too.
 func renderHealthColored(health string, ev eventFilter) string {
 	h := parseHealth(health)
 	if healthEmpty(h) {
@@ -2822,6 +2823,35 @@ func helpSection(title string, entries [][2]string) string {
 	return b.String()
 }
 
+type coloredLegendEntry struct {
+	key   string
+	style lipgloss.Style
+	desc  string
+}
+
+// helpSectionColored is helpSection for entries whose key is rendered in a
+// caller-chosen style (e.g. the health-column glyphs). The padding and
+// description stay in the muted help style so the legend aligns with the rest
+// of the overlay.
+func helpSectionColored(title string, entries []coloredLegendEntry) string {
+	var b strings.Builder
+	b.WriteString(helpKey.Render(title))
+	b.WriteString("\n")
+	for _, e := range entries {
+		pad := helpKeyWidth - lipgloss.Width(e.key)
+		if pad < 1 {
+			pad = 1
+		}
+		b.WriteString("  ")
+		b.WriteString(e.style.Render(e.key))
+		b.WriteString(helpKey.Render(strings.Repeat(" ", pad)))
+		b.WriteString(" ")
+		b.WriteString(helpKey.Render(e.desc))
+		b.WriteString("\n")
+	}
+	return b.String()
+}
+
 func (m Model) renderHelpOverlay() string {
 	nav := helpSection("nav", [][2]string{
 		{"j/k", "move up/down"},
@@ -2903,20 +2933,28 @@ func (m Model) renderHelpOverlay() string {
 				}
 			}
 			actions = helpSection("actions", svcEntries)
-			legend = helpSection("legend", [][2]string{
-				{"✓", "healthy"},
-				{"✗", "not ready"},
-				{"⟳", "deploying"},
-				{"↻N", "restarts"},
-				{"↻OOMKilled", "last restart cause"},
-				{"⏸DeploymentPaused", "paused (manual approval)"},
-				{"⏳N", "pods pending"},
-				{"💀N", "pods failed (dead)"},
-				{"⚠OOMKilling", "error event (red fresh · yellow recent · dim older)"},
-				{"🔁CrashLoopBackOff", "waiting / will retry"},
-				{"~N", "transient events hidden"},
-				{"⚠ProgressDeadlineExceeded", "rollout stuck"},
-				{"⚠Degraded", "analysis degraded"},
+			legend = helpSectionColored("legend", []coloredLegendEntry{
+				{"✓", healthOK, "healthy"},
+				{"✗", healthBad, "not ready"},
+				{"⟳", healthInfo, "deploying"},
+				{"↻N", healthWarn, "restarts"},
+				{"↻OOMKilled", healthWarn, "last restart cause"},
+				{"⏸DeploymentPaused", healthInfo, "paused (manual approval)"},
+				{"⌛N", healthWarn, "pods pending"},
+				{"💀N", healthBad, "pods failed"},
+				{"⚠SomeError", healthBad, "error event"},
+				{"↺CrashLoopBackOff", healthBad, "waiting / will retry"},
+				{"~N", healthMuted, "transient events hidden"},
+				{"⚠ProgressDeadlineExceeded", healthBad, "rollout stuck"},
+				{"⚠Degraded", healthBad, "analysis degraded"},
+			})
+			legend += "\n" + helpSectionColored("colors", []coloredLegendEntry{
+				{"✓", healthOK, "healthy"},
+				{"⟳", healthInfo, "deploying"},
+				{"⏸", healthInfo, "paused"},
+				{"↻⌛", healthWarn, "restarts · pending · warn events"},
+				{"✗", healthBad, "not ready · failed · conditions · recent events"},
+				{"~", healthMuted, "older events"},
 			})
 		}
 	}
