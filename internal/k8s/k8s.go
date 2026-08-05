@@ -111,3 +111,21 @@ func SHAFromImage(tag string) (string, bool) {
 	}
 	return raw, true
 }
+
+// ShortRef shortens a version ref for display. Raw or "sha-" prefixed SHAs
+// render as the short SHA with the prefix kept and an ellipsis appended when
+// truncation actually happened; anything else (tags) is returned unchanged.
+func ShortRef(ref string) string {
+	sha, ok := SHAFromImage(ref)
+	if !ok {
+		return ref
+	}
+	short := sha
+	if len(short) > 7 {
+		short = short[:7] + "…"
+	}
+	if strings.HasPrefix(ref, "sha-") {
+		return "sha-" + short
+	}
+	return short
+}

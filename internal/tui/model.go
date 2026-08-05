@@ -442,7 +442,7 @@ func (m *Model) loadFromCache() {
 		if !svcRepos[v.Repo] {
 			continue
 		}
-		title := v.ProdRef
+		title := k8s.ShortRef(v.ProdRef)
 		if title == "" {
 			title = "-"
 		}
