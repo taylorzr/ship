@@ -758,7 +758,7 @@ func (m *Model) currentSnapshot() notify.Snapshot {
 }
 
 // healthProblems mirrors the TUI's "something to be concerned about" predicate
-// for a deployment: not ready and not deploying, failing conditions, pending or
+// for a deployment: not ready and not progressing, failing conditions, pending or
 // failed pods, waiting containers, or fresh warning events.
 func healthProblems(h k8s.Health) bool {
 	return (!h.Ready && !h.Progressing) || len(h.Conditions) > 0 || h.PendingPods > 0 ||
@@ -2414,7 +2414,7 @@ func (m *Model) eventFilter() eventFilter {
 
 // healthSegments splits a workload's health into display parts so callers can
 // style each individually. Green ✓ is current readiness. Blue is deployment
-// state: ⟳ deploying, ⏸DeploymentPaused awaiting manual approval. Yellow is
+// state: ⟳ Progressing, ⏸DeploymentPaused awaiting manual approval. Yellow is
 // history and waiting: ↻N restarts, their causes, warning events in the warn
 // window, and pending pods. Red is current problems: ✗ not-ready (when not
 // mid-rollout), deployment conditions, failed, stuck containers, and events in
@@ -2493,7 +2493,7 @@ func healthEmpty(h k8s.Health) bool {
 }
 
 // formatHealth renders the cached health string as a compact plain-text column
-// value: ✓ healthy, ⟳ deploying, ✗ not ready, ⏸DeploymentPaused paused,
+// value: ✓ healthy, ⟳ Progressing, ✗ not ready, ⏸DeploymentPaused paused,
 // ↻N restarts, ↻OOMKilled restart causes, ⚠ error events (colored by age in
 // the TUI), ∞ waiting/retrying, ⌛N pending, 💀N failed, ⚠ conditions.
 func formatHealth(health string, ev eventFilter) string {
@@ -2949,7 +2949,7 @@ func (m Model) renderHelpOverlay() string {
 			legend = helpSectionColored("legend", []coloredLegendEntry{
 				{"✓", healthOK, "healthy"},
 				{"✗", healthBad, "unhealthy"},
-				{"⟳/⏸", healthInfo, "deploying · paused"},
+				{"⟳/⏸", healthInfo, "Progressing · DeploymentPaused"},
 				{"↻N", healthWarn, "restarts"},
 				{"↻OOMKilled", healthWarn, "last restart cause"},
 				{"⌛N", healthWarn, "pods pending"},
@@ -2961,7 +2961,7 @@ func (m Model) renderHelpOverlay() string {
 			tb := m.k8sTimebox().Normalized()
 			legend += "\n" + helpSectionColored("colors", []coloredLegendEntry{
 				{"✓", healthOK, "healthy"},
-				{"⟳/⏸", healthInfo, "deploying · paused"},
+				{"⟳/⏸", healthInfo, "Progressing · DeploymentPaused"},
 				{"✗", healthBad, "unhealthy · failed pods · conditions · events ≤" + shortDur(tb.Recent)},
 				{"↻⌛", healthWarn, "restarts · pending · events ≤" + shortDur(tb.Warn)},
 				{"~", healthMuted, "older events ≤" + shortDur(tb.History) + " · dropped after"},
