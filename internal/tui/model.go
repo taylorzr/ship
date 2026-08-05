@@ -3260,6 +3260,9 @@ func (m Model) openK9s(svc config.ServiceConfig) {
 	} else {
 		args = append(args, "--command", "deploy")
 	}
+	if shipLog != nil {
+		shipLog.Printf("open k9s: launching %q (kitty=%q terminal=%q)", args, os.Getenv("KITTY_WINDOW_ID"), os.Getenv("TERMINAL"))
+	}
 	if err := launchTerminal(args, "k9s: "+svc.Name); err != nil {
 		if shipLog != nil {
 			shipLog.Printf("open k9s: %v", err)
