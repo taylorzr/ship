@@ -104,6 +104,27 @@ func TestRenderRowMarginOnlyHighlight(t *testing.T) {
 	}
 }
 
+func TestRangeDur(t *testing.T) {
+	tests := []struct {
+		name string
+		a, b time.Duration
+		want string
+	}{
+		{"shared minute unit", time.Minute, 10 * time.Minute, "1–10m"},
+		{"shared hour unit", time.Hour, 24 * time.Hour, "1–24h"},
+		{"mixed minute and hour", 10 * time.Minute, time.Hour, "10m–1h"},
+		{"mixed seconds and minutes", 90 * time.Second, 10 * time.Minute, "90s–10m"},
+		{"shared second unit", 30 * time.Second, 90 * time.Second, "30–90s"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := rangeDur(tt.a, tt.b); got != tt.want {
+				t.Errorf("rangeDur(%v, %v) = %q, want %q", tt.a, tt.b, got, tt.want)
+			}
+		})
+	}
+}
+
 func TestRenderRowTitleOnlyStillHighlights(t *testing.T) {
 	forceColor()
 	r := row{title: "some plain section row"}

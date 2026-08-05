@@ -63,7 +63,6 @@ var (
 	headerStyle   = lipgloss.NewStyle().Foreground(lipgloss.Color("244"))
 	errorStyle    = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	overflowStyle = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
-	healthOK      = lipgloss.NewStyle().Foreground(lipgloss.Color("84"))
 	healthWarn    = lipgloss.NewStyle().Foreground(lipgloss.Color("220"))
 	healthBad     = lipgloss.NewStyle().Foreground(lipgloss.Color("196"))
 	healthInfo    = lipgloss.NewStyle().Foreground(lipgloss.Color("75"))
@@ -2443,7 +2442,7 @@ func (m *Model) eventFilter() eventFilter {
 }
 
 // healthSegments splits a workload's health into display parts so callers can
-// style each individually. Green ✓ is current readiness. Blue is deployment
+// style each individually. Plain ✓ is current readiness. Blue is deployment
 // state: ⟳ Progressing, ⏸DeploymentPaused awaiting manual approval. Yellow is
 // history and waiting: ↻N restarts, their causes, warning events in the warn
 // window, and pending pods. Red is current problems: ✗ not-ready (when not
@@ -2612,7 +2611,7 @@ func detailsText(health, contributors string, ev eventFilter) string {
 	return strings.Join(parts, " · ")
 }
 
-// renderHealthColored styles each health segment individually: green ✓ (or a
+// renderHealthColored styles each health segment individually: plain ✓ (or a
 // blue ⟳ mid-rollout), yellow history/waiting (restarts, causes, warn-window
 // events, pending pods), red current problems (not-ready, conditions, failed,
 // stuck containers, recent events), and muted older events. When the workload
@@ -2635,7 +2634,7 @@ func renderHealthColored(health string, ev eventFilter) string {
 		case segInfo:
 			parts[i] = healthInfo.Render(s.text)
 		default:
-			parts[i] = healthOK.Render(s.text)
+			parts[i] = s.text
 		}
 	}
 	return strings.Join(parts, " ")
@@ -2925,6 +2924,16 @@ func shortDur(d time.Duration) string {
 	}
 }
 
+// rangeDur renders a duration range with an en dash, collapsing a shared unit
+// (1–10m, not 1m–10m) but keeping both units when they differ (90s–10m).
+func rangeDur(a, b time.Duration) string {
+	sa, sb := shortDur(a), shortDur(b)
+	if len(sa) > 1 && len(sb) > 1 && sa[len(sa)-1] == sb[len(sb)-1] {
+		return sa[:len(sa)-1] + "–" + sb
+	}
+	return sa + "–" + sb
+}
+
 func (m Model) renderHelpOverlay() string {
 	nav := helpSection("nav", [][2]string{
 		{"j/k", "move up/down"},
@@ -3006,25 +3015,24 @@ func (m Model) renderHelpOverlay() string {
 				}
 			}
 			actions = helpSection("actions", svcEntries)
-			legend = helpSectionColored("legend", []coloredLegendEntry{
-				{"✓", healthOK, "healthy"},
-				{"✗", healthBad, "unhealthy"},
-				{"⟳/⏸", healthInfo, "Progressing · DeploymentPaused"},
-				{"↻N", healthWarn, "restarts"},
-				{"↻OOMKilled", healthWarn, "last restart cause"},
-				{"⌛N", healthWarn, "pods pending"},
-				{"💀N", healthBad, "pods failed"},
-				{"⚠SomeError", healthBad, "error event"},
-				{"∞SomeBackoff", healthBad, "waiting / will retry"},
-				{"~N", healthMuted, "transient events hidden"},
+			legend = helpSection("legend", [][2]string{
+				{"✓", "healthy"},
+				{"✗", "unhealthy"},
+				{"⟳/⏸", "Progressing · DeploymentPaused"},
+				{"↻N", "restarts"},
+				{"↻OOMKilled", "last restart cause"},
+				{"⌛N", "pods pending"},
+				{"💀N", "pods failed"},
+				{"⚠SomeError", "error event"},
+				{"∞SomeBackoff", "retrying event"},
+				{"~N", "transient events hidden"},
 			})
 			tb := m.k8sTimebox().Normalized()
 			legend += "\n" + helpSectionColored("colors", []coloredLegendEntry{
-				{"✓", healthOK, "healthy"},
-				{"⟳/⏸", healthInfo, "Progressing · DeploymentPaused"},
-				{"✗", healthBad, "unhealthy · failed pods · conditions · events ≤" + shortDur(tb.Recent)},
-				{"↻⌛", healthWarn, "restarts · pending · events ≤" + shortDur(tb.Warn)},
-				{"~", healthMuted, "older events ≤" + shortDur(tb.History) + " · age shown · dropped after"},
+				{"red", healthBad, "unhealthy · conditions · failed pods · events ≤" + shortDur(tb.Recent)},
+				{"yellow", healthWarn, "events " + rangeDur(tb.Recent, tb.Warn) + " · restarts · pending"},
+				{"gray", healthMuted, "older events " + rangeDur(tb.Warn, tb.History)},
+				{"blue", healthInfo, "Progressing · DeploymentPaused"},
 			})
 		}
 	}
