@@ -346,7 +346,7 @@ func (m *Model) applyFilters() {
 				if m.sections[i].draftFilter == "draft" && m.sections[i].name != "Services" && r.draft {
 					continue
 				}
-				if m.sections[i].statusFilter == "mergeable" && (r.ci != "success" || r.review != "APPROVED") {
+				if m.sections[i].statusFilter == "mergeable" && r.mergeState != "" && !notify.Mergeable(r.mergeState) {
 					continue
 				}
 				if m.sections[i].hideTeamReviews && r.role == "review-team" {
@@ -729,11 +729,11 @@ func (m *Model) currentSnapshot() notify.Snapshot {
 	prs, _ := m.store.CachedPRs("")
 	for _, p := range prs {
 		snap.PRs[notify.PRKey(p.Repo, p.Number, p.Role)] = notify.PRState{
-			Role:      p.Role,
-			Title:     p.Title,
-			Review:    p.ReviewDecision,
-			CI:        p.CIState,
-			Mergeable: p.Mergeable,
+			Role:       p.Role,
+			Title:      p.Title,
+			Review:     p.ReviewDecision,
+			CI:         p.CIState,
+			MergeState: p.MergeState,
 		}
 	}
 	vers, _ := m.store.CachedVersions()
@@ -2495,7 +2495,7 @@ func healthEmpty(h k8s.Health) bool {
 // formatHealth renders the cached health string as a compact plain-text column
 // value: ✓ healthy, ⟳ deploying, ✗ not ready, ⏸DeploymentPaused paused,
 // ↻N restarts, ↻OOMKilled restart causes, ⚠ error events (colored by age in
-// the TUI), ↺ waiting/retrying, ⌛N pending, 💀N failed, ⚠ conditions.
+// the TUI), ∞ waiting/retrying, ⌛N pending, 💀N failed, ⚠ conditions.
 func formatHealth(health string, ev eventFilter) string {
 	h := parseHealth(health)
 	if healthEmpty(h) {
@@ -2537,13 +2537,13 @@ var waitingReasons = map[string]bool{
 	"FailedScheduling":                true,
 }
 
-// reasonPrefix picks the symbol prefix for a reason: ↺ for waiting/retry
+// reasonPrefix picks the symbol prefix for a reason: ∞ for waiting/retry
 // states, ⚠ for everything else bad. Restart causes use their own ↻ marker
 // (see healthSegments). Text glyphs only: emoji glyphs (🔁, ⏳, 💀, ⚠) ignore
 // ANSI foreground colors, so they'd never match the segment color.
 func reasonPrefix(s string) string {
 	if waitingReasons[s] {
-		return "↺"
+		return "∞"
 	}
 	return "⚠"
 }
@@ -2852,6 +2852,19 @@ func helpSectionColored(title string, entries []coloredLegendEntry) string {
 	return b.String()
 }
 
+// shortDur renders a duration compactly (1m, 10m, 1h) instead of Go's padded
+// String form (1m0s, 1h0m0s).
+func shortDur(d time.Duration) string {
+	switch {
+	case d%time.Hour == 0:
+		return fmt.Sprintf("%dh", int(d/time.Hour))
+	case d%time.Minute == 0:
+		return fmt.Sprintf("%dm", int(d/time.Minute))
+	default:
+		return fmt.Sprintf("%ds", int(d/time.Second))
+	}
+}
+
 func (m Model) renderHelpOverlay() string {
 	nav := helpSection("nav", [][2]string{
 		{"j/k", "move up/down"},
@@ -2935,26 +2948,23 @@ func (m Model) renderHelpOverlay() string {
 			actions = helpSection("actions", svcEntries)
 			legend = helpSectionColored("legend", []coloredLegendEntry{
 				{"✓", healthOK, "healthy"},
-				{"✗", healthBad, "not ready"},
-				{"⟳", healthInfo, "deploying"},
+				{"✗", healthBad, "unhealthy"},
+				{"⟳/⏸", healthInfo, "deploying · paused"},
 				{"↻N", healthWarn, "restarts"},
 				{"↻OOMKilled", healthWarn, "last restart cause"},
-				{"⏸DeploymentPaused", healthInfo, "paused (manual approval)"},
 				{"⌛N", healthWarn, "pods pending"},
 				{"💀N", healthBad, "pods failed"},
 				{"⚠SomeError", healthBad, "error event"},
-				{"↺CrashLoopBackOff", healthBad, "waiting / will retry"},
+				{"∞SomeBackoff", healthBad, "waiting / will retry"},
 				{"~N", healthMuted, "transient events hidden"},
-				{"⚠ProgressDeadlineExceeded", healthBad, "rollout stuck"},
-				{"⚠Degraded", healthBad, "analysis degraded"},
 			})
+			tb := m.k8sTimebox().Normalized()
 			legend += "\n" + helpSectionColored("colors", []coloredLegendEntry{
 				{"✓", healthOK, "healthy"},
-				{"⟳", healthInfo, "deploying"},
-				{"⏸", healthInfo, "paused"},
-				{"↻⌛", healthWarn, "restarts · pending · warn events"},
-				{"✗", healthBad, "not ready · failed · conditions · recent events"},
-				{"~", healthMuted, "older events"},
+				{"⟳/⏸", healthInfo, "deploying · paused"},
+				{"✗", healthBad, "unhealthy · failed pods · conditions · events ≤" + shortDur(tb.Recent)},
+				{"↻⌛", healthWarn, "restarts · pending · events ≤" + shortDur(tb.Warn)},
+				{"~", healthMuted, "older events ≤" + shortDur(tb.History) + " · dropped after"},
 			})
 		}
 	}

@@ -97,7 +97,7 @@ func NewRealClient(ctx context.Context, kubeconfig, context, loginCmd string, tb
 			ch <- result{nil, fmt.Errorf("dynamic client for %q: %w", actualCtx, err)}
 			return
 		}
-		ch <- result{&RealClient{clientset: clientset, dynamicClient: dyn, context: actualCtx, loginCmd: loginCmd, timebox: tb.normalize()}, nil}
+		ch <- result{&RealClient{clientset: clientset, dynamicClient: dyn, context: actualCtx, loginCmd: loginCmd, timebox: tb.Normalized()}, nil}
 	}()
 
 	select {

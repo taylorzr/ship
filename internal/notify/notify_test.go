@@ -48,8 +48,8 @@ func has(kinds []Kind, k Kind) bool {
 }
 
 func TestDiffNoChange(t *testing.T) {
-	prev := addPR(Snapshot{}, "org/repo", 1, "mine", PRState{Title: "T", Review: "APPROVED", CI: "success", Mergeable: "MERGEABLE"})
-	cur := addPR(Snapshot{}, "org/repo", 1, "mine", PRState{Title: "T", Review: "APPROVED", CI: "success", Mergeable: "MERGEABLE"})
+	prev := addPR(Snapshot{}, "org/repo", 1, "mine", PRState{Title: "T", Review: "APPROVED", CI: "success", MergeState: "CLEAN"})
+	cur := addPR(Snapshot{}, "org/repo", 1, "mine", PRState{Title: "T", Review: "APPROVED", CI: "success", MergeState: "CLEAN"})
 	if ev := Diff(prev, cur); len(ev) != 0 {
 		t.Fatalf("expected no events, got %v", ev)
 	}
@@ -104,10 +104,23 @@ func TestCIFailed(t *testing.T) {
 }
 
 func TestMergeable(t *testing.T) {
-	prev := addPR(Snapshot{}, "org/repo", 1, "mine", PRState{Title: "T", Review: "APPROVED", CI: "pending", Mergeable: "MERGEABLE"})
-	cur := addPR(Snapshot{}, "org/repo", 1, "mine", PRState{Title: "T", Review: "APPROVED", CI: "success", Mergeable: "MERGEABLE"})
+	// BLOCKED -> CLEAN fires once GitHub computes the PR mergeable.
+	prev := addPR(Snapshot{}, "org/repo", 1, "mine", PRState{Title: "T", MergeState: "BLOCKED"})
+	cur := addPR(Snapshot{}, "org/repo", 1, "mine", PRState{Title: "T", MergeState: "CLEAN"})
 	if !has(kinds(Diff(prev, cur)), KindMergeable) {
 		t.Fatal("expected mergeable event")
+	}
+	// UNSTABLE (mergeable with a failing non-required check) counts too.
+	prev2 := addPR(Snapshot{}, "org/repo", 2, "mine", PRState{Title: "T", MergeState: "BEHIND"})
+	cur2 := addPR(Snapshot{}, "org/repo", 2, "mine", PRState{Title: "T", MergeState: "UNSTABLE"})
+	if !has(kinds(Diff(prev2, cur2)), KindMergeable) {
+		t.Fatal("expected mergeable event for UNSTABLE")
+	}
+	// UNKNOWN -> CLEAN is not a transition: UNKNOWN is already kept visible.
+	prev3 := addPR(Snapshot{}, "org/repo", 3, "mine", PRState{Title: "T", MergeState: "UNKNOWN"})
+	cur3 := addPR(Snapshot{}, "org/repo", 3, "mine", PRState{Title: "T", MergeState: "CLEAN"})
+	if has(kinds(Diff(prev3, cur3)), KindMergeable) {
+		t.Fatal("UNKNOWN -> CLEAN should not fire mergeable")
 	}
 }
 
@@ -147,7 +160,7 @@ func TestNewComment(t *testing.T) {
 }
 
 func TestIsResolved(t *testing.T) {
-	cur := addPR(Snapshot{}, "org/repo", 1, "mine", PRState{Title: "T", Review: "APPROVED", CI: "success", Mergeable: "MERGEABLE"})
+	cur := addPR(Snapshot{}, "org/repo", 1, "mine", PRState{Title: "T", Review: "APPROVED", CI: "success", MergeState: "CLEAN"})
 
 	if !IsResolved(Event{Kind: KindCIFailed, Repo: "org/repo", Number: 1}, cur) {
 		t.Fatal("ci-failed should resolve once CI is green again")
@@ -159,7 +172,7 @@ func TestIsResolved(t *testing.T) {
 		t.Fatal("review-change should not be resolved while review still APPROVED")
 	}
 
-	curFail := addPR(Snapshot{}, "org/repo", 1, "mine", PRState{Title: "T", Review: "APPROVED", CI: "failure", Mergeable: "MERGEABLE"})
+	curFail := addPR(Snapshot{}, "org/repo", 1, "mine", PRState{Title: "T", Review: "APPROVED", CI: "failure", MergeState: "BLOCKED"})
 	if IsResolved(Event{Kind: KindCIFailed, Repo: "org/repo", Number: 1}, curFail) {
 		t.Fatal("ci-failed should not resolve while CI is still failing")
 	}
@@ -195,7 +208,7 @@ func TestIsResolved(t *testing.T) {
 }
 
 func TestSnapshotJSON(t *testing.T) {
-	s := addPR(Snapshot{}, "org/repo", 1, "mine", PRState{Title: "T", Review: "APPROVED", CI: "success", Mergeable: "MERGEABLE"})
+	s := addPR(Snapshot{}, "org/repo", 1, "mine", PRState{Title: "T", Review: "APPROVED", CI: "success", MergeState: "CLEAN"})
 	s = addVersion(s, "org/svc", VersionState{Problems: true, PendingTags: []string{"v11"}, Untagged: 2})
 	s = addActivity(s, "org/repo", 1, ActivityState{CommentAuthor: "alice", CommentAt: "2026-01-01T00:00:00Z"})
 

@@ -42,11 +42,11 @@ type Event struct {
 
 // PRState is the subset of a PR row the detector needs.
 type PRState struct {
-	Role      string
-	Title     string
-	Review    string
-	CI        string
-	Mergeable string
+	Role       string
+	Title      string
+	Review     string
+	CI         string
+	MergeState string
 }
 
 // VersionState is the subset of a service version row the detector needs.
@@ -103,10 +103,25 @@ func prURL(repo string, number int) string {
 	return fmt.Sprintf("https://github.com/%s/pull/%d", repo, number)
 }
 
-// mergeReady is the TUI's "ready to merge" condition: approved review, green
-// CI, and no merge conflicts. CIState is stored lowercase ("success").
+// Mergeable reports whether GitHub's authoritative MergeStateStatus means "can
+// merge now". It relies on GitHub rather than deriving from CI/review, which
+// varies by repo: CI or review may not be required, and up-to-date only matters
+// where branch protection says so. CLEAN is fully ready, UNSTABLE is mergeable
+// with a failing non-required check, HAS_HOOKS is mergeable via pre-receive
+// hooks. UNKNOWN (still being computed) is kept so PRs don't flicker out of
+// "mergeable" views while GitHub calculates.
+func Mergeable(mergeState string) bool {
+	switch mergeState {
+	case "CLEAN", "UNSTABLE", "HAS_HOOKS", "UNKNOWN":
+		return true
+	}
+	return false
+}
+
+// mergeReady reports whether GitHub considers the PR ready to merge (see
+// Mergeable).
 func mergeReady(p PRState) bool {
-	return p.Review == "APPROVED" && p.CI == "success" && p.Mergeable == "MERGEABLE"
+	return Mergeable(p.MergeState)
 }
 
 func contains(list []string, s string) bool {

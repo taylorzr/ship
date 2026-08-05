@@ -46,9 +46,9 @@ type EventTimebox struct {
 	History time.Duration
 }
 
-// normalize fills in defaults for unset durations and clamps the buckets so
+// Normalized fills in defaults for unset durations and clamps the buckets so
 // Warn >= Recent and History >= Warn even with a misconfigured caller.
-func (t EventTimebox) normalize() EventTimebox {
+func (t EventTimebox) Normalized() EventTimebox {
 	if t.Recent <= 0 {
 		t.Recent = time.Minute
 	}
