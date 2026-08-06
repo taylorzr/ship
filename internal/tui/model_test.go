@@ -77,6 +77,85 @@ func TestProgressingHealthShowsReplicaProgress(t *testing.T) {
 	}
 }
 
+func TestHealthSegmentsRolloutIgnoresTransientSignals(t *testing.T) {
+	h := k8s.Health{Progressing: true, ReadyReplicas: 1, Replicas: 3, PendingPods: 2, Conditions: []string{"Unavailable"}}
+	segs := healthSegments(h, eventFilter{})
+	if len(segs) == 0 || segs[0].text != "⟳ Progressing 1/3" {
+		t.Fatalf("segments = %v, want first segment ⟳ Progressing 1/3", segs)
+	}
+	for _, s := range segs {
+		if strings.HasPrefix(s.text, "✖") {
+			t.Fatalf("mid-rollout flagged unhealthy: %v", segs)
+		}
+		if strings.Contains(s.text, "Unavailable") {
+			t.Fatalf("mid-rollout surfaced Unavailable condition: %v", segs)
+		}
+	}
+	found := false
+	for _, s := range segs {
+		if s.text == "⌛2" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("segments = %v, want pending count ⌛2 still shown", segs)
+	}
+}
+
+func TestHealthSegmentsRolloutFlagsRealProblems(t *testing.T) {
+	cases := []struct {
+		name string
+		h    k8s.Health
+		want string
+	}{
+		{"stuck waiting", k8s.Health{Progressing: true, ReadyReplicas: 1, Replicas: 3, Waiting: []string{"ImagePullBackOff"}}, "∞ImagePullBackOff"},
+		{"hard condition", k8s.Health{Progressing: true, ReadyReplicas: 1, Replicas: 3, Conditions: []string{"ReplicaFailure"}}, "⚠ReplicaFailure"},
+		{"failed pods", k8s.Health{Progressing: true, ReadyReplicas: 1, Replicas: 3, FailedPods: 1, FailedReasons: []string{"Evicted"}}, "💀1"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			segs := healthSegments(tc.h, eventFilter{})
+			hasX := false
+			hasWant := false
+			for _, s := range segs {
+				if strings.HasPrefix(s.text, "✖") {
+					hasX = true
+				}
+				if s.text == tc.want {
+					hasWant = true
+				}
+			}
+			if !hasX {
+				t.Fatalf("segments = %v, want ✖ headline", segs)
+			}
+			if !hasWant {
+				t.Fatalf("segments = %v, want segment %q", segs, tc.want)
+			}
+		})
+	}
+}
+
+func TestHealthProblemsConsistentDuringRollout(t *testing.T) {
+	if healthProblems(k8s.Health{Progressing: true, ReadyReplicas: 1, Replicas: 3}) {
+		t.Fatal("mid-rollout without failures should not be a problem")
+	}
+	if healthProblems(k8s.Health{Progressing: true, PendingPods: 2, Conditions: []string{"Unavailable"}}) {
+		t.Fatal("transient pending pods / Unavailable should not be a problem during rollout")
+	}
+	if !healthProblems(k8s.Health{Progressing: true, Waiting: []string{"ImagePullBackOff"}}) {
+		t.Fatal("stuck waiting during rollout should be a problem")
+	}
+	if !healthProblems(k8s.Health{Progressing: true, FailedPods: 1}) {
+		t.Fatal("failed pods during rollout should be a problem")
+	}
+	if !healthProblems(k8s.Health{Progressing: true, Conditions: []string{"ReplicaFailure"}}) {
+		t.Fatal("hard condition during rollout should be a problem")
+	}
+	if !healthProblems(k8s.Health{PendingPods: 1}) {
+		t.Fatal("non-progressing workload with pending pods should stay a problem")
+	}
+}
+
 func TestHealthRoundTripPreservesEventAges(t *testing.T) {
 	h := k8s.Health{
 		Ready:         true,

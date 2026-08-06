@@ -882,10 +882,29 @@ func (m *Model) currentSnapshot() notify.Snapshot {
 
 // healthProblems mirrors the TUI's "something to be concerned about" predicate
 // for a deployment: not ready and not progressing, failing conditions, pending or
-// failed pods, waiting containers, or fresh warning events.
+// failed pods, waiting containers, or fresh warning events. A rollout in
+// progress is only a problem if it's genuinely broken (failed pods, stuck
+// waiting containers, hard conditions) — transient pending pods and the
+// "Unavailable" condition it passes through are not.
 func healthProblems(h k8s.Health) bool {
+	if h.Progressing {
+		return h.FailedPods > 0 || len(h.Waiting) > 0 || len(h.FailedReasons) > 0 || hasHardCondition(h.Conditions)
+	}
 	return (!h.Ready && !h.Progressing) || len(h.Conditions) > 0 || h.PendingPods > 0 ||
 		h.FailedPods > 0 || len(h.Waiting) > 0 || len(h.RecentEvents) > 0 || len(h.Events) > 0
+}
+
+// hasHardCondition reports whether any deployment condition is a genuine
+// failure. "Unavailable" is excluded: it's the transient state any rollout
+// passes through while re-establishing availability and is already conveyed
+// by the ⟳/✖ headline and the ready-replica count.
+func hasHardCondition(conds []string) bool {
+	for _, c := range conds {
+		if c != "Unavailable" {
+			return true
+		}
+	}
+	return false
 }
 
 // parsePendingTagNames extracts the tag names from the cached "tag|title, tag|title" list.
@@ -2586,12 +2605,20 @@ func (m *Model) eventFilter() eventFilter {
 // 2/5"), ⏸DeploymentPaused awaiting manual approval. Yellow is
 // history and waiting: ↻N restarts, their causes, warning events in the warn
 // window, and pending pods. Red is current problems: ✖ not-ready (when not
-// mid-rollout), deployment conditions, failed pods and their reasons (e.g.
-// Evicted), stuck containers, and events in the recent window. Muted is older events in the history window. Restarts turn
+// mid-rollout), hard deployment conditions (ReplicaFailure, Degraded,
+// ProgressDeadlineExceeded), failed pods and their reasons (e.g. Evicted),
+// stuck containers, and events in the recent window. A rollout in progress
+// keeps the blue ⟳ headline unless it's genuinely broken — the transient
+// "Unavailable" condition and pending pods it passes through don't flip it to
+// ✖. Muted is older events in the history window. Restarts turn
 // red only when the workload is currently in trouble; a rollout in progress
 // shows a blue ⟳ instead of the readiness check.
 func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
-	problems := (!h.Ready && !h.Progressing) || len(h.Conditions) > 0 || h.PendingPods > 0 || h.FailedPods > 0 || len(h.Waiting) > 0
+	problems := h.FailedPods > 0 || len(h.Waiting) > 0 || len(h.FailedReasons) > 0 ||
+		(!h.Ready && !h.Progressing) || hasHardCondition(h.Conditions)
+	if !h.Progressing {
+		problems = problems || h.PendingPods > 0
+	}
 	restartKind := segWarn
 	if problems {
 		restartKind = segBad
@@ -2643,6 +2670,9 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 	addEvents(h.Events, segWarn)
 	addEvents(h.OldEvents, segMuted)
 	for _, c := range h.Conditions {
+		if h.Progressing && c == "Unavailable" {
+			continue
+		}
 		if s := shortEvent(c); s != "" {
 			segs = append(segs, healthSeg{reasonPrefix(s) + s, segBad})
 		}
