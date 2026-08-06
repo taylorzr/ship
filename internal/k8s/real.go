@@ -331,6 +331,7 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 	podNames := make(map[string]bool, len(pods.Items))
 	seenCauses := make(map[string]bool)
 	seenWaiting := make(map[string]bool)
+	seenFailedReasons := make(map[string]bool)
 	for i := range pods.Items {
 		pod := &pods.Items[i]
 		podNames[pod.Name] = true
@@ -339,6 +340,13 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 			h.PendingPods++
 		case corev1.PodFailed:
 			h.FailedPods++
+			// Evicted/NodeLost/etc. survive only while the pod object does —
+			// kubelet deletes evicted pods quickly, so this is the durable
+			// signal until the pod is gone.
+			if reason := pod.Status.Reason; reason != "" && !seenFailedReasons[reason] {
+				seenFailedReasons[reason] = true
+				h.FailedReasons = append(h.FailedReasons, reason)
+			}
 		}
 		for _, cs := range pod.Status.ContainerStatuses {
 			h.Restarts += cs.RestartCount
@@ -372,6 +380,33 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 	recentCutoff := metav1.NewTime(now.Add(-c.timebox.Recent))
 	warnCutoff := metav1.NewTime(now.Add(-c.timebox.Warn))
 	historyCutoff := metav1.NewTime(now.Add(-c.timebox.History))
+	// Pod-level events live and die with their pod, so a deleted pod's events
+	// (e.g. an Evicted warning) are orphaned until the cluster's event GC
+	// sweeps them. To still surface those within that window, match their
+	// involvedObject name against the workload's ReplicaSet name prefixes
+	// (`<rs>-`), which identify pods by generation even after they're gone.
+	// The RS list is loaded lazily, only when an orphaned pod event is seen.
+	var rsPrefixes []string
+	rsListed := false
+	loadRSPrefixes := func() {
+		if rsListed {
+			return
+		}
+		rsListed = true
+		rss, err := c.clientset.AppsV1().ReplicaSets(namespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return // fail-open: fall back to current-pod matching only
+		}
+		for i := range rss.Items {
+			rs := &rss.Items[i]
+			for _, o := range rs.OwnerReferences {
+				if o.Kind == kind && o.Name == name {
+					rsPrefixes = append(rsPrefixes, rs.Name+"-")
+					break
+				}
+			}
+		}
+	}
 	latest := map[string]metav1.Time{}
 	for i := range events.Items {
 		ev := &events.Items[i]
@@ -383,6 +418,19 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 			// workload-level warning (e.g. FailedRollout)
 		} else if obj.Kind == "Pod" && podNames[obj.Name] {
 			// pod-level warning (e.g. OOMKilled)
+		} else if obj.Kind == "Pod" {
+			// pod-level warning for a pod no longer in the list (e.g. Evicted)
+			loadRSPrefixes()
+			orphan := false
+			for _, p := range rsPrefixes {
+				if strings.HasPrefix(obj.Name, p) {
+					orphan = true
+					break
+				}
+			}
+			if !orphan {
+				continue
+			}
 		} else {
 			continue
 		}

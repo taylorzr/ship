@@ -2446,8 +2446,8 @@ func (m *Model) eventFilter() eventFilter {
 // state: ⟳ Progressing, ⏸DeploymentPaused awaiting manual approval. Yellow is
 // history and waiting: ↻N restarts, their causes, warning events in the warn
 // window, and pending pods. Red is current problems: ✖ not-ready (when not
-// mid-rollout), deployment conditions, failed, stuck containers, and events in
-// the recent window. Muted is older events in the history window. Restarts turn
+// mid-rollout), deployment conditions, failed pods and their reasons (e.g.
+// Evicted), stuck containers, and events in the recent window. Muted is older events in the history window. Restarts turn
 // red only when the workload is currently in trouble; a rollout in progress
 // shows a blue ⟳ instead of the readiness check.
 func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
@@ -2503,6 +2503,11 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 			segs = append(segs, healthSeg{reasonPrefix(s) + s, segBad})
 		}
 	}
+	for _, r := range h.FailedReasons {
+		if s := shortEvent(r); s != "" {
+			segs = append(segs, healthSeg{reasonPrefix(s) + s, segBad})
+		}
+	}
 	for _, w := range h.Waiting {
 		if s := shortEvent(w); s != "" {
 			segs = append(segs, healthSeg{reasonPrefix(s) + s, segBad})
@@ -2523,7 +2528,7 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 func healthEmpty(h k8s.Health) bool {
 	return h.Replicas == 0 && h.Restarts == 0 && len(h.RestartCauses) == 0 &&
 		len(h.Events) == 0 && len(h.RecentEvents) == 0 && len(h.OldEvents) == 0 && len(h.Waiting) == 0 &&
-		len(h.Conditions) == 0 && h.PendingPods == 0 && h.FailedPods == 0 && !h.Progressing && !h.Paused
+		len(h.Conditions) == 0 && len(h.FailedReasons) == 0 && h.PendingPods == 0 && h.FailedPods == 0 && !h.Progressing && !h.Paused
 }
 
 // formatHealth renders the cached health string as a compact plain-text column

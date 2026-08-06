@@ -22,6 +22,7 @@ type Health struct {
 	Conditions    []string // deployment condition reasons, e.g. "ProgressDeadlineExceeded"
 	PendingPods   int32    // pods stuck in Pending phase (scheduling, etc.)
 	FailedPods    int32    // pods in Failed phase
+	FailedReasons []string // pod Status.Reason for Failed pods, e.g. "Evicted", "NodeLost"
 }
 
 type Workload struct {
