@@ -1225,44 +1225,108 @@ func (m Model) refreshServiceCmd(ctx context.Context, repo string) tea.Cmd {
 		}
 		svcCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
-		var rc k8s.Client
-		if len(m.mockK8sSpecs) > 0 {
-			spec, ok := m.mockK8sSpecs[svc.Name]
-			if !ok {
-				spec, ok = m.mockK8sSpecs[svc.Repo]
-			}
-			if !ok {
-				spec, ok = m.mockK8sSpecs["*"]
-			}
-			if !ok {
-				return refreshDoneMsg{source: "Services", err: fmt.Errorf("mock: no spec for service %q", svc.Name)}
-			}
-			rc = k8s.NewMock(map[string]k8s.MockSpec{"*": spec})
-		} else {
-			var err error
-			rc, err = k8s.NewRealClient(svcCtx, "", svc.Context, m.cfg.K8s.LoginCommand, m.k8sTimebox())
-			if err != nil {
-				return refreshDoneMsg{source: "Services", err: err}
-			}
+		cv, err := m.resolveServiceVersion(svcCtx, *svc)
+		if err != nil {
+			return refreshDoneMsg{source: "Services", err: err}
 		}
-		v := version.Resolve(svcCtx, rc, m.gh, *svc)
-		pending, contribs := serializePendingTags(v.PendingTags)
-		untagged := serializeUntaggedCommits(v.UntaggedCommits)
 		if shipLog != nil {
 			shipLog.Printf("Services: re-resolved %s", svc.Repo)
 		}
-		m.store.SaveVersion(store.CachedVersion{
-			Repo:            v.Service.Repo,
-			ProdRef:         v.ProdRef,
-			ProdSHA:         v.ProdSHA,
-			AheadBy:         v.AheadBy,
-			PendingTags:     pending,
-			PendingContribs: contribs,
-			UntaggedCommits: untagged,
-			Health:          serializeHealth(v.Health),
-			Error:           v.Error,
-		})
+		m.store.SaveVersion(cv)
 		return refreshDoneMsg{source: "Services", err: nil}
+	}
+}
+
+// resolveServiceVersion resolves a single service against k8s and returns the
+// resulting cached version (unpersisted) along with any setup error.
+func (m Model) resolveServiceVersion(svcCtx context.Context, svc config.ServiceConfig) (store.CachedVersion, error) {
+	var rc k8s.Client
+	if len(m.mockK8sSpecs) > 0 {
+		spec, ok := m.mockK8sSpecs[svc.Name]
+		if !ok {
+			spec, ok = m.mockK8sSpecs[svc.Repo]
+		}
+		if !ok {
+			spec, ok = m.mockK8sSpecs["*"]
+		}
+		if !ok {
+			return store.CachedVersion{}, fmt.Errorf("mock: no spec for service %q", svc.Name)
+		}
+		rc = k8s.NewMock(map[string]k8s.MockSpec{"*": spec})
+	} else {
+		var err error
+		rc, err = k8s.NewRealClient(svcCtx, "", svc.Context, m.cfg.K8s.LoginCommand, m.k8sTimebox())
+		if err != nil {
+			return store.CachedVersion{}, err
+		}
+	}
+	v := version.Resolve(svcCtx, rc, m.gh, svc)
+	pending, contribs := serializePendingTags(v.PendingTags)
+	untagged := serializeUntaggedCommits(v.UntaggedCommits)
+	return store.CachedVersion{
+		Repo:            v.Service.Repo,
+		ProdRef:         v.ProdRef,
+		ProdSHA:         v.ProdSHA,
+		AheadBy:         v.AheadBy,
+		PendingTags:     pending,
+		PendingContribs: contribs,
+		UntaggedCommits: untagged,
+		Health:          serializeHealth(v.Health),
+		Error:           v.Error,
+	}, nil
+}
+
+func (m Model) servicesForRepo(repo string) []config.ServiceConfig {
+	var svcs []config.ServiceConfig
+	for _, svc := range m.cfg.Services {
+		if svc.Repo == repo {
+			svcs = append(svcs, svc)
+		}
+	}
+	return svcs
+}
+
+// refreshServicesForRepoCmd re-resolves every configured service deployed from
+// repo and reports back via a single refreshDoneMsg once all are done.
+func (m Model) refreshServicesForRepoCmd(ctx context.Context, repo string) tea.Cmd {
+	return func() tea.Msg {
+		svcs := m.servicesForRepo(repo)
+		if len(svcs) == 0 {
+			return refreshDoneMsg{source: "Services", err: nil}
+		}
+		var wg sync.WaitGroup
+		results := make(chan store.CachedVersion, len(svcs))
+		for _, svc := range svcs {
+			wg.Add(1)
+			go func(svc config.ServiceConfig) {
+				defer wg.Done()
+				svcCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
+				defer cancel()
+				cv, err := m.resolveServiceVersion(svcCtx, svc)
+				if err != nil {
+					cv = store.CachedVersion{Repo: svc.Repo, Error: err.Error()}
+				}
+				if shipLog != nil {
+					if cv.Error != "" {
+						shipLog.Printf("Services: %s: %s", svc.Repo, cv.Error)
+					} else {
+						shipLog.Printf("Services: re-resolved %s", svc.Repo)
+					}
+				}
+				results <- cv
+			}(svc)
+		}
+		wg.Wait()
+		close(results)
+
+		var lastErr error
+		for res := range results {
+			m.store.SaveVersion(res)
+			if res.Error != "" {
+				lastErr = fmt.Errorf("%s: %s", res.Repo, res.Error)
+			}
+		}
+		return refreshDoneMsg{source: "Services", err: lastErr}
 	}
 }
 
@@ -2037,6 +2101,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.cursor = m.total - 1
 				}
 				m.loadFromCache()
+			}
+			// A merged PR advances the repo, so re-resolve any services that
+			// deploy from it and the Services section reflects the new state.
+			if msg.action == "merge" && len(m.servicesForRepo(msg.repo)) > 0 {
+				m.loading["Services"] = true
+				return m, m.refreshServicesForRepoCmd(context.Background(), msg.repo)
 			}
 			return m, nil
 		case "draft-toggle":

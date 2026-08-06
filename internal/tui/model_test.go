@@ -2,6 +2,7 @@ package tui
 
 import (
 	"fmt"
+	"path/filepath"
 	"strconv"
 	"strings"
 	"testing"
@@ -13,6 +14,7 @@ import (
 	"github.com/muesli/termenv"
 	"github.com/zach/ship/internal/config"
 	"github.com/zach/ship/internal/k8s"
+	"github.com/zach/ship/internal/store"
 )
 
 func forceColor() {
@@ -239,5 +241,53 @@ func TestViewportScrollOffsetClampedWhenContentShrinks(t *testing.T) {
 	_ = got.View()
 	if got.sections[0].scrollOffset != 0 {
 		t.Fatalf("scrollOffset = %d, want 0 after content shrank", got.sections[0].scrollOffset)
+	}
+}
+
+func TestServicesForRepo(t *testing.T) {
+	m := testModel(100, 30)
+	m.cfg.Services = []config.ServiceConfig{
+		{Name: "api", Repo: "org/app", Context: "ctx-a"},
+		{Name: "worker", Repo: "org/app", Context: "ctx-b"},
+		{Name: "web", Repo: "org/web"},
+	}
+	if got := m.servicesForRepo("org/app"); len(got) != 2 {
+		t.Fatalf("servicesForRepo(org/app) = %d entries, want 2", len(got))
+	}
+	if got := m.servicesForRepo("org/missing"); len(got) != 0 {
+		t.Fatalf("servicesForRepo(org/missing) = %d entries, want 0", len(got))
+	}
+}
+
+func TestActionDoneRefreshesMatchingServices(t *testing.T) {
+	forceColor()
+	st, err := store.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	m := testModel(100, 30)
+	m.store = st
+	m.cfg.Services = []config.ServiceConfig{
+		{Name: "api", Repo: "org/app", Context: "ctx-a"},
+		{Name: "web", Repo: "org/web"},
+	}
+
+	nm, cmd := m.Update(actionDoneMsg{action: "merge", repo: "org/app", num: 5})
+	got := nm.(Model)
+	if cmd == nil {
+		t.Fatal("merge with matching service returned nil cmd, want refresh cmd")
+	}
+	if !got.loading["Services"] {
+		t.Fatal("loading[Services] not set during merge refresh")
+	}
+
+	if _, cmd := got.Update(actionDoneMsg{action: "close", repo: "org/app", num: 6}); cmd != nil {
+		t.Fatal("close returned a cmd, want nil")
+	}
+
+	if _, cmd := got.Update(actionDoneMsg{action: "merge", repo: "org/other", num: 7}); cmd != nil {
+		t.Fatal("merge with no matching service returned a cmd, want nil")
 	}
 }
