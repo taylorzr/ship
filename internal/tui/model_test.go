@@ -7,8 +7,11 @@ import (
 	"testing"
 	"time"
 
+	"github.com/charmbracelet/bubbles/spinner"
+	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
+	"github.com/zach/ship/internal/config"
 	"github.com/zach/ship/internal/k8s"
 )
 
@@ -131,5 +134,110 @@ func TestRenderRowTitleOnlyStillHighlights(t *testing.T) {
 	got := renderRow(r, true, false, "⠁", 30, 120)
 	if got != selectedStyle.Render("some plain section row") {
 		t.Fatalf("title-only selected row:\n got %q", got)
+	}
+}
+
+func testModel(width, height int) Model {
+	s := spinner.New()
+	s.Spinner = spinner.Ellipsis
+	return Model{
+		cfg:          &config.Config{},
+		spin:         s,
+		width:        width,
+		height:       height,
+		loading:      map[string]bool{},
+		sectionErrs:  map[string]string{},
+		mockK8sSpecs: map[string]k8s.MockSpec{},
+	}
+}
+
+func TestViewRendersViewportPanes(t *testing.T) {
+	forceColor()
+	m := testModel(100, 30)
+	m.sections = []section{
+		{
+			name:    "My PRs",
+			rows:    []row{{repo: "org/app", num: 1, title: "fix the thing"}},
+			allRows: []row{{repo: "org/app", num: 1, title: "fix the thing"}},
+		},
+		{
+			name:    "Services",
+			rows:    []row{{name: "api", health: "ready"}},
+			allRows: []row{{name: "api", health: "ready"}},
+		},
+	}
+	out := m.View()
+	for _, want := range []string{"My PRs", "Services", "fix the thing", "api"} {
+		if !strings.Contains(out, want) {
+			t.Fatalf("View() missing %q:\n%s", want, out)
+		}
+	}
+	if m.sections[0].view == nil {
+		t.Fatal("viewport not created for PR section")
+	}
+}
+
+func TestViewportPageDownScrollsActiveSection(t *testing.T) {
+	forceColor()
+	m := testModel(100, 30)
+	rows := make([]row, 40)
+	for i := range rows {
+		rows[i] = row{repo: "org/app", num: i + 1, title: fmt.Sprintf("pr %d", i+1)}
+	}
+	m.sections = []section{{name: "My PRs", rows: rows, allRows: rows}}
+	_ = m.View() // seed viewport content
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	got := nm.(Model)
+	if got.sections[0].scrollOffset == 0 {
+		t.Fatal("PageDown did not advance scrollOffset")
+	}
+	out := got.View()
+	if !strings.Contains(out, "more above") || !strings.Contains(out, "more below") {
+		t.Fatalf("scrolled pane missing overflow indicators:\n%s", out)
+	}
+	if got.sections[0].view.YOffset != got.sections[0].scrollOffset {
+		t.Fatalf("view YOffset %d != scrollOffset %d", got.sections[0].view.YOffset, got.sections[0].scrollOffset)
+	}
+}
+
+func TestViewportWheelScrollsActiveSection(t *testing.T) {
+	forceColor()
+	m := testModel(100, 30)
+	rows := make([]row, 40)
+	for i := range rows {
+		rows[i] = row{repo: "org/app", num: i + 1, title: fmt.Sprintf("pr %d", i+1)}
+	}
+	m.sections = []section{{name: "My PRs", rows: rows, allRows: rows}}
+	_ = m.View() // seed viewport content
+
+	nm, _ := m.Update(tea.MouseMsg{
+		Action: tea.MouseActionPress,
+		Button: tea.MouseButtonWheelDown,
+		X:      50, Y: 10,
+	})
+	got := nm.(Model)
+	if got.sections[0].scrollOffset == 0 {
+		t.Fatal("mouse wheel down did not advance scrollOffset")
+	}
+}
+
+func TestViewportScrollOffsetClampedWhenContentShrinks(t *testing.T) {
+	forceColor()
+	m := testModel(100, 30)
+	rows := make([]row, 40)
+	for i := range rows {
+		rows[i] = row{repo: "org/app", num: i + 1, title: fmt.Sprintf("pr %d", i+1)}
+	}
+	m.sections = []section{{name: "My PRs", rows: rows, allRows: rows}}
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyPgDown})
+	got := nm.(Model)
+	// shrink the section to a handful of rows, then re-render
+	got.sections[0].rows = got.sections[0].rows[:3]
+	got.sections[0].allRows = got.sections[0].rows
+	_ = got.View()
+	if got.sections[0].scrollOffset != 0 {
+		t.Fatalf("scrollOffset = %d, want 0 after content shrank", got.sections[0].scrollOffset)
 	}
 }

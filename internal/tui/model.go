@@ -17,6 +17,7 @@ import (
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
+	"github.com/charmbracelet/bubbles/viewport"
 	tea "github.com/charmbracelet/bubbletea"
 	"github.com/charmbracelet/lipgloss"
 	"github.com/zach/ship/internal/ai"
@@ -120,6 +121,128 @@ func (m *Model) maxVisibleRows() int {
 	return perSection
 }
 
+func (m *Model) sectionViewHeight() int {
+	return m.maxVisibleRows()
+}
+
+func (m *Model) ensureSectionViews() {
+	if m.width <= 0 || m.height <= 0 {
+		return
+	}
+	h := m.sectionViewHeight()
+	for i := range m.sections {
+		s := &m.sections[i]
+		if s.view == nil {
+			v := viewport.New(m.width, h)
+			v.MouseWheelEnabled = true
+			v.KeyMap.HalfPageDown = key.NewBinding(key.WithKeys("ctrl+d"), key.WithHelp("ctrl+d", "half page down"))
+			v.KeyMap.Up.Unbind()
+			v.KeyMap.Down.Unbind()
+			v.KeyMap.Left.Unbind()
+			v.KeyMap.Right.Unbind()
+			s.view = &v
+		} else {
+			s.view.Width = m.width
+			s.view.Height = h
+		}
+	}
+}
+
+func (m Model) syncViewOffset(s *section) {
+	if s.view != nil && s.view.YOffset != s.scrollOffset {
+		s.scrollOffset = s.view.YOffset
+	}
+}
+
+func (m Model) writeSectionPane(s *section, body string, total int, b *strings.Builder) {
+	if s.view == nil {
+		b.WriteString(body)
+		if body != "" {
+			b.WriteString("\n")
+		}
+		return
+	}
+	lines := strings.Count(body, "\n") + 1
+	if lines > 0 && lines < s.view.Height {
+		s.view.Height = lines
+	}
+	s.view.SetContent(body)
+	if s.view.YOffset != s.scrollOffset {
+		s.view.SetYOffset(s.scrollOffset)
+		s.scrollOffset = s.view.YOffset
+	}
+	if above := s.view.YOffset; above > 0 {
+		b.WriteString(overflowStyle.Render(fmt.Sprintf("    ↑ %d more above", above)))
+		b.WriteString("\n")
+	}
+	b.WriteString(s.view.View())
+	b.WriteString("\n")
+	if below := total - (s.view.YOffset + m.maxVisibleRows()); below > 0 {
+		b.WriteString(overflowStyle.Render(fmt.Sprintf("    ↓ %d more below", below)))
+		b.WriteString("\n")
+	}
+}
+
+func (m Model) renderPRRows(s *section, startGlobal int, repoWidth, maxWidth int) string {
+	var bb strings.Builder
+	for i := range s.rows {
+		r := s.rows[i]
+		line := renderRow(r, startGlobal+i == m.cursor,
+			m.refreshingItem.repo == r.repo && m.refreshingItem.num == r.num,
+			m.spin.View(), repoWidth, maxWidth)
+		bb.WriteString(line)
+		bb.WriteString("\n")
+	}
+	return strings.TrimSuffix(bb.String(), "\n")
+}
+
+func (m Model) renderPaneRows(s *section, startGlobal, maxName, maxCur, maxPen, maxCon int, sep string, ev eventFilter) string {
+	var bb strings.Builder
+	for i := range s.rows {
+		r := s.rows[i]
+		isSelected := startGlobal+i == m.cursor
+		isRefreshing := m.refreshingItem.repo == r.repo && m.refreshingItem.num == r.num
+		loadCol := "   "
+		if isRefreshing && r.depth == 0 {
+			loadCol = padWidth(m.spin.View(), 3)
+		}
+		var rest string
+		if r.depth == 0 {
+			pending := r.pending
+			if strings.HasPrefix(pending, "+") || pending == "-" {
+				pending = helpKey.Render(pending)
+			}
+			rest = fmt.Sprintf("%s%s%s%s%s%s%s",
+				padWidth(truncateWidth(r.name, maxName), maxName),
+				sep,
+				padWidth(truncateWidth(r.title, maxCur), maxCur),
+				sep,
+				padWidth(truncateWidth(pending, maxPen), maxPen),
+				sep,
+				padWidth(truncateWidth(renderDetails(r.health, r.contributors, ev), maxCon), maxCon))
+		} else {
+			rest = fmt.Sprintf("%s%s%s%s%s%s%s",
+				padWidth("", maxName),
+				sep,
+				padWidth("", maxCur),
+				sep,
+				padWidth(truncateWidth(r.pending, maxPen), maxPen),
+				sep,
+				padWidth(truncateWidth(r.contributors, maxCon), maxCon))
+		}
+		if m.width > 4 {
+			rest = truncateWidth(rest, m.width-4)
+		}
+		if isSelected {
+			bb.WriteString(selectedStyle.Render(loadCol) + " " + rest)
+		} else {
+			bb.WriteString(loadCol + " " + rest)
+		}
+		bb.WriteString("\n")
+	}
+	return strings.TrimSuffix(bb.String(), "\n")
+}
+
 type row struct {
 	title        string
 	repo         string
@@ -149,6 +272,7 @@ type section struct {
 	rows            []row
 	allRows         []row
 	scrollOffset    int
+	view            *viewport.Model
 	draftFilter     string // "" or "draft"
 	showStarred     bool
 	sortNewest      bool
@@ -1373,6 +1497,19 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.width = msg.Width
 		m.height = msg.Height
+		m.ensureSectionViews()
+		return m, nil
+
+	case tea.MouseMsg:
+		if m.confirm == nil && !m.searching && !m.tagging && !m.showNotif && m.sectionIdx < len(m.sections) {
+			m.ensureSectionViews()
+			s := &m.sections[m.sectionIdx]
+			if s.view != nil && s.view.MouseWheelEnabled {
+				updated, _ := s.view.Update(msg)
+				*s.view = updated
+				m.syncViewOffset(s)
+			}
+		}
 		return m, nil
 
 	case spinner.TickMsg:
@@ -1497,6 +1634,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			}
 			return m, nil
 		}
+		m.ensureSectionViews()
 		switch {
 		case key.Matches(msg, keys.Quit):
 			return m, tea.Quit
@@ -1813,6 +1951,15 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				m.searchQuery = ""
 				m.applyFilters()
 			}
+		case m.sectionIdx < len(m.sections) && m.sections[m.sectionIdx].view != nil &&
+			(key.Matches(msg, m.sections[m.sectionIdx].view.KeyMap.PageDown) ||
+				key.Matches(msg, m.sections[m.sectionIdx].view.KeyMap.PageUp) ||
+				key.Matches(msg, m.sections[m.sectionIdx].view.KeyMap.HalfPageUp) ||
+				key.Matches(msg, m.sections[m.sectionIdx].view.KeyMap.HalfPageDown)):
+			s := &m.sections[m.sectionIdx]
+			updated, _ := s.view.Update(msg)
+			*s.view = updated
+			m.syncViewOffset(s)
 		default:
 			m.gPending = false
 		}
@@ -2020,7 +2167,10 @@ func (m Model) View() string {
 	b.WriteString(titleStyle.Render("·································🚀"))
 	b.WriteString("\n")
 
-	for i, s := range m.sections {
+	m.ensureSectionViews()
+
+	for i := range m.sections {
+		s := &m.sections[i]
 		headerText := s.name
 		if len(s.allRows) > 0 && s.allRows[0].num > 0 {
 			if len(s.rows) == len(s.allRows) {
@@ -2086,176 +2236,95 @@ func (m Model) View() string {
 			b.WriteString("\n")
 		}
 
-		// column header for PR sections
-		if len(s.rows) > 0 && s.rows[0].num > 0 {
-			repoWidth := 30
-			ageWidth := 6
-			if m.width > 0 {
-				repoWidth = m.width * 30 / 100
-				if repoWidth < 15 {
-					repoWidth = 15
-				} else if repoWidth > 50 {
-					repoWidth = 50
-				}
-			}
-			titleWidth := m.width - repoWidth - 33
-			if titleWidth < 1 {
-				titleWidth = 1
-			}
-			header := fmt.Sprintf("%s%s%s  %s  %s  %s",
-				"    CI Re ",
-				padWidth("Up", 5),
-				padWidth("Repo", repoWidth),
-				padWidth("#", 6),
-				padWidth("Title", titleWidth),
-				padWidth("Age", ageWidth))
-			b.WriteString(headerStyle.Render(header))
-			b.WriteString("\n")
-
-			visStart := s.scrollOffset
-			visEnd := visStart + m.maxVisibleRows()
-			if visEnd > len(s.rows) {
-				visEnd = len(s.rows)
-			}
-
-			if visStart > 0 {
-				b.WriteString(overflowStyle.Render(fmt.Sprintf("    ↑ %d more above", visStart)))
-				b.WriteString("\n")
-			}
-
-			for i := visStart; i < visEnd; i++ {
-				r := s.rows[i]
-				line := renderRow(r, globalIdx+i == m.cursor,
-					m.refreshingItem.repo == r.repo && m.refreshingItem.num == r.num,
-					m.spin.View(), repoWidth, m.width)
-				b.WriteString(line)
-				b.WriteString("\n")
-			}
-
-			remaining := len(s.rows) - visEnd
-			if remaining > 0 {
-				b.WriteString(overflowStyle.Render(fmt.Sprintf("    ↓ %d more below", remaining)))
-				b.WriteString("\n")
-			}
-
-			globalIdx += len(s.rows)
-		} else if len(s.rows) > 0 {
-			// compute column widths
-			maxName := 4 // "Name"
-			maxCur := 7  // "Current"
-			maxPen := 7  // "Pending"
-			maxCon := 11 // "Details"
-			ev := m.eventFilter()
-			for _, r := range s.rows {
-				if r.depth == 0 {
-					if w := lipgloss.Width(r.name); w > maxName {
-						maxName = w
-					}
-					if w := lipgloss.Width(r.title); w > maxCur {
-						maxCur = w
+		// column header + scrollable row pane
+		if len(s.rows) > 0 {
+			if s.rows[0].num > 0 {
+				repoWidth := 30
+				ageWidth := 6
+				if m.width > 0 {
+					repoWidth = m.width * 30 / 100
+					if repoWidth < 15 {
+						repoWidth = 15
+					} else if repoWidth > 50 {
+						repoWidth = 50
 					}
 				}
-				if w := lipgloss.Width(r.pending); w > maxPen {
-					maxPen = w
+				titleWidth := m.width - repoWidth - 33
+				if titleWidth < 1 {
+					titleWidth = 1
 				}
-				if w := lipgloss.Width(detailsText(r.health, r.contributors, ev)); w > maxCon {
-					maxCon = w
-				}
-			}
-			if maxName > 30 {
-				maxName = 30
-			}
-			if maxCur > 40 {
-				maxCur = 40
-			}
-			if maxPen > 60 {
-				maxPen = 60
-			}
-			if maxCon > 60 {
-				maxCon = 60
-			}
-			if m.width > 0 {
-				avail := m.width - maxName - maxCur - maxCon - 6 // 3 separators + padding
-				if avail < maxPen {
-					maxPen = avail
-				}
-				if maxPen < 4 {
-					maxPen = 4
-				}
-			}
-			sep := "  "
-			header := fmt.Sprintf("%s%s%s%s%s%s%s%s",
-				"    ",
-				padWidth("Name", maxName),
-				sep,
-				padWidth("Current", maxCur),
-				sep,
-				padWidth("Pending", maxPen),
-				sep,
-				padWidth("Details", maxCon))
-			b.WriteString(headerStyle.Render(header))
-			b.WriteString("\n")
-
-			visStart := s.scrollOffset
-			visEnd := visStart + m.maxVisibleRows()
-			if visEnd > len(s.rows) {
-				visEnd = len(s.rows)
-			}
-
-			if visStart > 0 {
-				b.WriteString(overflowStyle.Render(fmt.Sprintf("    ↑ %d more above", visStart)))
+				header := fmt.Sprintf("%s%s%s  %s  %s  %s",
+					"    CI Re ",
+					padWidth("Up", 5),
+					padWidth("Repo", repoWidth),
+					padWidth("#", 6),
+					padWidth("Title", titleWidth),
+					padWidth("Age", ageWidth))
+				b.WriteString(headerStyle.Render(header))
 				b.WriteString("\n")
-			}
 
-			for i := visStart; i < visEnd; i++ {
-				r := s.rows[i]
-				isSelected := globalIdx+i == m.cursor
-				isRefreshing := m.refreshingItem.repo == r.repo && m.refreshingItem.num == r.num
-				loadCol := "   "
-				if isRefreshing && r.depth == 0 {
-					loadCol = padWidth(m.spin.View(), 3)
-				}
-				var rest string
-				if r.depth == 0 {
-					pending := r.pending
-					if strings.HasPrefix(pending, "+") || pending == "-" {
-						pending = helpKey.Render(pending)
+				body := m.renderPRRows(s, globalIdx, repoWidth, m.width)
+				m.writeSectionPane(s, body, len(s.rows), &b)
+			} else {
+				// compute column widths
+				maxName := 4 // "Name"
+				maxCur := 7  // "Current"
+				maxPen := 7  // "Pending"
+				maxCon := 11 // "Details"
+				ev := m.eventFilter()
+				for _, r := range s.rows {
+					if r.depth == 0 {
+						if w := lipgloss.Width(r.name); w > maxName {
+							maxName = w
+						}
+						if w := lipgloss.Width(r.title); w > maxCur {
+							maxCur = w
+						}
 					}
-					rest = fmt.Sprintf("%s%s%s%s%s%s%s",
-						padWidth(truncateWidth(r.name, maxName), maxName),
-						sep,
-						padWidth(truncateWidth(r.title, maxCur), maxCur),
-						sep,
-						padWidth(truncateWidth(pending, maxPen), maxPen),
-						sep,
-						padWidth(truncateWidth(renderDetails(r.health, r.contributors, ev), maxCon), maxCon))
-				} else {
-					rest = fmt.Sprintf("%s%s%s%s%s%s%s",
-						padWidth("", maxName),
-						sep,
-						padWidth("", maxCur),
-						sep,
-						padWidth(truncateWidth(r.pending, maxPen), maxPen),
-						sep,
-						padWidth(truncateWidth(r.contributors, maxCon), maxCon))
+					if w := lipgloss.Width(r.pending); w > maxPen {
+						maxPen = w
+					}
+					if w := lipgloss.Width(detailsText(r.health, r.contributors, ev)); w > maxCon {
+						maxCon = w
+					}
 				}
-				if m.width > 4 {
-					rest = truncateWidth(rest, m.width-4)
+				if maxName > 30 {
+					maxName = 30
 				}
-				if isSelected {
-					b.WriteString(selectedStyle.Render(loadCol) + " " + rest)
-				} else {
-					b.WriteString(loadCol + " " + rest)
+				if maxCur > 40 {
+					maxCur = 40
 				}
+				if maxPen > 60 {
+					maxPen = 60
+				}
+				if maxCon > 60 {
+					maxCon = 60
+				}
+				if m.width > 0 {
+					avail := m.width - maxName - maxCur - maxCon - 6 // 3 separators + padding
+					if avail < maxPen {
+						maxPen = avail
+					}
+					if maxPen < 4 {
+						maxPen = 4
+					}
+				}
+				sep := "  "
+				header := fmt.Sprintf("%s%s%s%s%s%s%s%s",
+					"    ",
+					padWidth("Name", maxName),
+					sep,
+					padWidth("Current", maxCur),
+					sep,
+					padWidth("Pending", maxPen),
+					sep,
+					padWidth("Details", maxCon))
+				b.WriteString(headerStyle.Render(header))
 				b.WriteString("\n")
-			}
 
-			remaining := len(s.rows) - visEnd
-			if remaining > 0 {
-				b.WriteString(overflowStyle.Render(fmt.Sprintf("    ↓ %d more below", remaining)))
-				b.WriteString("\n")
+				body := m.renderPaneRows(s, globalIdx, maxName, maxCur, maxPen, maxCon, sep, ev)
+				m.writeSectionPane(s, body, len(s.rows), &b)
 			}
-
 			globalIdx += len(s.rows)
 		}
 	}
