@@ -2,6 +2,7 @@ package k8s
 
 import (
 	"context"
+	"errors"
 	"slices"
 	"testing"
 	"time"
@@ -11,6 +12,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/fake"
+	k8stesting "k8s.io/client-go/testing"
 )
 
 const testNamespace = "default"
@@ -107,6 +109,46 @@ func TestCollectHealthOrphanedEventScopedToWorkload(t *testing.T) {
 	h := c.collectHealthFor(t, "web", "Deployment")
 	if len(h.RecentEvents)+len(h.Events)+len(h.OldEvents) != 0 {
 		t.Fatalf("events = recent:%v warn:%v old:%v, want none", h.RecentEvents, h.Events, h.OldEvents)
+	}
+}
+
+func TestCollectHealthOrphanedEventViaCurrentPodPrefix(t *testing.T) {
+	// Listing ReplicaSets can be denied by read-only RBAC (the failure is
+	// swallowed). The orphaned event must still surface via the prefix derived
+	// from the current pod's name, which is "<rs>-<rand5>".
+	c := newTestClient(t,
+		testPod("web-5b9f8d4d7-7k2xz", corev1.PodRunning),
+		warningEvent("evicted", "Pod", "web-5b9f8d4d7-old", "Evicted"),
+	)
+	c.clientset.(*fake.Clientset).PrependReactor("list", "replicasets", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("replicasets is forbidden by RBAC")
+	})
+	h := c.collectHealthFor(t, "web", "Deployment")
+	if !slices.Contains(h.RecentEvents, "Evicted") {
+		t.Fatalf("RecentEvents = %v, want it to contain Evicted", h.RecentEvents)
+	}
+}
+
+func TestCollectHealthPaginatesEventPages(t *testing.T) {
+	// A namespace with more events than fit on one API page must not lose the
+	// newest ones: the collector has to follow the continue token.
+	c := newTestClient(t, testPod("web-abc", corev1.PodRunning))
+	page := 0
+	c.clientset.(*fake.Clientset).PrependReactor("list", "events", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		page++
+		ev := warningEvent("evicted", "Pod", "web-abc", "Evicted")
+		lst := &corev1.EventList{Items: []corev1.Event{*ev}}
+		if page == 1 {
+			lst.Continue = "next-page"
+		}
+		return true, lst, nil
+	})
+	h := c.collectHealthFor(t, "web", "Deployment")
+	if page != 2 {
+		t.Fatalf("event list pages fetched = %d, want 2 (continue token not followed)", page)
+	}
+	if !slices.Contains(h.RecentEvents, "Evicted") {
+		t.Fatalf("RecentEvents = %v, want it to contain Evicted", h.RecentEvents)
 	}
 }
 

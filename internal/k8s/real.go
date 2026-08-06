@@ -366,9 +366,25 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 		}
 	}
 
-	events, err := c.clientset.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{})
-	if err != nil {
-		return
+	// The API server caps list pages (default 500), and a plain List does not
+	// follow continuation tokens — in a namespace busy with events, the newest
+	// ones (exactly what we're looking for) would be silently dropped. Walk
+	// the pages so no recent event is missed.
+	var (
+		eventList *corev1.EventList
+		events    []corev1.Event
+		cont      string
+	)
+	for {
+		eventList, err = c.clientset.CoreV1().Events(namespace).List(ctx, metav1.ListOptions{Limit: 500, Continue: cont})
+		if err != nil {
+			return
+		}
+		events = append(events, eventList.Items...)
+		if eventList.Continue == "" {
+			break
+		}
+		cont = eventList.Continue
 	}
 	// Events describe things that happened, so they're bucketed purely by age:
 	// kubelet updates an event's LastTimestamp every time it recurs, so an
@@ -385,7 +401,10 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 	// sweeps them. To still surface those within that window, match their
 	// involvedObject name against the workload's ReplicaSet name prefixes
 	// (`<rs>-`), which identify pods by generation even after they're gone.
-	// The RS list is loaded lazily, only when an orphaned pod event is seen.
+	// The RS list is loaded lazily, only when an orphaned pod event is seen;
+	// it can be denied by read-only RBAC, so prefixes derived from the current
+	// pods' names ("<rs>-<rand5>") serve as a fallback for the current
+	// generation.
 	var rsPrefixes []string
 	rsListed := false
 	loadRSPrefixes := func() {
@@ -395,7 +414,7 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 		rsListed = true
 		rss, err := c.clientset.AppsV1().ReplicaSets(namespace).List(ctx, metav1.ListOptions{})
 		if err != nil {
-			return // fail-open: fall back to current-pod matching only
+			return // fail-open: fall back to current-pod prefixes below
 		}
 		for i := range rss.Items {
 			rs := &rss.Items[i]
@@ -407,9 +426,17 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 			}
 		}
 	}
+	var podPrefixes []string
+	seenPrefix := make(map[string]bool, len(podNames))
+	for n := range podNames {
+		if len(n) > 5 && !seenPrefix[n[:len(n)-5]] {
+			seenPrefix[n[:len(n)-5]] = true
+			podPrefixes = append(podPrefixes, n[:len(n)-5])
+		}
+	}
 	latest := map[string]metav1.Time{}
-	for i := range events.Items {
-		ev := &events.Items[i]
+	for i := range events {
+		ev := &events[i]
 		if ev.Type != "Warning" {
 			continue
 		}
@@ -426,6 +453,14 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 				if strings.HasPrefix(obj.Name, p) {
 					orphan = true
 					break
+				}
+			}
+			if !orphan {
+				for _, p := range podPrefixes {
+					if strings.HasPrefix(obj.Name, p) {
+						orphan = true
+						break
+					}
 				}
 			}
 			if !orphan {
