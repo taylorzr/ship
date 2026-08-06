@@ -59,6 +59,24 @@ func TestEventReasonAgeEmitsAgedSegment(t *testing.T) {
 	}
 }
 
+func TestProgressingHealthShowsReplicaProgress(t *testing.T) {
+	h := k8s.Health{Progressing: true, ReadyReplicas: 2, Replicas: 5}
+	segs := healthSegments(h, eventFilter{})
+	if len(segs) == 0 || segs[0].text != "⟳ Progressing 2/5" {
+		t.Fatalf("segments = %v, want first segment ⟳ Progressing 2/5", segs)
+	}
+
+	zero := k8s.Health{Progressing: true}
+	segs = healthSegments(zero, eventFilter{})
+	if len(segs) == 0 || segs[0].text != "⟳ Progressing" {
+		t.Fatalf("segments = %v, want first segment ⟳ Progressing", segs)
+	}
+
+	if got := formatHealth(serializeHealth(h), eventFilter{}); !strings.Contains(got, "⟳ Progressing 2/5") {
+		t.Fatalf("formatHealth round-trip = %q, want it to contain ⟳ Progressing 2/5", got)
+	}
+}
+
 func TestHealthRoundTripPreservesEventAges(t *testing.T) {
 	h := k8s.Health{
 		Ready:         true,

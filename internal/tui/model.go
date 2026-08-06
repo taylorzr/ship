@@ -2582,7 +2582,8 @@ func (m *Model) eventFilter() eventFilter {
 
 // healthSegments splits a workload's health into display parts so callers can
 // style each individually. Plain ✔ is current readiness. Blue is deployment
-// state: ⟳ Progressing, ⏸DeploymentPaused awaiting manual approval. Yellow is
+// state: ⟳ Progressing (with the ready-replica count, e.g. "⟳ Progressing
+// 2/5"), ⏸DeploymentPaused awaiting manual approval. Yellow is
 // history and waiting: ↻N restarts, their causes, warning events in the warn
 // window, and pending pods. Red is current problems: ✖ not-ready (when not
 // mid-rollout), deployment conditions, failed pods and their reasons (e.g.
@@ -2598,7 +2599,11 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 	var segs []healthSeg
 	switch {
 	case h.Progressing && !problems:
-		segs = append(segs, healthSeg{"⟳", segInfo})
+		icon := "⟳ Progressing"
+		if h.Replicas > 0 {
+			icon = fmt.Sprintf("⟳ Progressing %d/%d", h.ReadyReplicas, h.Replicas)
+		}
+		segs = append(segs, healthSeg{icon, segInfo})
 	case h.Ready:
 		segs = append(segs, healthSeg{"✔", segOK})
 	case h.Replicas > 0:
@@ -2671,7 +2676,8 @@ func healthEmpty(h k8s.Health) bool {
 }
 
 // formatHealth renders the cached health string as a compact plain-text column
-// value: ✔ healthy, ⟳ Progressing, ✖ not ready, ⏸DeploymentPaused paused,
+// value: ✔ healthy, ⟳ Progressing (ready replicas, e.g. "⟳ Progressing 2/5"),
+// ✖ not ready, ⏸DeploymentPaused paused,
 // ↻N restarts, ↻OOMKilled restart causes, ⚠ error events (colored by age in
 // the TUI), ∞ waiting/retrying, ⌛N pending, 💀N failed, ⚠ conditions.
 func formatHealth(health string, ev eventFilter) string {
@@ -3162,7 +3168,7 @@ func (m Model) renderHelpOverlay() string {
 			legend = helpSection("legend", [][2]string{
 				{"✔", "healthy"},
 				{"✖", "unhealthy"},
-				{"⟳/⏸", "Progressing · DeploymentPaused"},
+				{"⟳ Progressing 2/5", "rolling out · ready replicas"},
 				{"↻N", "restarts"},
 				{"↻OOMKilled", "last restart cause"},
 				{"⌛N", "pods pending"},
@@ -3176,7 +3182,7 @@ func (m Model) renderHelpOverlay() string {
 				{"red", healthBad, "unhealthy · conditions · failed pods · events ≤" + shortDur(tb.Recent)},
 				{"yellow", healthWarn, "events " + rangeDur(tb.Recent, tb.Warn) + " · restarts · pending"},
 				{"gray", healthMuted, "older events " + rangeDur(tb.Warn, tb.History)},
-				{"blue", healthInfo, "Progressing · DeploymentPaused"},
+				{"blue", healthInfo, "⟳ Progressing · ⏸DeploymentPaused"},
 			})
 		}
 	}
