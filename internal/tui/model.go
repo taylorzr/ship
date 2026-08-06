@@ -2974,7 +2974,7 @@ func renderRow(r row, selected bool, refreshing bool, refreshIcon string, repoWi
 		rest := fmt.Sprintf("%s%s  #%-5d  %s  %s",
 			padWidth(sync, 5), padWidth(repo, repoWidth), r.num, padWidth(truncateWidth(title, titleWidth), titleWidth), padWidth(ts, ageWidth))
 		if selected {
-			return selectedStyle.Render(margin[:3]) + margin[3:] + rest
+			return selectedStyle.Render(margin) + rest
 		}
 		return margin + rest
 	}

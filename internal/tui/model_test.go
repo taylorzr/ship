@@ -121,9 +121,41 @@ func TestRenderRowMarginOnlyHighlight(t *testing.T) {
 	}
 
 	selected := renderRow(r, true, false, "⠁", repoWidth, maxWidth)
-	wantSelected := selectedStyle.Render(margin[:3]) + margin[3:] + rest
+	wantSelected := selectedStyle.Render(margin) + rest
 	if selected != wantSelected {
 		t.Fatalf("selected row:\n got %q\nwant %q", selected, wantSelected)
+	}
+}
+
+func TestRenderRowSelectedRefreshIconNotMangled(t *testing.T) {
+	forceColor()
+	s := spinner.New()
+	s.Spinner = spinner.Ellipsis
+	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
+	icon := s.View()
+
+	r := row{
+		title:     "fix the thing",
+		repo:      "org/app",
+		num:       123,
+		ci:        "success",
+		updatedAt: "2026-08-05T12:00:00Z",
+	}
+	const repoWidth = 30
+	const maxWidth = 120
+
+	ts := relativeTime(r.updatedAt)
+	titleWidth := maxWidth - repoWidth - 33
+	rest := fmt.Sprintf("%s%s  #%-5d  %s  %s",
+		padWidth(" ", 5), padWidth("org/app", repoWidth), 123,
+		padWidth(truncateWidth("fix the thing", titleWidth), titleWidth), padWidth(ts, 6))
+
+	margin := padWidth(padWidth(icon, 4)+"✓  ·", 10)
+	want := selectedStyle.Render(margin) + rest
+
+	got := renderRow(r, true, true, icon, repoWidth, maxWidth)
+	if got != want {
+		t.Fatalf("selected refreshing row:\n got %q\nwant %q", got, want)
 	}
 }
 
