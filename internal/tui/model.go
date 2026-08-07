@@ -880,17 +880,30 @@ func (m *Model) currentSnapshot() notify.Snapshot {
 	return snap
 }
 
+// scaleDirection reports whether a deployment is mid-scale rather than
+// mid-rollout: desired replicas exceed the ready count (scaling up) or trail
+// the running count (scaling down). Progressing deployments and anything
+// already at target are not scaling, so a rollout's ready-lag isn't misread as
+// scaling.
+func scaleDirection(h k8s.Health) (up, down bool) {
+	if h.Progressing || h.DesiredReplicas <= 0 {
+		return false, false
+	}
+	return h.DesiredReplicas > h.ReadyReplicas, h.DesiredReplicas < h.Replicas
+}
+
 // healthProblems mirrors the TUI's "something to be concerned about" predicate
-// for a deployment: not ready and not progressing, failing conditions, pending or
-// failed pods, waiting containers, or fresh warning events. A rollout in
-// progress is only a problem if it's genuinely broken (failed pods, stuck
-// waiting containers, hard conditions) — transient pending pods and the
-// "Unavailable" condition it passes through are not.
+// for a deployment: not ready and not progressing/scaling, failing conditions,
+// pending or failed pods, waiting containers, or fresh warning events. A
+// rollout in progress or a scale in flight is only a problem if it's genuinely
+// broken (failed pods, stuck waiting containers, hard conditions) — transient
+// pending pods and the "Unavailable" condition they pass through are not.
 func healthProblems(h k8s.Health) bool {
-	if h.Progressing {
+	up, down := scaleDirection(h)
+	if h.Progressing || up || down {
 		return h.FailedPods > 0 || len(h.Waiting) > 0 || len(h.FailedReasons) > 0 || hasHardCondition(h.Conditions)
 	}
-	return (!h.Ready && !h.Progressing) || len(h.Conditions) > 0 || h.PendingPods > 0 ||
+	return !h.Ready || len(h.Conditions) > 0 || h.PendingPods > 0 ||
 		h.FailedPods > 0 || len(h.Waiting) > 0 || len(h.RecentEvents) > 0 || len(h.Events) > 0
 }
 
@@ -2654,21 +2667,25 @@ func (m *Model) eventFilter() eventFilter {
 // healthSegments splits a workload's health into display parts so callers can
 // style each individually. Plain ✔ is current readiness. Blue is deployment
 // state: ⟳ Progressing (with the ready-replica count, e.g. "⟳ Progressing
-// 2/5"), ⏸DeploymentPaused awaiting manual approval. Yellow is
-// history and waiting: ↻N restarts, their causes, and pending pods. Red is
-// current problems: ✖ not-ready (when not mid-rollout), hard deployment
-// conditions (ReplicaFailure, Degraded, ProgressDeadlineExceeded), failed
-// pods and their reasons (e.g. Evicted), and stuck containers. A rollout in
-// progress keeps the blue ⟳ headline unless it's genuinely broken — the
-// transient "Unavailable" condition and pending pods it passes through don't
+// 2/5"), ⏸DeploymentPaused awaiting manual approval, and ↑ N / ↓ N while
+// scaling to the target replica count (the arrow is the headline when not yet
+// ready, trailing the ✔ otherwise). Yellow is history and waiting: ↻N
+// restarts, their causes, and pending pods. Red is current problems: ✖
+// not-ready (when not mid-rollout and not scaling), hard deployment conditions
+// (ReplicaFailure, Degraded, ProgressDeadlineExceeded), failed pods and their
+// reasons (e.g. Evicted), and stuck containers. A rollout in progress or a
+// scale in flight keeps a non-red headline unless it's genuinely broken — the
+// transient "Unavailable" condition and pending pods they pass through don't
 // flip it to ✖. Past warning events (recent/warn/old buckets, and the hidden
 // ~N count) are grouped at the end behind a │ separator and marked dim so
 // they read as past and ignorable while keeping their hue. Restarts turn
 // red only when the workload is currently in trouble; a rollout in progress
 // shows a blue ⟳ instead of the readiness check.
 func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
+	up, down := scaleDirection(h)
+	scaling := up || down
 	problems := h.FailedPods > 0 || len(h.Waiting) > 0 || len(h.FailedReasons) > 0 ||
-		(!h.Ready && !h.Progressing) || hasHardCondition(h.Conditions)
+		(!h.Ready && !h.Progressing && !scaling) || hasHardCondition(h.Conditions)
 	if !h.Progressing {
 		problems = problems || h.PendingPods > 0
 	}
@@ -2686,15 +2703,21 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 		segs = append(segs, healthSeg{icon, segInfo, false})
 	case h.Ready:
 		segs = append(segs, healthSeg{"✔", segOK, false})
+	case scaling && !problems:
+		dir := "↓"
+		if up {
+			dir = "↑"
+		}
+		segs = append(segs, healthSeg{fmt.Sprintf("%s %d", dir, h.DesiredReplicas), segInfo, false})
 	case h.Replicas > 0:
 		segs = append(segs, healthSeg{"✖", segBad, false})
 	}
 	if h.Paused {
 		segs = append(segs, healthSeg{"⏸DeploymentPaused", segInfo, false})
 	}
-	if h.DesiredReplicas > 0 && h.DesiredReplicas != h.Replicas {
+	if scaling && (h.Ready || problems) {
 		dir := "↓"
-		if h.DesiredReplicas > h.Replicas {
+		if up {
 			dir = "↑"
 		}
 		segs = append(segs, healthSeg{fmt.Sprintf("%s %d", dir, h.DesiredReplicas), segInfo, false})
@@ -2774,7 +2797,8 @@ func healthEmpty(h k8s.Health) bool {
 
 // formatHealth renders the cached health string as a compact plain-text column
 // value: ✔ healthy, ⟳ Progressing (ready replicas, e.g. "⟳ Progressing 2/5"),
-// ✖ not ready, ⏸DeploymentPaused paused,
+// ↑ N / ↓ N scaling to the target replica count, ✖ not ready,
+// ⏸DeploymentPaused paused,
 // ↻N restarts, ↻OOMKilled restart causes, ⚠ error events (colored by age in
 // the TUI), ∞ waiting/retrying, ⌛N pending, 💀N failed, ⚠ conditions.
 func formatHealth(health string, ev eventFilter) string {

@@ -280,6 +280,36 @@ func TestHealthScalingColdStartNotEmpty(t *testing.T) {
 	}
 }
 
+func TestHealthScalingMidScaleNotReady(t *testing.T) {
+	h := k8s.Health{Ready: false, Replicas: 4, ReadyReplicas: 3, DesiredReplicas: 4}
+	got := formatHealth(serializeHealth(h), eventFilter{})
+	if got != "↑ 4" {
+		t.Fatalf("mid-scale not-ready = %q, want %q", got, "↑ 4")
+	}
+}
+
+func TestHealthScalingProblemShowsArrow(t *testing.T) {
+	h := k8s.Health{Ready: false, Replicas: 4, ReadyReplicas: 3, DesiredReplicas: 4, Waiting: []string{"CrashLoopBackOff"}}
+	got := formatHealth(serializeHealth(h), eventFilter{})
+	if !strings.Contains(got, "✖") || !strings.Contains(got, "↑ 4") {
+		t.Fatalf("scaling with stuck container = %q, want both ✖ and ↑ 4", got)
+	}
+}
+
+func TestHealthProblemsScalingNotProblem(t *testing.T) {
+	h := k8s.Health{Ready: false, Replicas: 4, ReadyReplicas: 3, DesiredReplicas: 4}
+	if healthProblems(h) {
+		t.Fatalf("clean mid-scale %+v treated as a problem", h)
+	}
+}
+
+func TestHealthProblemsScalingWithStuckContainer(t *testing.T) {
+	h := k8s.Health{Ready: false, Replicas: 4, ReadyReplicas: 3, DesiredReplicas: 4, Waiting: []string{"CrashLoopBackOff"}}
+	if !healthProblems(h) {
+		t.Fatalf("scaling with stuck container %+v not treated as a problem", h)
+	}
+}
+
 func TestRenderRowMarginOnlyHighlight(t *testing.T) {
 	forceColor()
 	r := row{
