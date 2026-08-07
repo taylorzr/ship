@@ -1923,9 +1923,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.confirm = &confirmAction{action: "merge-conflict-error", title: r.title}
 				} else {
 					warnings := []string{}
-					if r.ci == "failure" {
+				if r.ci == "failure" {
+					if r.mergeState == "UNSTABLE" {
+						warnings = append(warnings, "CI: failing (not required)")
+					} else {
 						warnings = append(warnings, "CI: failing")
 					}
+				}
 					if r.review == "CHANGES_REQUESTED" {
 						warnings = append(warnings, "Review: changes requested")
 					}
@@ -3072,7 +3076,7 @@ func renderRow(r row, selected bool, refreshing bool, refreshIcon string, repoWi
 		aiIcon = "✧"
 	}
 
-	icon := ciIcon(r.ci)
+	icon := ciIcon(r.ci, r.ci == "failure" && r.mergeState == "UNSTABLE")
 
 	rev := ""
 	if r.review != "" {
@@ -3318,6 +3322,8 @@ func (m Model) renderHelpOverlay() string {
 				{"↑", "up to date"},
 				{"↓", "branch behind base (backmerge)"},
 				{"≠", "merge conflict"},
+				{"✗", "CI failing (blocks merge)"},
+				{"/", "CI failing (not required)"},
 			})
 		case "To Review", "Team Review":
 			teamLabel := "show team"
@@ -3346,6 +3352,8 @@ func (m Model) renderHelpOverlay() string {
 				{"↑", "up to date"},
 				{"↓", "branch behind base (backmerge)"},
 				{"≠", "merge conflict"},
+				{"✗", "CI failing (blocks merge)"},
+				{"/", "CI failing (not required)"},
 			})
 		case "Services":
 			svcEntries := [][2]string{
@@ -3564,11 +3572,17 @@ func (m Model) execAction(action, repo string, num int, draft bool) tea.Cmd {
 	}
 }
 
-func ciIcon(state string) string {
+// ciIcon renders a PR's CI column glyph. A failure whose merge state is
+// UNSTABLE is a failing check that isn't required — it still reads as a fail
+// (/), but mergeable, unlike the blocking ✗.
+func ciIcon(state string, optional bool) string {
 	switch state {
 	case "success":
 		return "✓"
 	case "failure":
+		if optional {
+			return "/"
+		}
 		return "✗"
 	case "pending":
 		return "…"

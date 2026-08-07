@@ -188,7 +188,10 @@ func Diff(prev, cur Snapshot) []Event {
 				URL:     prURL(repo, num), CreatedAt: time.Now(),
 			})
 		}
-		if p.CI == "failure" && old.CI != "failure" {
+		// A failure on a non-required check (MergeStateStatus UNSTABLE, i.e.
+		// mergeable) doesn't block anything, so it doesn't get a notification;
+		// only genuinely blocking failures do.
+		if p.CI == "failure" && old.CI != "failure" && p.MergeState != "UNSTABLE" {
 			events = append(events, Event{
 				Kind: KindCIFailed, Repo: repo, Number: num, Title: p.Title,
 				Message: fmt.Sprintf("✗ CI failing · %s#%d %s", repo, num, p.Title),
