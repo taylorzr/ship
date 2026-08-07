@@ -185,6 +185,12 @@ func (c *RealClient) getDeployment(ctx context.Context, namespace, name string) 
 			d.Health.Conditions = append(d.Health.Conditions, "Unavailable")
 		}
 	}
+	d.Health.NewReadyReplicas = -1
+	if d.Health.Progressing {
+		if n, ok := c.currentRSReady(ctx, namespace, dep.Spec.Selector, ""); ok {
+			d.Health.NewReadyReplicas = n
+		}
+	}
 	c.collectHealth(ctx, namespace, name, dep.Spec.Selector, "Deployment", &d.Health)
 	return d, nil
 }
@@ -212,10 +218,11 @@ type rollout struct {
 		} `json:"template"`
 	} `json:"spec"`
 	Status struct {
-		Replicas      int32              `json:"replicas"`
-		ReadyReplicas int32              `json:"readyReplicas"`
-		StableRS      string             `json:"stableRS"`
-		Conditions    []metav1.Condition `json:"conditions"`
+		Replicas       int32              `json:"replicas"`
+		ReadyReplicas  int32              `json:"readyReplicas"`
+		StableRS       string             `json:"stableRS"`
+		CurrentPodHash string             `json:"currentPodHash"`
+		Conditions     []metav1.Condition `json:"conditions"`
 	} `json:"status"`
 }
 
@@ -271,6 +278,12 @@ func (c *RealClient) getRollout(ctx context.Context, namespace, name string) (*W
 			w.Health.Conditions = append(w.Health.Conditions, "Degraded")
 		}
 	}
+	w.Health.NewReadyReplicas = -1
+	if w.Health.Progressing && ro.Status.CurrentPodHash != "" {
+		if n, ok := c.currentRSReady(ctx, namespace, ro.Spec.Selector, ro.Status.CurrentPodHash); ok {
+			w.Health.NewReadyReplicas = n
+		}
+	}
 	c.collectHealth(ctx, namespace, name, ro.Spec.Selector, "Rollout", &w.Health)
 	return w, nil
 }
@@ -282,6 +295,54 @@ func desiredReplicas(r *int32) int32 {
 		return 1
 	}
 	return *r
+}
+
+const (
+	// deploymentRevisionAnnotation is stamped on every ReplicaSet a Deployment
+	// owns; the current (new) RS is the one with the highest value.
+	deploymentRevisionAnnotation = "deployment.kubernetes.io/revision"
+	// rolloutsPodTemplateHashLabel ties an Argo Rollout's ReplicaSets back to
+	// its status.currentPodHash; the current (canary/preview) RS is the match.
+	rolloutsPodTemplateHashLabel = "rollouts-pod-template-hash"
+)
+
+// currentRSReady reports the number of ready pods on the workload's current
+// ReplicaSet. For deployments (podHash empty) that is the RS with the highest
+// revision annotation; for rollouts it is the RS labeled with the rollout's
+// current pod template hash. ok is false when the current RS can't be
+// determined (list denied by RBAC, no matching RS, ...), so callers can fall
+// back to "unknown" rather than guessing.
+func (c *RealClient) currentRSReady(ctx context.Context, namespace string, sel *metav1.LabelSelector, podHash string) (int32, bool) {
+	labelSel, err := metav1.LabelSelectorAsSelector(sel)
+	if err != nil {
+		return 0, false
+	}
+	rss, err := c.clientset.AppsV1().ReplicaSets(namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSel.String()})
+	if err != nil {
+		return 0, false
+	}
+	maxRev := int64(-1)
+	ready := int32(0)
+	found := false
+	for i := range rss.Items {
+		rs := &rss.Items[i]
+		if podHash != "" {
+			if rs.Labels[rolloutsPodTemplateHashLabel] != podHash {
+				continue
+			}
+			return rs.Status.ReadyReplicas, true
+		}
+		rev, err := strconv.ParseInt(rs.Annotations[deploymentRevisionAnnotation], 10, 64)
+		if err != nil {
+			continue
+		}
+		if rev > maxRev {
+			maxRev = rev
+			ready = rs.Status.ReadyReplicas
+			found = true
+		}
+	}
+	return ready, found
 }
 
 // progressingReasons are the Deployment/Rollout "Progressing" condition
@@ -352,6 +413,12 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 		switch pod.Status.Phase {
 		case corev1.PodPending:
 			h.PendingPods++
+			// A pending pod with a non-empty reason (Unschedulable,
+			// FailedMount, ...) is stuck, not merely starting up —
+			// benign ContainerCreating startup leaves the reason empty.
+			if pod.Status.Reason != "" {
+				h.StuckPendingPods++
+			}
 		case corev1.PodFailed:
 			h.FailedPods++
 			// Evicted/NodeLost/etc. survive only while the pod object does —

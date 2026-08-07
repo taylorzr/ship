@@ -18,14 +18,14 @@ type MockSpec struct {
 
 // ParseMockSpec decodes a --mock-k8s value of the form
 //
-//	image|restarts=3|causes=OOMKilling+Exit137|recent_events=OOMKilling|events=BackOff|old_events=Evicted|waiting=ImagePullBackOff|progressing=true|paused=true|ready=false|replicas=2|desired_replicas=3|ready_replicas=1|conditions=ProgressDeadlineExceeded|pending=1|failed=1|scale_up=4|scale_down=2
+//	image|restarts=3|causes=OOMKilling+Exit137|recent_events=OOMKilling|events=BackOff|old_events=Evicted|waiting=ImagePullBackOff|progressing=true|paused=true|ready=false|replicas=2|desired_replicas=3|ready_replicas=1|new_ready_replicas=1|conditions=ProgressDeadlineExceeded|pending=1|stuck_pending=1|failed=1|scale_up=4|scale_down=2
 //
 // Health fields are optional; image is everything before the first "|".
 // If no health fields are given the deployment is healthy. When `ready` is
 // not given it is derived from replicas vs ready_replicas (ready when all
 // replicas are ready), mirroring the real client.
 func ParseMockSpec(v string) MockSpec {
-	spec := MockSpec{Image: v, Health: Health{Ready: true, ReadyReplicas: 1, Replicas: 1, DesiredReplicas: 1}}
+	spec := MockSpec{Image: v, Health: Health{Ready: true, ReadyReplicas: 1, Replicas: 1, DesiredReplicas: 1, NewReadyReplicas: -1}}
 	readySet := false
 	if i := strings.IndexByte(v, '|'); i >= 0 {
 		spec.Image = v[:i]
@@ -60,6 +60,10 @@ func ParseMockSpec(v string) MockSpec {
 				if n, err := strconv.Atoi(val); err == nil {
 					spec.Health.ReadyReplicas = int32(n)
 				}
+			case "new_ready_replicas":
+				if n, err := strconv.Atoi(val); err == nil {
+					spec.Health.NewReadyReplicas = int32(n)
+				}
 			case "events":
 				spec.Health.Events = mockEvents(strings.Split(val, "+"))
 			case "recent_events":
@@ -89,6 +93,10 @@ func ParseMockSpec(v string) MockSpec {
 			case "pending":
 				if n, err := strconv.Atoi(val); err == nil {
 					spec.Health.PendingPods = int32(n)
+				}
+			case "stuck_pending":
+				if n, err := strconv.Atoi(val); err == nil {
+					spec.Health.StuckPendingPods = int32(n)
 				}
 			case "failed":
 				if n, err := strconv.Atoi(val); err == nil {

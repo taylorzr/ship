@@ -82,6 +82,17 @@ func TestParseMockSpecScaleTotals(t *testing.T) {
 	}
 }
 
+func TestParseMockSpecNewReadyReplicasAndStuckPending(t *testing.T) {
+	spec := ParseMockSpec("img|progressing=true|desired_replicas=3|new_ready_replicas=1|stuck_pending=2")
+	if spec.NewReadyReplicas != 1 || spec.StuckPendingPods != 2 {
+		t.Fatalf("NewReadyReplicas = %d StuckPendingPods = %d, want 1/2", spec.NewReadyReplicas, spec.StuckPendingPods)
+	}
+	spec = ParseMockSpec("img|progressing=true")
+	if spec.NewReadyReplicas != -1 {
+		t.Fatalf("default NewReadyReplicas = %d, want -1 (unknown)", spec.NewReadyReplicas)
+	}
+}
+
 func unixSeconds(t *testing.T, s string) time.Time {
 	t.Helper()
 	n, err := strconv.ParseInt(s, 10, 64)

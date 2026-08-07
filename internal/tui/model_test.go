@@ -61,7 +61,7 @@ func TestEventReasonAgeEmitsAgedSegment(t *testing.T) {
 }
 
 func TestProgressingHealthShowsReplicaProgress(t *testing.T) {
-	h := k8s.Health{Progressing: true, ReadyReplicas: 2, Replicas: 5}
+	h := k8s.Health{Progressing: true, DesiredReplicas: 5, NewReadyReplicas: 2}
 	segs := healthSegments(h, eventFilter{})
 	if len(segs) == 0 || segs[0].text != "⟳ Progressing 2/5" {
 		t.Fatalf("segments = %v, want first segment ⟳ Progressing 2/5", segs)
@@ -79,7 +79,7 @@ func TestProgressingHealthShowsReplicaProgress(t *testing.T) {
 }
 
 func TestHealthSegmentsRolloutIgnoresTransientSignals(t *testing.T) {
-	h := k8s.Health{Progressing: true, ReadyReplicas: 1, Replicas: 3, PendingPods: 2, Conditions: []string{"Unavailable"}}
+	h := k8s.Health{Progressing: true, DesiredReplicas: 3, NewReadyReplicas: 1, PendingPods: 2, Conditions: []string{"Unavailable"}}
 	segs := healthSegments(h, eventFilter{})
 	if len(segs) == 0 || segs[0].text != "⟳ Progressing 1/3" {
 		t.Fatalf("segments = %v, want first segment ⟳ Progressing 1/3", segs)
@@ -109,21 +109,26 @@ func TestHealthSegmentsRolloutFlagsRealProblems(t *testing.T) {
 		h    k8s.Health
 		want string
 	}{
-		{"stuck waiting", k8s.Health{Progressing: true, ReadyReplicas: 1, Replicas: 3, Waiting: []string{"ImagePullBackOff"}}, "∞ImagePullBackOff"},
-		{"hard condition", k8s.Health{Progressing: true, ReadyReplicas: 1, Replicas: 3, Conditions: []string{"ReplicaFailure"}}, "⚠ReplicaFailure"},
-		{"failed pods", k8s.Health{Progressing: true, ReadyReplicas: 1, Replicas: 3, FailedPods: 1, FailedReasons: []string{"Evicted"}}, "💀1"},
+		{"stuck waiting", k8s.Health{Progressing: true, DesiredReplicas: 3, NewReadyReplicas: 1, Waiting: []string{"ImagePullBackOff"}}, "∞ImagePullBackOff"},
+		{"hard condition", k8s.Health{Progressing: true, DesiredReplicas: 3, NewReadyReplicas: 1, Conditions: []string{"ReplicaFailure"}}, "⚠ReplicaFailure"},
+		{"failed pods", k8s.Health{Progressing: true, DesiredReplicas: 3, NewReadyReplicas: 1, FailedPods: 1, FailedReasons: []string{"Evicted"}}, "💀1"},
+		{"stuck pending", k8s.Health{Progressing: true, DesiredReplicas: 3, NewReadyReplicas: 0, PendingPods: 1, StuckPendingPods: 1}, "⌛1"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
 			segs := healthSegments(tc.h, eventFilter{})
 			hasX := false
 			hasWant := false
+			hasFraction := false
 			for _, s := range segs {
 				if strings.HasPrefix(s.text, "✖") {
 					hasX = true
 				}
 				if s.text == tc.want {
 					hasWant = true
+				}
+				if strings.HasPrefix(s.text, "⟳ Progressing") {
+					hasFraction = true
 				}
 			}
 			if !hasX {
@@ -132,7 +137,27 @@ func TestHealthSegmentsRolloutFlagsRealProblems(t *testing.T) {
 			if !hasWant {
 				t.Fatalf("segments = %v, want segment %q", segs, tc.want)
 			}
+			if !hasFraction {
+				t.Fatalf("segments = %v, want the ⟳ fraction to stay visible while red", segs)
+			}
 		})
+	}
+}
+
+func TestHealthSegmentsFailingRolloutXPrecedesFraction(t *testing.T) {
+	h := k8s.Health{Progressing: true, DesiredReplicas: 3, NewReadyReplicas: 1, PendingPods: 2, StuckPendingPods: 1}
+	segs := healthSegments(h, eventFilter{})
+	if len(segs) < 2 || segs[0].text != "✖" || segs[1].text != "⟳ Progressing 1/3" {
+		t.Fatalf("segments = %v, want ✖ then ⟳ Progressing 1/3", segs)
+	}
+}
+
+func TestSerializeHealthEmptyWithNewFieldDefaults(t *testing.T) {
+	if got := serializeHealth(k8s.Health{}); got != "" {
+		t.Fatalf("serializeHealth(empty) = %q, want empty", got)
+	}
+	if got := serializeHealth(k8s.Health{NewReadyReplicas: -1}); got != "" {
+		t.Fatalf("serializeHealth with unknown NewReadyReplicas = %q, want empty", got)
 	}
 }
 
@@ -151,6 +176,12 @@ func TestHealthProblemsConsistentDuringRollout(t *testing.T) {
 	}
 	if !healthProblems(k8s.Health{Progressing: true, Conditions: []string{"ReplicaFailure"}}) {
 		t.Fatal("hard condition during rollout should be a problem")
+	}
+	if !healthProblems(k8s.Health{Progressing: true, StuckPendingPods: 1}) {
+		t.Fatal("unschedulable pending pod during rollout should be a problem")
+	}
+	if healthProblems(k8s.Health{Progressing: true, PendingPods: 1}) {
+		t.Fatal("benign pending pod during rollout should not be a problem")
 	}
 	if !healthProblems(k8s.Health{PendingPods: 1}) {
 		t.Fatal("non-progressing workload with pending pods should stay a problem")
@@ -332,25 +363,46 @@ func TestHealthScaleHistoryScaledToZeroNotEmpty(t *testing.T) {
 }
 
 func TestHealthRoundTripPreservesScaleTotals(t *testing.T) {
-	h := k8s.Health{Ready: true, Replicas: 2, ReadyReplicas: 2, DesiredReplicas: 4, ScaleUp: 7, ScaleDown: 3}
+	h := k8s.Health{Ready: true, Replicas: 2, ReadyReplicas: 2, DesiredReplicas: 4, ScaleUp: 7, ScaleDown: 3, NewReadyReplicas: 2, StuckPendingPods: 1}
 	got := parseHealth(serializeHealth(h))
 	if got.ScaleUp != 7 || got.ScaleDown != 3 {
 		t.Fatalf("round-trip scale totals = %+v, want up 7 down 3", got)
 	}
+	if got.NewReadyReplicas != 2 || got.StuckPendingPods != 1 {
+		t.Fatalf("round-trip = %+v, want NewReadyReplicas 2 StuckPendingPods 1", got)
+	}
 }
 
 func TestParseHealthOldFormatScaleZero(t *testing.T) {
-	h := k8s.Health{Ready: true, Replicas: 3, ReadyReplicas: 3, Restarts: 2, ScaleUp: 5, ScaleDown: 1}
+	h := k8s.Health{Ready: true, Replicas: 3, ReadyReplicas: 3, Restarts: 2, ScaleUp: 5, ScaleDown: 1, NewReadyReplicas: 2, StuckPendingPods: 1}
 	s := serializeHealth(h)
-	idx := strings.LastIndex(s, "|")
-	idx = strings.LastIndex(s[:idx], "|")
-	old := s[:idx]
-	got := parseHealth(old)
+	for range 4 {
+		s = s[:strings.LastIndex(s, "|")]
+	}
+	got := parseHealth(s)
 	if got.ScaleUp != 0 || got.ScaleDown != 0 {
 		t.Fatalf("old-format scale totals = %d/%d, want 0/0", got.ScaleUp, got.ScaleDown)
 	}
+	if got.NewReadyReplicas != -1 || got.StuckPendingPods != 0 {
+		t.Fatalf("old-format = NewReadyReplicas %d StuckPendingPods %d, want -1/0", got.NewReadyReplicas, got.StuckPendingPods)
+	}
 	if got.Replicas != 3 || got.ReadyReplicas != 3 || got.Restarts != 2 {
 		t.Fatalf("old-format parse = %+v, want current/ready 3 restarts 2", got)
+	}
+}
+
+func TestParseHealthPreviousVersionPreservesScaleButNotNewFields(t *testing.T) {
+	h := k8s.Health{Ready: true, Replicas: 3, ReadyReplicas: 3, Restarts: 2, ScaleUp: 5, ScaleDown: 1, NewReadyReplicas: 2, StuckPendingPods: 1}
+	s := serializeHealth(h)
+	for range 2 {
+		s = s[:strings.LastIndex(s, "|")]
+	}
+	got := parseHealth(s)
+	if got.ScaleUp != 5 || got.ScaleDown != 1 {
+		t.Fatalf("previous-version scale totals = %d/%d, want 5/1", got.ScaleUp, got.ScaleDown)
+	}
+	if got.NewReadyReplicas != -1 || got.StuckPendingPods != 0 {
+		t.Fatalf("previous-version = NewReadyReplicas %d StuckPendingPods %d, want -1/0", got.NewReadyReplicas, got.StuckPendingPods)
 	}
 }
 

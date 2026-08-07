@@ -901,7 +901,7 @@ func scaleDirection(h k8s.Health) (up, down bool) {
 func healthProblems(h k8s.Health) bool {
 	up, down := scaleDirection(h)
 	if h.Progressing || up || down {
-		return h.FailedPods > 0 || len(h.Waiting) > 0 || len(h.FailedReasons) > 0 || hasHardCondition(h.Conditions)
+		return h.FailedPods > 0 || len(h.Waiting) > 0 || len(h.FailedReasons) > 0 || h.StuckPendingPods > 0 || hasHardCondition(h.Conditions)
 	}
 	return !h.Ready || len(h.Conditions) > 0 || h.PendingPods > 0 ||
 		h.FailedPods > 0 || len(h.Waiting) > 0 || len(h.RecentEvents) > 0 || len(h.Events) > 0
@@ -2565,14 +2565,15 @@ func serializeHealth(h k8s.Health) string {
 	recent := strings.Join(h.RecentEvents, ",")
 	old := strings.Join(h.OldEvents, ",")
 	waiting := strings.Join(h.Waiting, ",")
-	return fmt.Sprintf("%v|%d|%d|%d|%s|%s|%d|%d|%s|%s|%s|%s|%v|%v|%d|%d|%d", h.Ready, h.ReadyReplicas, h.Replicas, h.Restarts, events, conditions, h.PendingPods, h.FailedPods, causes, recent, old, waiting, h.Progressing, h.Paused, h.DesiredReplicas, h.ScaleUp, h.ScaleDown)
+	return fmt.Sprintf("%v|%d|%d|%d|%s|%s|%d|%d|%s|%s|%s|%s|%v|%v|%d|%d|%d|%d|%d", h.Ready, h.ReadyReplicas, h.Replicas, h.Restarts, events, conditions, h.PendingPods, h.FailedPods, causes, recent, old, waiting, h.Progressing, h.Paused, h.DesiredReplicas, h.ScaleUp, h.ScaleDown, h.NewReadyReplicas, h.StuckPendingPods)
 }
 
 // parseHealth decodes a value produced by serializeHealth. Older cache rows
 // with fewer fields are still accepted.
 func parseHealth(s string) k8s.Health {
 	var h k8s.Health
-	parts := strings.SplitN(s, "|", 17)
+	h.NewReadyReplicas = -1
+	parts := strings.SplitN(s, "|", 19)
 	if len(parts) < 5 {
 		return h
 	}
@@ -2618,6 +2619,12 @@ func parseHealth(s string) k8s.Health {
 	}
 	if len(parts) > 16 {
 		fmt.Sscanf(parts[16], "%d", &h.ScaleDown)
+	}
+	if len(parts) > 17 {
+		fmt.Sscanf(parts[17], "%d", &h.NewReadyReplicas)
+	}
+	if len(parts) > 18 {
+		fmt.Sscanf(parts[18], "%d", &h.StuckPendingPods)
 	}
 	return h
 }
@@ -2676,25 +2683,26 @@ func (m *Model) eventFilter() eventFilter {
 
 // healthSegments splits a workload's health into display parts so callers can
 // style each individually. Plain ✔ is current readiness. Blue is deployment
-// state: ⟳ Progressing (with the ready-replica count, e.g. "⟳ Progressing
-// 2/5"), ⏸DeploymentPaused awaiting manual approval, and ⇑ N / ⇓ N while
-// scaling to the target replica count (the arrow is the headline when not yet
-// ready, trailing the ✔ otherwise). Yellow is history and waiting: ↻N
-// restarts, their causes, and pending pods. Red is current problems: ✖
-// not-ready (when not mid-rollout and not scaling), hard deployment conditions
-// (ReplicaFailure, Degraded, ProgressDeadlineExceeded), failed pods and their
-// reasons (e.g. Evicted), and stuck containers. A rollout in progress or a
-// scale in flight keeps a non-red headline unless it's genuinely broken — the
-// transient "Unavailable" condition and pending pods they pass through don't
-// flip it to ✖. Past warning events (recent/warn/old buckets, and the hidden
-// ~N count) are grouped at the end behind a │ separator and marked dim so
-// they read as past and ignorable while keeping their hue. Restarts turn
-// red only when the workload is currently in trouble; a rollout in progress
-// shows a blue ⟳ instead of the readiness check.
+// state: ⟳ Progressing (with the new-pods-ready fraction over desired, e.g.
+// "⟳ Progressing 2/5" — ready pods on the current ReplicaSet), ⏸DeploymentPaused
+// awaiting manual approval, and ⇑ N / ⇓ N while scaling to the target replica
+// count (the arrow is the headline when not yet ready, trailing the ✔
+// otherwise). Yellow is history and waiting: ↻N restarts, their causes, and
+// pending pods. Red is current problems: ✖ not-ready (when not mid-rollout and
+// not scaling), hard deployment conditions (ReplicaFailure, Degraded,
+// ProgressDeadlineExceeded), failed pods and their reasons (e.g. Evicted),
+// stuck containers, and pending pods stuck with a reason (Unschedulable,
+// FailedMount, ...). A rollout in progress keeps the blue ⟳ fraction and
+// prepends a red ✖ only when genuinely broken — the transient "Unavailable"
+// condition and benign starting pods don't flip it. Past warning events
+// (recent/warn/old buckets, and the hidden ~N count) are grouped at the end
+// behind a │ separator and marked dim so they read as past and ignorable while
+// keeping their hue. Restarts turn red only when the workload is currently in
+// trouble; a rollout in progress shows a blue ⟳ instead of the readiness check.
 func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 	up, down := scaleDirection(h)
 	scaling := up || down
-	problems := h.FailedPods > 0 || len(h.Waiting) > 0 || len(h.FailedReasons) > 0 ||
+	problems := h.FailedPods > 0 || len(h.Waiting) > 0 || len(h.FailedReasons) > 0 || h.StuckPendingPods > 0 ||
 		(!h.Ready && !h.Progressing && !scaling) || hasHardCondition(h.Conditions)
 	if !h.Progressing {
 		problems = problems || h.PendingPods > 0
@@ -2705,13 +2713,16 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 	}
 	var segs []healthSeg
 	switch {
-	case h.Progressing && !problems:
+	case h.Progressing:
+		if problems {
+			segs = append(segs, healthSeg{"✖", segBad, false})
+		}
 		icon := "⟳ Progressing"
-		if h.Replicas > 0 {
-			icon = fmt.Sprintf("⟳ Progressing %d/%d", h.ReadyReplicas, h.Replicas)
+		if h.DesiredReplicas > 0 && h.NewReadyReplicas >= 0 {
+			icon = fmt.Sprintf("⟳ Progressing %d/%d", h.NewReadyReplicas, h.DesiredReplicas)
 		}
 		segs = append(segs, healthSeg{icon, segInfo, false})
-	case h.Ready:
+	case h.Ready && !problems:
 		segs = append(segs, healthSeg{"✔", segOK, false})
 	case scaling && !problems:
 		dir := "⇓"
@@ -2819,7 +2830,7 @@ func healthEmpty(h k8s.Health) bool {
 }
 
 // formatHealth renders the cached health string as a compact plain-text column
-// value: ✔ healthy, ⟳ Progressing (ready replicas, e.g. "⟳ Progressing 2/5"),
+// value: ✔ healthy, ⟳ Progressing (new pods ready / desired, e.g. "⟳ Progressing 2/5"),
 // ⇑ N / ⇓ N scaling to the target replica count, ✖ not ready,
 // ⏸DeploymentPaused paused,
 // ↻N restarts, ↻OOMKilled restart causes, ⚠ error events (colored by age in
@@ -3396,7 +3407,7 @@ func (m Model) renderHelpOverlay() string {
 			legend = helpSection("legend", [][2]string{
 				{"✔", "healthy"},
 				{"✖", "unhealthy"},
-				{"⟳ Progressing 2/5", "rolling out · ready replicas"},
+				{"⟳ Progressing 2/5", "rolling out · new pods ready / desired"},
 				{"⇑3 / ⇓1", "scaling to target replicas"},
 				{"⇅HPA ↑4 ↓2", "HPA rescaled pods (last hour)"},
 				{"↻N", "restarts"},

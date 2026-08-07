@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"slices"
+	"strconv"
 	"testing"
 	"time"
 
@@ -231,6 +232,78 @@ func TestGetDeploymentDesiredReplicasDefaultsToOne(t *testing.T) {
 	}
 	if w.Health.DesiredReplicas != 1 {
 		t.Fatalf("DesiredReplicas = %d, want default 1", w.Health.DesiredReplicas)
+	}
+}
+
+func testProgressingDeployment() *appsv1.Deployment {
+	dep := testDeployment(nil)
+	dep.Status.Replicas = 3
+	dep.Status.ReadyReplicas = 2
+	dep.Status.Conditions = []appsv1.DeploymentCondition{{
+		Type:   appsv1.DeploymentProgressing,
+		Status: corev1.ConditionTrue,
+		Reason: "NewReplicaSetUpdated",
+	}}
+	return dep
+}
+
+func testRS(name string, revision int, replicas, ready int32) *appsv1.ReplicaSet {
+	return &appsv1.ReplicaSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: testNamespace,
+			Labels:    map[string]string{"app": "web"},
+			Annotations: map[string]string{
+				deploymentRevisionAnnotation: strconv.Itoa(revision),
+			},
+		},
+		Spec:   appsv1.ReplicaSetSpec{Replicas: &replicas},
+		Status: appsv1.ReplicaSetStatus{Replicas: replicas, ReadyReplicas: ready},
+	}
+}
+
+func TestGetDeploymentCapturesNewReadyReplicas(t *testing.T) {
+	c := newTestClient(t, testProgressingDeployment(),
+		testRS("web-abc", 1, 3, 2),
+		testRS("web-def", 2, 3, 1))
+	w, err := c.GetWorkload(context.Background(), "", testNamespace, "web", "deployment")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !w.Health.Progressing {
+		t.Fatalf("want progressing, health = %+v", w.Health)
+	}
+	if w.Health.NewReadyReplicas != 1 {
+		t.Fatalf("NewReadyReplicas = %d, want 1 (ready pods on the current RS)", w.Health.NewReadyReplicas)
+	}
+}
+
+func TestGetDeploymentNotProgressingNewReadyReplicasUnknown(t *testing.T) {
+	c := newTestClient(t, testDeployment(nil), testRS("web-abc", 1, 3, 2))
+	w, err := c.GetWorkload(context.Background(), "", testNamespace, "web", "deployment")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.Health.NewReadyReplicas != -1 {
+		t.Fatalf("NewReadyReplicas = %d, want -1 (unknown) when not progressing", w.Health.NewReadyReplicas)
+	}
+}
+
+func TestCollectHealthStuckPendingPods(t *testing.T) {
+	pod := testPod("web-abc12345", corev1.PodPending)
+	pod.Status.Reason = "Unschedulable"
+	c := newTestClient(t, pod)
+	h := c.collectHealthFor(t, "web", "Deployment")
+	if h.StuckPendingPods != 1 || h.PendingPods != 1 {
+		t.Fatalf("StuckPendingPods = %d PendingPods = %d, want 1/1", h.StuckPendingPods, h.PendingPods)
+	}
+}
+
+func TestCollectHealthBenignPendingNotStuck(t *testing.T) {
+	c := newTestClient(t, testPod("web-abc12345", corev1.PodPending))
+	h := c.collectHealthFor(t, "web", "Deployment")
+	if h.StuckPendingPods != 0 {
+		t.Fatalf("StuckPendingPods = %d, want 0 for a benign starting pod", h.StuckPendingPods)
 	}
 }
 
