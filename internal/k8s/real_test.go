@@ -3,11 +3,13 @@ package k8s
 import (
 	"context"
 	"errors"
+	"fmt"
 	"slices"
 	"testing"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -229,5 +231,127 @@ func TestGetDeploymentDesiredReplicasDefaultsToOne(t *testing.T) {
 	}
 	if w.Health.DesiredReplicas != 1 {
 		t.Fatalf("DesiredReplicas = %d, want default 1", w.Health.DesiredReplicas)
+	}
+}
+
+func rescaleEvent(name, hpaName string, size int32, age time.Duration) *corev1.Event {
+	return &corev1.Event{
+		ObjectMeta:    metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+		Type:          corev1.EventTypeNormal,
+		Reason:        "SuccessfulRescale",
+		Message:       fmt.Sprintf("New size: %d; reason: cpu utilization (80%%/50%%) above target", size),
+		LastTimestamp: metav1.NewTime(time.Now().Add(-age)),
+		InvolvedObject: corev1.ObjectReference{
+			Kind:      "HorizontalPodAutoscaler",
+			Name:      hpaName,
+			Namespace: testNamespace,
+		},
+	}
+}
+
+func testHPA(name, targetKind, targetName string) *autoscalingv2.HorizontalPodAutoscaler {
+	return &autoscalingv2.HorizontalPodAutoscaler{
+		ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: testNamespace},
+		Spec: autoscalingv2.HorizontalPodAutoscalerSpec{
+			ScaleTargetRef: autoscalingv2.CrossVersionObjectReference{Kind: targetKind, Name: targetName},
+		},
+	}
+}
+
+func collectHealthForWithDesired(t *testing.T, c *RealClient, desired int32) *Health {
+	t.Helper()
+	h := &Health{DesiredReplicas: desired}
+	c.collectHealth(context.Background(), testNamespace, "web",
+		&metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}}, "Deployment", h)
+	return h
+}
+
+func TestCollectHealthHPARescaleUpTotals(t *testing.T) {
+	c := newTestClient(t,
+		testPod("web-abc", corev1.PodRunning),
+		testHPA("web-hpa", "Deployment", "web"),
+		rescaleEvent("r1", "web-hpa", 2, 2*time.Minute),
+		rescaleEvent("r2", "web-hpa", 4, time.Minute),
+	)
+	h := collectHealthForWithDesired(t, c, 4)
+	if h.ScaleUp != 2 {
+		t.Fatalf("ScaleUp = %d, want 2", h.ScaleUp)
+	}
+	if h.ScaleDown != 0 {
+		t.Fatalf("ScaleDown = %d, want 0", h.ScaleDown)
+	}
+}
+
+func TestCollectHealthHPARescaleDownTotals(t *testing.T) {
+	c := newTestClient(t,
+		testPod("web-abc", corev1.PodRunning),
+		testHPA("web-hpa", "Deployment", "web"),
+		rescaleEvent("r1", "web-hpa", 6, 3*time.Minute),
+		rescaleEvent("r2", "web-hpa", 2, time.Minute),
+	)
+	h := collectHealthForWithDesired(t, c, 2)
+	if h.ScaleDown != 4 {
+		t.Fatalf("ScaleDown = %d, want 4", h.ScaleDown)
+	}
+	if h.ScaleUp != 0 {
+		t.Fatalf("ScaleUp = %d, want 0", h.ScaleUp)
+	}
+}
+
+func TestCollectHealthHPARescaleTerminalToDesired(t *testing.T) {
+	// Last HPA rescale set 3; the workload now wants 5 (e.g. a post-event
+	// change). The terminal transition accounts for the pods added.
+	c := newTestClient(t,
+		testPod("web-abc", corev1.PodRunning),
+		testHPA("web-hpa", "Deployment", "web"),
+		rescaleEvent("r1", "web-hpa", 3, time.Minute),
+	)
+	h := collectHealthForWithDesired(t, c, 5)
+	if h.ScaleUp != 2 {
+		t.Fatalf("ScaleUp = %d, want 2", h.ScaleUp)
+	}
+}
+
+func TestCollectHealthHPARescaleIgnoresOtherHPA(t *testing.T) {
+	c := newTestClient(t,
+		testPod("web-abc", corev1.PodRunning),
+		testHPA("other-hpa", "Deployment", "other"),
+		rescaleEvent("r1", "other-hpa", 2, time.Minute),
+	)
+	h := collectHealthForWithDesired(t, c, 2)
+	if h.ScaleUp != 0 || h.ScaleDown != 0 {
+		t.Fatalf("scale totals = %d/%d, want 0/0 for unrelated HPA", h.ScaleUp, h.ScaleDown)
+	}
+}
+
+func TestCollectHealthHPARescaleOutsideWindow(t *testing.T) {
+	c := newTestClient(t,
+		testPod("web-abc", corev1.PodRunning),
+		testHPA("web-hpa", "Deployment", "web"),
+		rescaleEvent("r1", "web-hpa", 4, 2*time.Hour),
+	)
+	h := collectHealthForWithDesired(t, c, 4)
+	if h.ScaleUp != 0 || h.ScaleDown != 0 {
+		t.Fatalf("scale totals = %d/%d, want 0/0 for stale event", h.ScaleUp, h.ScaleDown)
+	}
+}
+
+func TestRescaleSize(t *testing.T) {
+	tests := []struct {
+		msg  string
+		want int32
+		ok   bool
+	}{
+		{"New size: 4; reason: cpu utilization (80%/50%) above target", 4, true},
+		{"New size: 1", 1, true},
+		{"Scaled up replica set web-abc to 5", 0, false},
+		{"", 0, false},
+		{"New size: ; reason: x", 0, false},
+	}
+	for _, tt := range tests {
+		got, ok := rescaleSize(tt.msg)
+		if got != tt.want || ok != tt.ok {
+			t.Fatalf("rescaleSize(%q) = (%d, %v), want (%d, %v)", tt.msg, got, ok, tt.want, tt.ok)
+		}
 	}
 }

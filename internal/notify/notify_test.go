@@ -103,6 +103,22 @@ func TestCIFailed(t *testing.T) {
 	}
 }
 
+func TestCIFailedOptionalSuppressed(t *testing.T) {
+	// A failure on a non-required check (MergeStateStatus UNSTABLE, i.e.
+	// mergeable) doesn't block anything, so it must not notify.
+	prev := addPR(Snapshot{}, "org/repo", 1, "mine", PRState{Title: "T", CI: "success", MergeState: "CLEAN"})
+	cur := addPR(Snapshot{}, "org/repo", 1, "mine", PRState{Title: "T", CI: "failure", MergeState: "UNSTABLE"})
+	if has(kinds(Diff(prev, cur)), KindCIFailed) {
+		t.Fatal("non-required ci failure should not fire ci-failed")
+	}
+	// A blocking failure still notifies.
+	prev2 := addPR(Snapshot{}, "org/repo", 2, "mine", PRState{Title: "T", CI: "success", MergeState: "CLEAN"})
+	cur2 := addPR(Snapshot{}, "org/repo", 2, "mine", PRState{Title: "T", CI: "failure", MergeState: "BLOCKED"})
+	if !has(kinds(Diff(prev2, cur2)), KindCIFailed) {
+		t.Fatal("required ci failure should fire ci-failed")
+	}
+}
+
 func TestMergeable(t *testing.T) {
 	// BLOCKED -> CLEAN fires once GitHub computes the PR mergeable.
 	prev := addPR(Snapshot{}, "org/repo", 1, "mine", PRState{Title: "T", MergeState: "BLOCKED"})

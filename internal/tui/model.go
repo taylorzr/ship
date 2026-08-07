@@ -1923,13 +1923,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 					m.confirm = &confirmAction{action: "merge-conflict-error", title: r.title}
 				} else {
 					warnings := []string{}
-				if r.ci == "failure" {
-					if r.mergeState == "UNSTABLE" {
-						warnings = append(warnings, "CI: failing (not required)")
-					} else {
-						warnings = append(warnings, "CI: failing")
+					if r.ci == "failure" {
+						if r.mergeState == "UNSTABLE" {
+							warnings = append(warnings, "CI: failing (not required)")
+						} else {
+							warnings = append(warnings, "CI: failing")
+						}
 					}
-				}
 					if r.review == "CHANGES_REQUESTED" {
 						warnings = append(warnings, "Review: changes requested")
 					}
@@ -2556,7 +2556,7 @@ func serializePendingTags(tags []gh.PendingTag) (pending string, contribs string
 // serializeHealth turns service health into a compact on-disk string so the
 // Services column survives cache reloads.
 func serializeHealth(h k8s.Health) string {
-	if h.Replicas == 0 && h.DesiredReplicas == 0 && h.Restarts == 0 && len(h.RestartCauses) == 0 && len(h.Events) == 0 && len(h.RecentEvents) == 0 && len(h.OldEvents) == 0 && len(h.Waiting) == 0 && len(h.Conditions) == 0 && h.PendingPods == 0 && h.FailedPods == 0 && !h.Progressing && !h.Paused {
+	if h.Replicas == 0 && h.DesiredReplicas == 0 && h.Restarts == 0 && len(h.RestartCauses) == 0 && len(h.Events) == 0 && len(h.RecentEvents) == 0 && len(h.OldEvents) == 0 && len(h.Waiting) == 0 && len(h.Conditions) == 0 && h.PendingPods == 0 && h.FailedPods == 0 && !h.Progressing && !h.Paused && h.ScaleUp == 0 && h.ScaleDown == 0 {
 		return ""
 	}
 	events := strings.Join(h.Events, ",")
@@ -2565,14 +2565,14 @@ func serializeHealth(h k8s.Health) string {
 	recent := strings.Join(h.RecentEvents, ",")
 	old := strings.Join(h.OldEvents, ",")
 	waiting := strings.Join(h.Waiting, ",")
-	return fmt.Sprintf("%v|%d|%d|%d|%s|%s|%d|%d|%s|%s|%s|%s|%v|%v|%d", h.Ready, h.ReadyReplicas, h.Replicas, h.Restarts, events, conditions, h.PendingPods, h.FailedPods, causes, recent, old, waiting, h.Progressing, h.Paused, h.DesiredReplicas)
+	return fmt.Sprintf("%v|%d|%d|%d|%s|%s|%d|%d|%s|%s|%s|%s|%v|%v|%d|%d|%d", h.Ready, h.ReadyReplicas, h.Replicas, h.Restarts, events, conditions, h.PendingPods, h.FailedPods, causes, recent, old, waiting, h.Progressing, h.Paused, h.DesiredReplicas, h.ScaleUp, h.ScaleDown)
 }
 
 // parseHealth decodes a value produced by serializeHealth. Older cache rows
 // with fewer fields are still accepted.
 func parseHealth(s string) k8s.Health {
 	var h k8s.Health
-	parts := strings.SplitN(s, "|", 15)
+	parts := strings.SplitN(s, "|", 17)
 	if len(parts) < 5 {
 		return h
 	}
@@ -2612,6 +2612,12 @@ func parseHealth(s string) k8s.Health {
 	}
 	if len(parts) > 14 {
 		fmt.Sscanf(parts[14], "%d", &h.DesiredReplicas)
+	}
+	if len(parts) > 15 {
+		fmt.Sscanf(parts[15], "%d", &h.ScaleUp)
+	}
+	if len(parts) > 16 {
+		fmt.Sscanf(parts[16], "%d", &h.ScaleDown)
 	}
 	return h
 }
@@ -2671,7 +2677,7 @@ func (m *Model) eventFilter() eventFilter {
 // healthSegments splits a workload's health into display parts so callers can
 // style each individually. Plain ✔ is current readiness. Blue is deployment
 // state: ⟳ Progressing (with the ready-replica count, e.g. "⟳ Progressing
-// 2/5"), ⏸DeploymentPaused awaiting manual approval, and ↑ N / ↓ N while
+// 2/5"), ⏸DeploymentPaused awaiting manual approval, and ⇑ N / ⇓ N while
 // scaling to the target replica count (the arrow is the headline when not yet
 // ready, trailing the ✔ otherwise). Yellow is history and waiting: ↻N
 // restarts, their causes, and pending pods. Red is current problems: ✖
@@ -2708,11 +2714,11 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 	case h.Ready:
 		segs = append(segs, healthSeg{"✔", segOK, false})
 	case scaling && !problems:
-		dir := "↓"
+		dir := "⇓"
 		if up {
-			dir = "↑"
+			dir = "⇑"
 		}
-		segs = append(segs, healthSeg{fmt.Sprintf("%s %d", dir, h.DesiredReplicas), segInfo, false})
+		segs = append(segs, healthSeg{fmt.Sprintf("%s%d", dir, h.DesiredReplicas), segInfo, false})
 	case h.Replicas > 0:
 		segs = append(segs, healthSeg{"✖", segBad, false})
 	}
@@ -2720,11 +2726,11 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 		segs = append(segs, healthSeg{"⏸DeploymentPaused", segInfo, false})
 	}
 	if scaling && (h.Ready || problems) {
-		dir := "↓"
+		dir := "⇓"
 		if up {
-			dir = "↑"
+			dir = "⇑"
 		}
-		segs = append(segs, healthSeg{fmt.Sprintf("%s %d", dir, h.DesiredReplicas), segInfo, false})
+		segs = append(segs, healthSeg{fmt.Sprintf("%s%d", dir, h.DesiredReplicas), segInfo, false})
 	}
 	if h.Restarts > 0 {
 		segs = append(segs, healthSeg{fmt.Sprintf("↻%d", h.Restarts), restartKind, false})
@@ -2759,6 +2765,18 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 		segs = append(segs, healthSeg{fmt.Sprintf("💀%d", h.FailedPods), segBad, false})
 	}
 	var events []healthSeg
+	// HPA rescale totals share the muted │ section with past events, sitting
+	// ahead of them so the hour view reads as one auxiliary block.
+	if h.ScaleUp > 0 || h.ScaleDown > 0 {
+		text := "⇅HPA"
+		if h.ScaleUp > 0 {
+			text += fmt.Sprintf(" ↑%d", h.ScaleUp)
+		}
+		if h.ScaleDown > 0 {
+			text += fmt.Sprintf(" ↓%d", h.ScaleDown)
+		}
+		events = append(events, healthSeg{text, segInfo, false})
+	}
 	hidden := 0
 	addEvents := func(list []string, kind int) {
 		for _, e := range list {
@@ -2796,15 +2814,18 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 func healthEmpty(h k8s.Health) bool {
 	return h.Replicas == 0 && h.DesiredReplicas == 0 && h.Restarts == 0 && len(h.RestartCauses) == 0 &&
 		len(h.Events) == 0 && len(h.RecentEvents) == 0 && len(h.OldEvents) == 0 && len(h.Waiting) == 0 &&
-		len(h.Conditions) == 0 && len(h.FailedReasons) == 0 && h.PendingPods == 0 && h.FailedPods == 0 && !h.Progressing && !h.Paused
+		len(h.Conditions) == 0 && len(h.FailedReasons) == 0 && h.PendingPods == 0 && h.FailedPods == 0 &&
+		!h.Progressing && !h.Paused && h.ScaleUp == 0 && h.ScaleDown == 0
 }
 
 // formatHealth renders the cached health string as a compact plain-text column
 // value: ✔ healthy, ⟳ Progressing (ready replicas, e.g. "⟳ Progressing 2/5"),
-// ↑ N / ↓ N scaling to the target replica count, ✖ not ready,
+// ⇑ N / ⇓ N scaling to the target replica count, ✖ not ready,
 // ⏸DeploymentPaused paused,
 // ↻N restarts, ↻OOMKilled restart causes, ⚠ error events (colored by age in
 // the TUI), ∞ waiting/retrying, ⌛N pending, 💀N failed, ⚠ conditions.
+// HPA rescale totals from the last hour (⇅HPA ↑N ↓N) are grouped with past
+// events behind a │ separator.
 func formatHealth(health string, ev eventFilter) string {
 	h := parseHealth(health)
 	if healthEmpty(h) {
@@ -3376,7 +3397,8 @@ func (m Model) renderHelpOverlay() string {
 				{"✔", "healthy"},
 				{"✖", "unhealthy"},
 				{"⟳ Progressing 2/5", "rolling out · ready replicas"},
-				{"↑3 / ↓1", "scaling to target replicas"},
+				{"⇑3 / ⇓1", "scaling to target replicas"},
+				{"⇅HPA ↑4 ↓2", "HPA rescaled pods (last hour)"},
 				{"↻N", "restarts"},
 				{"↻OOMKilled", "last restart cause"},
 				{"⌛N", "pods pending"},

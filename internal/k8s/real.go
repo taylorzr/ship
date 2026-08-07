@@ -6,12 +6,14 @@ import (
 	"net/http"
 	"os/exec"
 	"sort"
+	"strconv"
 	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
+	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -509,6 +511,124 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 			h.Events = append(h.Events, fmt.Sprintf("%s@%d", reason, t.Unix()))
 		case !t.Before(&historyCutoff):
 			h.OldEvents = append(h.OldEvents, fmt.Sprintf("%s@%d", reason, t.Unix()))
+		}
+	}
+
+	c.collectHpaRescales(ctx, namespace, name, kind, events, historyCutoff, h)
+}
+
+// rescaleSize parses the replica count from an HPA SuccessfulRescale event
+// message ("New size: 4; reason: cpu: 80%/50%"), reporting whether a valid
+// count was found. The count is the HPA's new target, which ship turns into
+// scale-up/down totals via the deltas between consecutive rescales.
+func rescaleSize(msg string) (int32, bool) {
+	const prefix = "New size: "
+	i := strings.Index(msg, prefix)
+	if i < 0 {
+		return 0, false
+	}
+	i += len(prefix)
+	end := i
+	for end < len(msg) && msg[end] >= '0' && msg[end] <= '9' {
+		end++
+	}
+	if end == i {
+		return 0, false
+	}
+	n, err := strconv.Atoi(msg[i:end])
+	if err != nil || n < 0 {
+		return 0, false
+	}
+	return int32(n), true
+}
+
+// collectHpaRescales reconstructs the last hour of HPA-driven scaling for the
+// workload, as pods added (ScaleUp) and removed (ScaleDown). HPA emits a
+// Normal SuccessfulRescale event ("New size: N") every time it changes a
+// target, and the events persist long enough (max-event-age + GC TTL) for a
+// single list to cover the history window. Deployments also emit
+// ScalingReplicaSet events, but a single rolling update produces ~7 of them,
+// so HPA events are the clean signal. Direction is derived from the deltas
+// between consecutive rescales plus a terminal transition to the workload's
+// current desired count, because the event message only carries the new size.
+//
+// Caveat: the API server aggregates events with identical messages and counts,
+// so a rapid size oscillation (e.g. 4→5→4) within an aggregation window can
+// undercount; typical gradual autoscaling reconstructs accurately.
+func (c *RealClient) collectHpaRescales(ctx context.Context, namespace, name, kind string, events []corev1.Event, cutoff metav1.Time, h *Health) {
+	// The HPA list is loaded lazily, only when a SuccessfulRescale HPA event
+	// is actually seen; it can be denied by read-only RBAC, so no list call is
+	// made for services without HPA activity.
+	var (
+		hpas      []autoscalingv2.HorizontalPodAutoscaler
+		hpaListed bool
+	)
+	loadHPAs := func() {
+		if hpaListed {
+			return
+		}
+		hpaListed = true
+		hpaList, err := c.clientset.AutoscalingV2().HorizontalPodAutoscalers(namespace).List(ctx, metav1.ListOptions{})
+		if err != nil {
+			return // fail-open: nothing to match against
+		}
+		hpas = append(hpas, hpaList.Items...)
+	}
+
+	type rescale struct {
+		at   metav1.Time
+		size int32
+	}
+	var rescales []rescale
+	for i := range events {
+		ev := &events[i]
+		obj := ev.InvolvedObject
+		if ev.Type != "Normal" || ev.Reason != "SuccessfulRescale" || obj.Kind != "HorizontalPodAutoscaler" {
+			continue
+		}
+		loadHPAs()
+		matched := false
+		for j := range hpas {
+			hpa := &hpas[j]
+			if hpa.Name != obj.Name {
+				continue
+			}
+			if hpa.Spec.ScaleTargetRef.Kind == kind && hpa.Spec.ScaleTargetRef.Name == name {
+				matched = true
+				break
+			}
+		}
+		if !matched || ev.LastTimestamp.Before(&cutoff) {
+			continue
+		}
+		size, ok := rescaleSize(ev.Message)
+		if !ok {
+			continue
+		}
+		rescales = append(rescales, rescale{ev.LastTimestamp, size})
+	}
+	if len(rescales) == 0 {
+		return
+	}
+
+	sort.Slice(rescales, func(i, j int) bool { return rescales[i].at.Before(&rescales[j].at) })
+	prev := rescales[0].size
+	for _, r := range rescales[1:] {
+		if r.size > prev {
+			h.ScaleUp += r.size - prev
+		} else if r.size < prev {
+			h.ScaleDown += prev - r.size
+		}
+		prev = r.size
+	}
+	// Terminal transition: the HPA's last observed target vs. the workload's
+	// current desired count. Catches an in-flight rescale (event still
+	// pending) and keeps attribution right after a manual `kubectl scale`.
+	if prev != h.DesiredReplicas {
+		if h.DesiredReplicas > prev {
+			h.ScaleUp += h.DesiredReplicas - prev
+		} else {
+			h.ScaleDown += prev - h.DesiredReplicas
 		}
 	}
 }

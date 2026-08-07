@@ -71,6 +71,17 @@ func TestParseMockSpecDesiredReplicas(t *testing.T) {
 	}
 }
 
+func TestParseMockSpecScaleTotals(t *testing.T) {
+	spec := ParseMockSpec("img|scale_up=4|scale_down=2")
+	if spec.ScaleUp != 4 || spec.ScaleDown != 2 {
+		t.Fatalf("scale totals = %d/%d, want 4/2", spec.ScaleUp, spec.ScaleDown)
+	}
+	spec = ParseMockSpec("img")
+	if spec.ScaleUp != 0 || spec.ScaleDown != 0 {
+		t.Fatalf("default scale totals = %d/%d, want 0/0", spec.ScaleUp, spec.ScaleDown)
+	}
+}
+
 func unixSeconds(t *testing.T, s string) time.Time {
 	t.Helper()
 	n, err := strconv.ParseInt(s, 10, 64)

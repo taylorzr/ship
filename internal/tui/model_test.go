@@ -258,14 +258,14 @@ func TestFormatHealthScalingUpDown(t *testing.T) {
 	got := formatHealth(serializeHealth(k8s.Health{
 		Ready: true, Replicas: 2, ReadyReplicas: 2, DesiredReplicas: 4,
 	}), eventFilter{})
-	if got != "✔ ↑ 4" {
-		t.Fatalf("scaling up = %q, want %q", got, "✔ ↑ 4")
+	if got != "✔ ⇑4" {
+		t.Fatalf("scaling up = %q, want %q", got, "✔ ⇑4")
 	}
 	got = formatHealth(serializeHealth(k8s.Health{
 		Ready: true, Replicas: 3, ReadyReplicas: 3, DesiredReplicas: 1,
 	}), eventFilter{})
-	if got != "✔ ↓ 1" {
-		t.Fatalf("scaling down = %q, want %q", got, "✔ ↓ 1")
+	if got != "✔ ⇓1" {
+		t.Fatalf("scaling down = %q, want %q", got, "✔ ⇓1")
 	}
 }
 
@@ -275,24 +275,82 @@ func TestHealthScalingColdStartNotEmpty(t *testing.T) {
 		t.Fatal("cold-start scaling workload treated as empty")
 	}
 	got := formatHealth(serializeHealth(h), eventFilter{})
-	if got != "↑ 2" {
-		t.Fatalf("cold-start scaling = %q, want %q", got, "↑ 2")
+	if got != "⇑2" {
+		t.Fatalf("cold-start scaling = %q, want %q", got, "⇑2")
 	}
 }
 
 func TestHealthScalingMidScaleNotReady(t *testing.T) {
 	h := k8s.Health{Ready: false, Replicas: 4, ReadyReplicas: 3, DesiredReplicas: 4}
 	got := formatHealth(serializeHealth(h), eventFilter{})
-	if got != "↑ 4" {
-		t.Fatalf("mid-scale not-ready = %q, want %q", got, "↑ 4")
+	if got != "⇑4" {
+		t.Fatalf("mid-scale not-ready = %q, want %q", got, "⇑4")
 	}
 }
 
 func TestHealthScalingProblemShowsArrow(t *testing.T) {
 	h := k8s.Health{Ready: false, Replicas: 4, ReadyReplicas: 3, DesiredReplicas: 4, Waiting: []string{"CrashLoopBackOff"}}
 	got := formatHealth(serializeHealth(h), eventFilter{})
-	if !strings.Contains(got, "✖") || !strings.Contains(got, "↑ 4") {
-		t.Fatalf("scaling with stuck container = %q, want both ✖ and ↑ 4", got)
+	if !strings.Contains(got, "✖") || !strings.Contains(got, "⇑4") {
+		t.Fatalf("scaling with stuck container = %q, want both ✖ and ⇑4", got)
+	}
+}
+
+func TestFormatHealthScaleHistory(t *testing.T) {
+	h := k8s.Health{Ready: true, Replicas: 2, ReadyReplicas: 2, ScaleUp: 4, ScaleDown: 2}
+	got := formatHealth(serializeHealth(h), eventFilter{})
+	if got != "✔ │ ⇅HPA ↑4 ↓2" {
+		t.Fatalf("scale history = %q, want %q", got, "✔ │ ⇅HPA ↑4 ↓2")
+	}
+}
+
+func TestFormatHealthScaleHistoryUpOnly(t *testing.T) {
+	h := k8s.Health{Ready: true, Replicas: 2, ReadyReplicas: 2, ScaleUp: 4}
+	got := formatHealth(serializeHealth(h), eventFilter{})
+	if got != "✔ │ ⇅HPA ↑4" {
+		t.Fatalf("scale-up history = %q, want %q", got, "✔ │ ⇅HPA ↑4")
+	}
+}
+
+func TestFormatHealthScaleHistoryDownOnly(t *testing.T) {
+	h := k8s.Health{Ready: true, Replicas: 2, ReadyReplicas: 2, ScaleDown: 2}
+	got := formatHealth(serializeHealth(h), eventFilter{})
+	if got != "✔ │ ⇅HPA ↓2" {
+		t.Fatalf("scale-down history = %q, want %q", got, "✔ │ ⇅HPA ↓2")
+	}
+}
+
+func TestHealthScaleHistoryScaledToZeroNotEmpty(t *testing.T) {
+	h := k8s.Health{Replicas: 0, ReadyReplicas: 0, DesiredReplicas: 0, ScaleDown: 6}
+	if healthEmpty(h) {
+		t.Fatal("scaled-to-zero workload with HPA history treated as empty")
+	}
+	got := formatHealth(serializeHealth(h), eventFilter{})
+	if got != "⇅HPA ↓6" {
+		t.Fatalf("scaled-to-zero history = %q, want %q", got, "⇅HPA ↓6")
+	}
+}
+
+func TestHealthRoundTripPreservesScaleTotals(t *testing.T) {
+	h := k8s.Health{Ready: true, Replicas: 2, ReadyReplicas: 2, DesiredReplicas: 4, ScaleUp: 7, ScaleDown: 3}
+	got := parseHealth(serializeHealth(h))
+	if got.ScaleUp != 7 || got.ScaleDown != 3 {
+		t.Fatalf("round-trip scale totals = %+v, want up 7 down 3", got)
+	}
+}
+
+func TestParseHealthOldFormatScaleZero(t *testing.T) {
+	h := k8s.Health{Ready: true, Replicas: 3, ReadyReplicas: 3, Restarts: 2, ScaleUp: 5, ScaleDown: 1}
+	s := serializeHealth(h)
+	idx := strings.LastIndex(s, "|")
+	idx = strings.LastIndex(s[:idx], "|")
+	old := s[:idx]
+	got := parseHealth(old)
+	if got.ScaleUp != 0 || got.ScaleDown != 0 {
+		t.Fatalf("old-format scale totals = %d/%d, want 0/0", got.ScaleUp, got.ScaleDown)
+	}
+	if got.Replicas != 3 || got.ReadyReplicas != 3 || got.Restarts != 2 {
+		t.Fatalf("old-format parse = %+v, want current/ready 3 restarts 2", got)
 	}
 }
 
@@ -371,6 +429,65 @@ func TestRenderRowSelectedRefreshIconNotMangled(t *testing.T) {
 	got := renderRow(r, true, true, icon, repoWidth, maxWidth)
 	if got != want {
 		t.Fatalf("selected refreshing row:\n got %q\nwant %q", got, want)
+	}
+}
+
+func TestCiIconOptional(t *testing.T) {
+	tests := []struct {
+		name     string
+		state    string
+		optional bool
+		want     string
+	}{
+		{"optional failure", "failure", true, "/"},
+		{"blocking failure", "failure", false, "✗"},
+		{"success", "success", true, "✓"},
+		{"pending", "pending", true, "…"},
+		{"none", "none", true, "·"},
+		{"empty", "", true, "·"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := ciIcon(tt.state, tt.optional); got != tt.want {
+				t.Fatalf("ciIcon(%q, %v) = %q, want %q", tt.state, tt.optional, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRenderRowCiIconFailure(t *testing.T) {
+	forceColor()
+	const repoWidth = 30
+	const maxWidth = 120
+	for _, tt := range []struct {
+		name       string
+		mergeState string
+		wantIcon   string
+		wantSync   string
+	}{
+		{"optional non-required", "UNSTABLE", "/", "↑"},
+		{"required blocking", "BLOCKED", "✗", " "},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			r := row{
+				title:      "fix the thing",
+				repo:       "org/app",
+				num:        123,
+				ci:         "failure",
+				mergeState: tt.mergeState,
+				updatedAt:  "2026-08-05T12:00:00Z",
+			}
+			ts := relativeTime(r.updatedAt)
+			titleWidth := maxWidth - repoWidth - 33
+			rest := fmt.Sprintf("%s%s  #%-5d  %s  %s",
+				padWidth(tt.wantSync, 5), padWidth("org/app", repoWidth), 123,
+				padWidth(truncateWidth("fix the thing", titleWidth), titleWidth), padWidth(ts, 6))
+			margin := padWidth("    "+tt.wantIcon+"  ·", 10)
+			got := renderRow(r, false, false, "⠁", repoWidth, maxWidth)
+			if want := margin + rest; got != want {
+				t.Fatalf("%s row:\n got %q\nwant %q", tt.name, got, want)
+			}
+		})
 	}
 }
 

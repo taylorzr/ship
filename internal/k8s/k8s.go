@@ -24,6 +24,8 @@ type Health struct {
 	PendingPods     int32    // pods stuck in Pending phase (scheduling, etc.)
 	FailedPods      int32    // pods in Failed phase
 	FailedReasons   []string // pod Status.Reason for Failed pods, e.g. "Evicted", "NodeLost"
+	ScaleUp         int32    // pods added by HPA rescales within the history window
+	ScaleDown       int32    // pods removed by HPA rescales within the history window
 }
 
 type Workload struct {

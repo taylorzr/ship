@@ -18,7 +18,7 @@ type MockSpec struct {
 
 // ParseMockSpec decodes a --mock-k8s value of the form
 //
-//	image|restarts=3|causes=OOMKilling+Exit137|recent_events=OOMKilling|events=BackOff|old_events=Evicted|waiting=ImagePullBackOff|progressing=true|paused=true|ready=false|replicas=2|desired_replicas=3|ready_replicas=1|conditions=ProgressDeadlineExceeded|pending=1|failed=1
+//	image|restarts=3|causes=OOMKilling+Exit137|recent_events=OOMKilling|events=BackOff|old_events=Evicted|waiting=ImagePullBackOff|progressing=true|paused=true|ready=false|replicas=2|desired_replicas=3|ready_replicas=1|conditions=ProgressDeadlineExceeded|pending=1|failed=1|scale_up=4|scale_down=2
 //
 // Health fields are optional; image is everything before the first "|".
 // If no health fields are given the deployment is healthy. When `ready` is
@@ -93,6 +93,14 @@ func ParseMockSpec(v string) MockSpec {
 			case "failed":
 				if n, err := strconv.Atoi(val); err == nil {
 					spec.Health.FailedPods = int32(n)
+				}
+			case "scale_up":
+				if n, err := strconv.Atoi(val); err == nil {
+					spec.Health.ScaleUp = int32(n)
+				}
+			case "scale_down":
+				if n, err := strconv.Atoi(val); err == nil {
+					spec.Health.ScaleDown = int32(n)
 				}
 			}
 		}
