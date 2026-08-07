@@ -11,8 +11,10 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sort"
+	"strconv"
 	"strings"
-	"sync/atomic"
+	"sync"
 	"time"
 
 	"github.com/shurcooL/githubv4"
@@ -49,20 +51,78 @@ type Client struct {
 	hc   *http.Client
 	ct   *countingTransport
 	user string
+
+	// baseURL is the GitHub REST API origin, overridable in tests.
+	baseURL string
 }
 
-// countingTransport counts in-flight GitHub API requests so the TUI can show
-// live query activity. Counting here (at the HTTP layer) covers REST search,
-// GraphQL, and mutations alike, including the retry/pagination loops.
+// RateLimit is the GitHub API quota reported by a response's X-RateLimit-*
+// headers. Resources are tracked independently: "core" (REST, hourly), "search"
+// (30 req/min), and "graphql" (hourly points).
+type RateLimit struct {
+	Resource  string
+	Limit     int
+	Remaining int
+	Reset     time.Time
+}
+
+// parseRateLimit extracts the rate limit from response headers. Returns ok=false
+// when the response carries no quota info (limit missing/zero).
+func parseRateLimit(h http.Header) (RateLimit, bool) {
+	limit, err := strconv.Atoi(h.Get("X-RateLimit-Limit"))
+	if err != nil || limit <= 0 {
+		return RateLimit{}, false
+	}
+	remaining, err := strconv.Atoi(h.Get("X-RateLimit-Remaining"))
+	if err != nil {
+		remaining = 0
+	}
+	resource := h.Get("X-RateLimit-Resource")
+	if resource == "" {
+		resource = "core"
+	}
+	var reset time.Time
+	if secs, err := strconv.ParseInt(h.Get("X-RateLimit-Reset"), 10, 64); err == nil && secs > 0 {
+		reset = time.Unix(secs, 0)
+	}
+	return RateLimit{
+		Resource:  resource,
+		Limit:     limit,
+		Remaining: remaining,
+		Reset:     reset,
+	}, true
+}
+
+// countingTransport records the rate-limit headers of every GitHub API
+// response so the TUI can monitor remaining quota. Capturing at the HTTP layer
+// covers REST search, GraphQL, and mutations alike, including the
+// retry/pagination loops.
 type countingTransport struct {
-	base     http.RoundTripper
-	inflight atomic.Int64
+	base http.RoundTripper
+
+	mu     sync.Mutex
+	limits map[string]RateLimit
+}
+
+// store records the quota for one resource, keeping the latest value seen.
+func (t *countingTransport) store(rl RateLimit) {
+	t.mu.Lock()
+	if t.limits == nil {
+		t.limits = make(map[string]RateLimit)
+	}
+	t.limits[rl.Resource] = rl
+	t.mu.Unlock()
 }
 
 func (t *countingTransport) RoundTrip(r *http.Request) (*http.Response, error) {
-	t.inflight.Add(1)
-	defer t.inflight.Add(-1)
-	return t.base.RoundTrip(r)
+	resp, err := t.base.RoundTrip(r)
+	if err != nil {
+		return resp, err
+	}
+	if rl, ok := parseRateLimit(resp.Header); ok {
+		t.store(rl)
+	}
+	return resp, nil
 }
 
 func NewClient(token string) *Client {
@@ -77,15 +137,82 @@ func NewClient(token string) *Client {
 		Timeout: 60 * time.Second,
 	}
 	gql := githubv4.NewClient(hc)
-	return &Client{gql: gql, hc: hc, ct: ct}
+	return &Client{gql: gql, hc: hc, ct: ct, baseURL: "https://api.github.com"}
 }
 
-// InFlight reports how many GitHub API requests are currently in flight.
-func (c *Client) InFlight() int64 {
+// rateLimitResource mirrors a resource block in the REST /rate_limit body.
+type rateLimitResource struct {
+	Limit     int
+	Remaining int
+	Reset     int64
+}
+
+// rateLimitBody mirrors the REST /rate_limit response.
+type rateLimitBody struct {
+	Resources map[string]rateLimitResource
+}
+
+// RefreshRateLimits polls GET /rate_limit (which does not count against any
+// quota) and stores the per-resource limits for core, search, and graphql.
+// The body's "used" counts are server-side, so core includes gh CLI
+// subprocess usage. Other resources in the body (code_scanning_upload, etc.)
+// are ignored. Errors are returned so callers can swallow them and keep the
+// last known values.
+func (c *Client) RefreshRateLimits(ctx context.Context) error {
 	if c.ct == nil {
-		return 0
+		return nil
 	}
-	return c.ct.inflight.Load()
+	u := c.baseURL + "/rate_limit"
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return err
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return err
+	}
+	if resp.StatusCode >= 400 {
+		return fmt.Errorf("rate_limit: HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
+	}
+	var rlb rateLimitBody
+	if err := json.Unmarshal(body, &rlb); err != nil {
+		return err
+	}
+	for _, name := range []string{"core", "search", "graphql"} {
+		r, ok := rlb.Resources[name]
+		if !ok {
+			continue
+		}
+		rl := RateLimit{Resource: name, Limit: r.Limit, Remaining: r.Remaining}
+		if r.Reset > 0 {
+			rl.Reset = time.Unix(r.Reset, 0)
+		}
+		c.ct.store(rl)
+	}
+	return nil
+}
+
+// RateLimits reports the rate-limit quota seen on recent responses, one entry
+// per resource (e.g. "core", "search", "graphql"), sorted by resource name.
+func (c *Client) RateLimits() []RateLimit {
+	if c.ct == nil {
+		return nil
+	}
+	c.ct.mu.Lock()
+	defer c.ct.mu.Unlock()
+	out := make([]RateLimit, 0, len(c.ct.limits))
+	for _, rl := range c.ct.limits {
+		out = append(out, rl)
+	}
+	sort.Slice(out, func(i, j int) bool { return out[i].Resource < out[j].Resource })
+	return out
 }
 
 func (c *Client) User(ctx context.Context) (string, error) {

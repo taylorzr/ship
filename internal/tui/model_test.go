@@ -13,6 +13,7 @@ import (
 	"github.com/charmbracelet/lipgloss"
 	"github.com/muesli/termenv"
 	"github.com/zach/ship/internal/config"
+	"github.com/zach/ship/internal/github"
 	"github.com/zach/ship/internal/k8s"
 	"github.com/zach/ship/internal/store"
 )
@@ -153,6 +154,63 @@ func TestHealthProblemsConsistentDuringRollout(t *testing.T) {
 	}
 	if !healthProblems(k8s.Health{PendingPods: 1}) {
 		t.Fatal("non-progressing workload with pending pods should stay a problem")
+	}
+}
+
+func TestHealthSegmentsSeparatesAndDimsEvents(t *testing.T) {
+	ts := time.Now().Add(-5 * time.Minute).Unix()
+	h := k8s.Health{Restarts: 2, OldEvents: []string{"Unhealthy@" + strconv.FormatInt(ts, 10)}}
+	segs := healthSegments(h, eventFilter{})
+	stateIdx, sepIdx, eventIdx := -1, -1, -1
+	for i, s := range segs {
+		switch {
+		case s.kind == segSep:
+			sepIdx = i
+		case s.text == "↻2":
+			stateIdx = i
+		case strings.HasPrefix(s.text, "⚠Unhealthy"):
+			eventIdx = i
+		}
+	}
+	if stateIdx < 0 || sepIdx < 0 || eventIdx < 0 {
+		t.Fatalf("segments = %v, want state ↻2, separator │, event ⚠Unhealthy", segs)
+	}
+	if !(stateIdx < sepIdx && sepIdx < eventIdx) {
+		t.Fatalf("expected order state < │ < event, got %v", segs)
+	}
+	if !segs[eventIdx].dim {
+		t.Fatalf("event segment should be marked dim: %v", segs[eventIdx])
+	}
+	if segs[stateIdx].dim {
+		t.Fatalf("state segment should not be dim: %v", segs[stateIdx])
+	}
+}
+
+func TestHealthSegmentsNoSeparatorWithoutEvents(t *testing.T) {
+	segs := healthSegments(k8s.Health{Restarts: 2}, eventFilter{})
+	for _, s := range segs {
+		if s.kind == segSep {
+			t.Fatalf("health with no events should have no separator, got %v", segs)
+		}
+	}
+}
+
+func TestFormatHealthIncludesEventDivider(t *testing.T) {
+	ts := time.Now().Add(-5 * time.Minute).Unix()
+	health := serializeHealth(k8s.Health{Restarts: 2, OldEvents: []string{"Unhealthy@" + strconv.FormatInt(ts, 10)}})
+	got := formatHealth(health, eventFilter{})
+	if !strings.Contains(got, "│") {
+		t.Fatalf("formatHealth = %q, want it to contain │", got)
+	}
+}
+
+func TestRenderHealthColoredDimsEvents(t *testing.T) {
+	forceColor()
+	ts := time.Now().Add(-5 * time.Minute).Unix()
+	health := serializeHealth(k8s.Health{Restarts: 2, OldEvents: []string{"Unhealthy@" + strconv.FormatInt(ts, 10)}})
+	got := renderHealthColored(health, eventFilter{})
+	if !strings.Contains(got, "\x1b[2;") {
+		t.Fatalf("renderHealthColored = %q, want faint (dim) escape on events", got)
 	}
 }
 
@@ -418,5 +476,89 @@ func TestActionDoneRefreshesMatchingServices(t *testing.T) {
 
 	if _, cmd := got.Update(actionDoneMsg{action: "merge", repo: "org/other", num: 7}); cmd != nil {
 		t.Fatal("merge with no matching service returned a cmd, want nil")
+	}
+}
+
+func TestRateLimitText(t *testing.T) {
+	got := rateLimitText(github.RateLimit{Resource: "graphql", Limit: 5000, Remaining: 4800})
+	if got != "gql 4.8/5k" {
+		t.Fatalf("rateLimitText(graphql) = %q, want %q", got, "gql 4.8/5k")
+	}
+	got = rateLimitText(github.RateLimit{Resource: "search", Limit: 30, Remaining: 27})
+	if got != "search 27/30" {
+		t.Fatalf("rateLimitText(search) = %q, want %q", got, "search 27/30")
+	}
+	got = rateLimitText(github.RateLimit{Resource: "core", Limit: 5000, Remaining: 3663})
+	if got != "rest 3.7/5k" {
+		t.Fatalf("rateLimitText(core) = %q, want %q", got, "rest 3.7/5k")
+	}
+}
+
+func TestCompactNumbers(t *testing.T) {
+	for _, tc := range []struct {
+		name string
+		got  string
+		want string
+	}{
+		{"limit 5000", compactLimit(5000), "5k"},
+		{"limit 4800", compactLimit(4800), "4.8k"},
+		{"limit 995", compactLimit(995), "995"},
+		{"limit 1000", compactLimit(1000), "1k"},
+		{"remaining 5000", compactRemaining(5000), "5"},
+		{"remaining 4800", compactRemaining(4800), "4.8"},
+		{"remaining 995", compactRemaining(995), "995"},
+		{"remaining 4960", compactRemaining(4960), "5"},
+		{"limit 4960", compactLimit(4960), "5k"},
+	} {
+		if tc.got != tc.want {
+			t.Fatalf("%s = %q, want %q", tc.name, tc.got, tc.want)
+		}
+	}
+}
+
+func TestRateLimitTickNilWithoutGH(t *testing.T) {
+	m := testModel(100, 30)
+	if cmd := m.rateLimitTick(); cmd != nil {
+		t.Fatal("rateLimitTick with no gh client returned a cmd, want nil")
+	}
+}
+
+func TestRateLimitTickRefreshesAndRearms(t *testing.T) {
+	m := testModel(100, 30)
+	m.gh = github.NewClient("")
+	nm, cmd := m.Update(rateLimitTickMsg{})
+	got := nm.(Model)
+	if cmd == nil {
+		t.Fatal("rateLimitTickMsg returned nil cmd, want batch(refresh, re-arm)")
+	}
+	if got.gh == nil {
+		t.Fatal("gh client lost during rate-limit tick")
+	}
+}
+
+func TestRateLimitStyle(t *testing.T) {
+	forceColor()
+	frac := func(remaining, limit int) int {
+		s := rateLimitStyle(github.RateLimit{Limit: limit, Remaining: remaining})
+		out := s.Render("x")
+		if !strings.Contains(out, "\x1b[") {
+			t.Fatalf("expected styled output, got plain %q", out)
+		}
+		if strings.Contains(out, "91;") || strings.Contains(out, "38;5;1") {
+			return 2 // red
+		}
+		if strings.Contains(out, "38;5;220") {
+			return 1 // yellow
+		}
+		return 0
+	}
+	if got := frac(50, 100); got != 0 {
+		t.Fatalf("50%% remaining styled red/yellow (got %d), want gray", got)
+	}
+	if got := frac(20, 100); got != 1 {
+		t.Fatalf("20%% remaining styled %d, want yellow", got)
+	}
+	if got := frac(5, 100); got != 2 {
+		t.Fatalf("5%% remaining styled %d, want red", got)
 	}
 }

@@ -1008,7 +1008,7 @@ func visibleRows(s section) int {
 }
 
 func (m Model) Init() tea.Cmd {
-	cmds := []tea.Cmd{m.spin.Tick, m.autoRefreshTick(), m.activeRefreshTick()}
+	cmds := []tea.Cmd{m.spin.Tick, m.autoRefreshTick(), m.activeRefreshTick(), m.rateLimitTick()}
 	m.sectionErrs = map[string]string{}
 	for k := range m.loading {
 		m.loading[k] = true
@@ -1575,6 +1575,41 @@ func (m Model) activeRefreshTick() tea.Cmd {
 
 type activeRefreshMsg time.Time
 
+// rateLimitRefreshInterval is how often the GitHub rate-limit footer is
+// refreshed independently of the main refresh cycle. GET /rate_limit is free.
+const rateLimitRefreshInterval = 15 * time.Second
+
+// rateLimitTick fires rateLimitTickMsg every rateLimitRefreshInterval so the
+// quota footer stays fresh even between full refreshes. No-op without a GitHub
+// client.
+func (m Model) rateLimitTick() tea.Cmd {
+	if m.gh == nil {
+		return nil
+	}
+	return tea.Tick(rateLimitRefreshInterval, func(t time.Time) tea.Msg {
+		return rateLimitTickMsg(t)
+	})
+}
+
+type rateLimitTickMsg time.Time
+
+// rateLimitRefreshCmd polls GitHub's /rate_limit in the background. Failures
+// (e.g. offline) are logged and swallowed so the UI keeps the last known
+// quota.
+func (m Model) rateLimitRefreshCmd() tea.Cmd {
+	return func() tea.Msg {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		err := m.gh.RefreshRateLimits(ctx)
+		if err != nil && shipLog != nil {
+			shipLog.Printf("rate limit: %v", err)
+		}
+		return rateLimitDoneMsg{}
+	}
+}
+
+type rateLimitDoneMsg struct{}
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -2095,6 +2130,12 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		}
 		return m, m.activeRefreshTick()
 
+	case rateLimitTickMsg:
+		return m, tea.Batch(m.rateLimitRefreshCmd(), m.rateLimitTick())
+
+	case rateLimitDoneMsg:
+		return m, nil
+
 	case actionDoneMsg:
 		m.sectionErrs = map[string]string{}
 		if msg.err != nil {
@@ -2552,6 +2593,7 @@ func parseHealth(s string) k8s.Health {
 type healthSeg struct {
 	text string
 	kind int
+	dim  bool // past events: rendered faint but keeping their hue
 }
 
 const (
@@ -2560,6 +2602,7 @@ const (
 	segBad
 	segMuted
 	segInfo
+	segSep
 )
 
 // eventFilter controls whether transient warning reasons are hidden from the
@@ -2603,14 +2646,15 @@ func (m *Model) eventFilter() eventFilter {
 // style each individually. Plain ✔ is current readiness. Blue is deployment
 // state: ⟳ Progressing (with the ready-replica count, e.g. "⟳ Progressing
 // 2/5"), ⏸DeploymentPaused awaiting manual approval. Yellow is
-// history and waiting: ↻N restarts, their causes, warning events in the warn
-// window, and pending pods. Red is current problems: ✖ not-ready (when not
-// mid-rollout), hard deployment conditions (ReplicaFailure, Degraded,
-// ProgressDeadlineExceeded), failed pods and their reasons (e.g. Evicted),
-// stuck containers, and events in the recent window. A rollout in progress
-// keeps the blue ⟳ headline unless it's genuinely broken — the transient
-// "Unavailable" condition and pending pods it passes through don't flip it to
-// ✖. Muted is older events in the history window. Restarts turn
+// history and waiting: ↻N restarts, their causes, and pending pods. Red is
+// current problems: ✖ not-ready (when not mid-rollout), hard deployment
+// conditions (ReplicaFailure, Degraded, ProgressDeadlineExceeded), failed
+// pods and their reasons (e.g. Evicted), and stuck containers. A rollout in
+// progress keeps the blue ⟳ headline unless it's genuinely broken — the
+// transient "Unavailable" condition and pending pods it passes through don't
+// flip it to ✖. Past warning events (recent/warn/old buckets, and the hidden
+// ~N count) are grouped at the end behind a │ separator and marked dim so
+// they read as past and ignorable while keeping their hue. Restarts turn
 // red only when the workload is currently in trouble; a rollout in progress
 // shows a blue ⟳ instead of the readiness check.
 func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
@@ -2630,23 +2674,48 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 		if h.Replicas > 0 {
 			icon = fmt.Sprintf("⟳ Progressing %d/%d", h.ReadyReplicas, h.Replicas)
 		}
-		segs = append(segs, healthSeg{icon, segInfo})
+		segs = append(segs, healthSeg{icon, segInfo, false})
 	case h.Ready:
-		segs = append(segs, healthSeg{"✔", segOK})
+		segs = append(segs, healthSeg{"✔", segOK, false})
 	case h.Replicas > 0:
-		segs = append(segs, healthSeg{"✖", segBad})
+		segs = append(segs, healthSeg{"✖", segBad, false})
 	}
 	if h.Paused {
-		segs = append(segs, healthSeg{"⏸DeploymentPaused", segInfo})
+		segs = append(segs, healthSeg{"⏸DeploymentPaused", segInfo, false})
 	}
 	if h.Restarts > 0 {
-		segs = append(segs, healthSeg{fmt.Sprintf("↻%d", h.Restarts), restartKind})
+		segs = append(segs, healthSeg{fmt.Sprintf("↻%d", h.Restarts), restartKind, false})
 	}
 	for _, c := range h.RestartCauses {
 		if s := shortEvent(c); s != "" {
-			segs = append(segs, healthSeg{"↻" + s, restartKind})
+			segs = append(segs, healthSeg{"↻" + s, restartKind, false})
 		}
 	}
+	for _, c := range h.Conditions {
+		if h.Progressing && c == "Unavailable" {
+			continue
+		}
+		if s := shortEvent(c); s != "" {
+			segs = append(segs, healthSeg{reasonPrefix(s) + s, segBad, false})
+		}
+	}
+	for _, r := range h.FailedReasons {
+		if s := shortEvent(r); s != "" {
+			segs = append(segs, healthSeg{reasonPrefix(s) + s, segBad, false})
+		}
+	}
+	for _, w := range h.Waiting {
+		if s := shortEvent(w); s != "" {
+			segs = append(segs, healthSeg{reasonPrefix(s) + s, segBad, false})
+		}
+	}
+	if h.PendingPods > 0 {
+		segs = append(segs, healthSeg{fmt.Sprintf("⌛%d", h.PendingPods), segWarn, false})
+	}
+	if h.FailedPods > 0 {
+		segs = append(segs, healthSeg{fmt.Sprintf("💀%d", h.FailedPods), segBad, false})
+	}
+	var events []healthSeg
 	hidden := 0
 	addEvents := func(list []string, kind int) {
 		for _, e := range list {
@@ -2663,38 +2732,20 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 			if hasAge {
 				text += "(-" + relativeDur(age) + ")"
 			}
-			segs = append(segs, healthSeg{text, kind})
+			events = append(events, healthSeg{text, kind, true})
 		}
 	}
 	addEvents(h.RecentEvents, segBad)
 	addEvents(h.Events, segWarn)
 	addEvents(h.OldEvents, segMuted)
-	for _, c := range h.Conditions {
-		if h.Progressing && c == "Unavailable" {
-			continue
-		}
-		if s := shortEvent(c); s != "" {
-			segs = append(segs, healthSeg{reasonPrefix(s) + s, segBad})
-		}
-	}
-	for _, r := range h.FailedReasons {
-		if s := shortEvent(r); s != "" {
-			segs = append(segs, healthSeg{reasonPrefix(s) + s, segBad})
-		}
-	}
-	for _, w := range h.Waiting {
-		if s := shortEvent(w); s != "" {
-			segs = append(segs, healthSeg{reasonPrefix(s) + s, segBad})
-		}
-	}
-	if h.PendingPods > 0 {
-		segs = append(segs, healthSeg{fmt.Sprintf("⌛%d", h.PendingPods), segWarn})
-	}
-	if h.FailedPods > 0 {
-		segs = append(segs, healthSeg{fmt.Sprintf("💀%d", h.FailedPods), segBad})
-	}
 	if hidden > 0 {
-		segs = append(segs, healthSeg{fmt.Sprintf("~%d", hidden), segMuted})
+		events = append(events, healthSeg{fmt.Sprintf("~%d", hidden), segMuted, true})
+	}
+	if len(events) > 0 {
+		if len(segs) > 0 {
+			segs = append(segs, healthSeg{"│", segSep, false})
+		}
+		segs = append(segs, events...)
 	}
 	return segs
 }
@@ -2792,10 +2843,12 @@ func detailsText(health, contributors string, ev eventFilter) string {
 }
 
 // renderHealthColored styles each health segment individually: plain ✔ (or a
-// blue ⟳ mid-rollout), yellow history/waiting (restarts, causes, warn-window
-// events, pending pods), red current problems (not-ready, conditions, failed,
-// stuck containers, recent events), and muted older events. When the workload
-// is currently in trouble the restarts are red too.
+// blue ⟳ mid-rollout), yellow history/waiting (restarts, causes, pending
+// pods), red current problems (not-ready, conditions, failed, stuck
+// containers), and muted older events. Past warning events are grouped at the
+// end behind a muted │ and rendered faint (their hue preserved) so they read
+// as past and ignorable. When the workload is currently in trouble the
+// restarts are red too.
 func renderHealthColored(health string, ev eventFilter) string {
 	h := parseHealth(health)
 	if healthEmpty(h) {
@@ -2806,13 +2859,27 @@ func renderHealthColored(health string, ev eventFilter) string {
 	for i, s := range segs {
 		switch s.kind {
 		case segWarn:
-			parts[i] = healthWarn.Render(s.text)
+			style := healthWarn
+			if s.dim {
+				style = style.Faint(true)
+			}
+			parts[i] = style.Render(s.text)
 		case segBad:
-			parts[i] = healthBad.Render(s.text)
+			style := healthBad
+			if s.dim {
+				style = style.Faint(true)
+			}
+			parts[i] = style.Render(s.text)
 		case segMuted:
-			parts[i] = healthMuted.Render(s.text)
+			style := healthMuted
+			if s.dim {
+				style = style.Faint(true)
+			}
+			parts[i] = style.Render(s.text)
 		case segInfo:
 			parts[i] = healthInfo.Render(s.text)
+		case segSep:
+			parts[i] = healthMuted.Render(s.text)
 		default:
 			parts[i] = s.text
 		}
@@ -3025,8 +3092,12 @@ func (m Model) viewHelp() string {
 		line += helpKey.Render(" (refresh in " + refreshCountdown(m.lastRefreshed, m.cfg.RefreshInterval) + ")")
 	}
 	if m.gh != nil {
-		if n := m.gh.InFlight(); n > 0 {
-			line += helpKey.Render(fmt.Sprintf("  %d gh", n))
+		if rls := m.gh.RateLimits(); len(rls) > 0 {
+			var parts []string
+			for _, rl := range rls {
+				parts = append(parts, rateLimitStyle(rl).Render(rateLimitText(rl)))
+			}
+			line += helpKey.Render("  " + strings.Join(parts, " · "))
 		}
 	}
 	if n := k8s.InFlight(); n > 0 {
@@ -3039,6 +3110,64 @@ func (m Model) viewHelp() string {
 	}
 	line += "  " + helpKey.Render("?:") + " " + helpKey.Render("help")
 	return line
+}
+
+// rateLimitText renders one resource's GitHub quota as "gql 4.8/5k".
+// GitHub's resource keys are shortened for the footer: graphql -> gql,
+// core -> rest. Thousands-scale numbers are compacted.
+func rateLimitText(rl gh.RateLimit) string {
+	name := rl.Resource
+	switch name {
+	case "graphql":
+		name = "gql"
+	case "core":
+		name = "rest"
+	}
+	return fmt.Sprintf("%s %s/%s", name, compactRemaining(rl.Remaining), compactLimit(rl.Limit))
+}
+
+// compactScale divides a count by 1000, keeping one decimal but dropping a
+// trailing ".0": 4800 -> "4.8", 5000 -> "5", 4960 -> "5".
+func compactScale(n int) string {
+	if n%1000 == 0 {
+		return strconv.Itoa(n / 1000)
+	}
+	return strings.TrimSuffix(fmt.Sprintf("%.1f", float64(n)/1000), ".0")
+}
+
+// compactLimit shortens thousands-scale limits: 5000 -> "5k", 4800 -> "4.8k",
+// 30 -> "30".
+func compactLimit(n int) string {
+	if n >= 1000 {
+		return compactScale(n) + "k"
+	}
+	return strconv.Itoa(n)
+}
+
+// compactRemaining shortens a remaining count without a suffix: 4800 -> "4.8",
+// 5000 -> "5", 27 -> "27".
+func compactRemaining(n int) string {
+	if n >= 1000 {
+		return compactScale(n)
+	}
+	return strconv.Itoa(n)
+}
+
+// rateLimitStyle colors a resource's quota by how much remains: normal gray,
+// yellow under 25%, red under 10%.
+func rateLimitStyle(rl gh.RateLimit) lipgloss.Style {
+	if rl.Limit <= 0 {
+		return helpKey
+	}
+	frac := float64(rl.Remaining) / float64(rl.Limit)
+	switch {
+	case frac <= 0.10:
+		return healthBad
+	case frac <= 0.25:
+		return healthWarn
+	default:
+		return helpKey
+	}
 }
 
 const helpKeyWidth = 13
@@ -3203,9 +3332,10 @@ func (m Model) renderHelpOverlay() string {
 				{"↻OOMKilled", "last restart cause"},
 				{"⌛N", "pods pending"},
 				{"💀N", "pods failed"},
-				{"⚠SomeError", "error event"},
+				{"⚠SomeError", "past error event (dimmed)"},
 				{"∞SomeBackoff", "retrying event"},
 				{"~N", "transient events hidden"},
+				{"│", "separates events from details"},
 			})
 			tb := m.k8sTimebox().Normalized()
 			legend += "\n" + helpSectionColored("colors", []coloredLegendEntry{
