@@ -193,3 +193,41 @@ func testFailedPod(name, reason string) *corev1.Pod {
 	pod.Status.Reason = reason
 	return pod
 }
+
+func testDeployment(replicas *int32) *appsv1.Deployment {
+	dep := &appsv1.Deployment{
+		ObjectMeta: metav1.ObjectMeta{Name: "web", Namespace: testNamespace},
+		Spec: appsv1.DeploymentSpec{
+			Replicas: replicas,
+			Selector: &metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}},
+			Template: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "web", Image: "img:1"}}},
+			},
+		},
+		Status: appsv1.DeploymentStatus{Replicas: 2, ReadyReplicas: 1},
+	}
+	return dep
+}
+
+func TestGetDeploymentCapturesDesiredReplicas(t *testing.T) {
+	three := int32(3)
+	c := newTestClient(t, testDeployment(&three))
+	w, err := c.GetWorkload(context.Background(), "", testNamespace, "web", "deployment")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.Health.DesiredReplicas != 3 || w.Health.Replicas != 2 || w.Health.ReadyReplicas != 1 {
+		t.Fatalf("health = %+v, want desired 3 current 2 ready 1", w.Health)
+	}
+}
+
+func TestGetDeploymentDesiredReplicasDefaultsToOne(t *testing.T) {
+	c := newTestClient(t, testDeployment(nil))
+	w, err := c.GetWorkload(context.Background(), "", testNamespace, "web", "deployment")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.Health.DesiredReplicas != 1 {
+		t.Fatalf("DesiredReplicas = %d, want default 1", w.Health.DesiredReplicas)
+	}
+}

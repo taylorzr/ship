@@ -161,9 +161,10 @@ func (c *RealClient) getDeployment(ctx context.Context, namespace, name string) 
 		Image:     dep.Spec.Template.Spec.Containers[0].Image,
 		Container: dep.Spec.Template.Spec.Containers[0].Name,
 		Health: Health{
-			Ready:         dep.Status.ReadyReplicas == dep.Status.Replicas && dep.Status.Replicas > 0,
-			ReadyReplicas: dep.Status.ReadyReplicas,
-			Replicas:      dep.Status.Replicas,
+			Ready:           dep.Status.ReadyReplicas == dep.Status.Replicas && dep.Status.Replicas > 0,
+			ReadyReplicas:   dep.Status.ReadyReplicas,
+			Replicas:        dep.Status.Replicas,
+			DesiredReplicas: desiredReplicas(dep.Spec.Replicas),
 		},
 	}
 	// deployment-level conditions: stuck rollouts and replica failures are
@@ -197,6 +198,7 @@ var rolloutGVR = schema.GroupVersionResource{
 // rollout is the subset of the Argo Rollout CRD that ship reads.
 type rollout struct {
 	Spec struct {
+		Replicas *int32                `json:"replicas"`
 		Selector *metav1.LabelSelector `json:"selector"`
 		Template struct {
 			Spec struct {
@@ -243,9 +245,10 @@ func (c *RealClient) getRollout(ctx context.Context, namespace, name string) (*W
 		Image:     image,
 		Container: ro.Spec.Template.Spec.Containers[0].Name,
 		Health: Health{
-			Ready:         ro.Status.ReadyReplicas == ro.Status.Replicas && ro.Status.Replicas > 0,
-			ReadyReplicas: ro.Status.ReadyReplicas,
-			Replicas:      ro.Status.Replicas,
+			Ready:           ro.Status.ReadyReplicas == ro.Status.Replicas && ro.Status.Replicas > 0,
+			ReadyReplicas:   ro.Status.ReadyReplicas,
+			Replicas:        ro.Status.Replicas,
+			DesiredReplicas: desiredReplicas(ro.Spec.Replicas),
 		},
 	}
 	// rollout conditions follow the same shapes as deployments, plus
@@ -268,6 +271,15 @@ func (c *RealClient) getRollout(ctx context.Context, namespace, name string) (*W
 	}
 	c.collectHealth(ctx, namespace, name, ro.Spec.Selector, "Rollout", &w.Health)
 	return w, nil
+}
+
+// desiredReplicas dereferences a spec.replicas pointer, defaulting to the
+// controller's implicit value of 1 when unset.
+func desiredReplicas(r *int32) int32 {
+	if r == nil {
+		return 1
+	}
+	return *r
 }
 
 // progressingReasons are the Deployment/Rollout "Progressing" condition

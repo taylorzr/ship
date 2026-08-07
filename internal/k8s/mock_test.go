@@ -54,6 +54,23 @@ func TestParseMockSpecBareReasonsUnchanged(t *testing.T) {
 	}
 }
 
+func TestParseMockSpecDesiredReplicas(t *testing.T) {
+	spec := ParseMockSpec("img|replicas=2|desired_replicas=3|ready_replicas=1")
+	if spec.DesiredReplicas != 3 {
+		t.Fatalf("DesiredReplicas = %d, want 3", spec.DesiredReplicas)
+	}
+	if spec.Replicas != 2 || spec.ReadyReplicas != 1 {
+		t.Fatalf("Replicas = %d, ReadyReplicas = %d, want 2/1", spec.Replicas, spec.ReadyReplicas)
+	}
+	if spec.Ready {
+		t.Fatal("Ready should be false (2 replicas, 1 ready, ready not given)")
+	}
+	spec = ParseMockSpec("img")
+	if spec.DesiredReplicas != 1 {
+		t.Fatalf("default DesiredReplicas = %d, want 1", spec.DesiredReplicas)
+	}
+}
+
 func unixSeconds(t *testing.T, s string) time.Time {
 	t.Helper()
 	n, err := strconv.ParseInt(s, 10, 64)

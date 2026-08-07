@@ -1009,6 +1009,9 @@ func visibleRows(s section) int {
 
 func (m Model) Init() tea.Cmd {
 	cmds := []tea.Cmd{m.spin.Tick, m.autoRefreshTick(), m.activeRefreshTick(), m.rateLimitTick()}
+	if cmd := m.rateLimitRefreshCmd(); cmd != nil {
+		cmds = append(cmds, cmd)
+	}
 	m.sectionErrs = map[string]string{}
 	for k := range m.loading {
 		m.loading[k] = true
@@ -1595,8 +1598,11 @@ type rateLimitTickMsg time.Time
 
 // rateLimitRefreshCmd polls GitHub's /rate_limit in the background. Failures
 // (e.g. offline) are logged and swallowed so the UI keeps the last known
-// quota.
+// quota. Returns nil without a GitHub client.
 func (m Model) rateLimitRefreshCmd() tea.Cmd {
+	if m.gh == nil {
+		return nil
+	}
 	return func() tea.Msg {
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
@@ -2533,7 +2539,7 @@ func serializePendingTags(tags []gh.PendingTag) (pending string, contribs string
 // serializeHealth turns service health into a compact on-disk string so the
 // Services column survives cache reloads.
 func serializeHealth(h k8s.Health) string {
-	if h.Replicas == 0 && h.Restarts == 0 && len(h.RestartCauses) == 0 && len(h.Events) == 0 && len(h.RecentEvents) == 0 && len(h.OldEvents) == 0 && len(h.Waiting) == 0 && len(h.Conditions) == 0 && h.PendingPods == 0 && h.FailedPods == 0 && !h.Progressing && !h.Paused {
+	if h.Replicas == 0 && h.DesiredReplicas == 0 && h.Restarts == 0 && len(h.RestartCauses) == 0 && len(h.Events) == 0 && len(h.RecentEvents) == 0 && len(h.OldEvents) == 0 && len(h.Waiting) == 0 && len(h.Conditions) == 0 && h.PendingPods == 0 && h.FailedPods == 0 && !h.Progressing && !h.Paused {
 		return ""
 	}
 	events := strings.Join(h.Events, ",")
@@ -2542,14 +2548,14 @@ func serializeHealth(h k8s.Health) string {
 	recent := strings.Join(h.RecentEvents, ",")
 	old := strings.Join(h.OldEvents, ",")
 	waiting := strings.Join(h.Waiting, ",")
-	return fmt.Sprintf("%v|%d|%d|%d|%s|%s|%d|%d|%s|%s|%s|%s|%v|%v", h.Ready, h.ReadyReplicas, h.Replicas, h.Restarts, events, conditions, h.PendingPods, h.FailedPods, causes, recent, old, waiting, h.Progressing, h.Paused)
+	return fmt.Sprintf("%v|%d|%d|%d|%s|%s|%d|%d|%s|%s|%s|%s|%v|%v|%d", h.Ready, h.ReadyReplicas, h.Replicas, h.Restarts, events, conditions, h.PendingPods, h.FailedPods, causes, recent, old, waiting, h.Progressing, h.Paused, h.DesiredReplicas)
 }
 
 // parseHealth decodes a value produced by serializeHealth. Older cache rows
 // with fewer fields are still accepted.
 func parseHealth(s string) k8s.Health {
 	var h k8s.Health
-	parts := strings.SplitN(s, "|", 14)
+	parts := strings.SplitN(s, "|", 15)
 	if len(parts) < 5 {
 		return h
 	}
@@ -2586,6 +2592,9 @@ func parseHealth(s string) k8s.Health {
 	}
 	if len(parts) > 13 {
 		fmt.Sscanf(parts[13], "%t", &h.Paused)
+	}
+	if len(parts) > 14 {
+		fmt.Sscanf(parts[14], "%d", &h.DesiredReplicas)
 	}
 	return h
 }
@@ -2683,6 +2692,13 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 	if h.Paused {
 		segs = append(segs, healthSeg{"⏸DeploymentPaused", segInfo, false})
 	}
+	if h.DesiredReplicas > 0 && h.DesiredReplicas != h.Replicas {
+		dir := "↓"
+		if h.DesiredReplicas > h.Replicas {
+			dir = "↑"
+		}
+		segs = append(segs, healthSeg{fmt.Sprintf("%s %d", dir, h.DesiredReplicas), segInfo, false})
+	}
 	if h.Restarts > 0 {
 		segs = append(segs, healthSeg{fmt.Sprintf("↻%d", h.Restarts), restartKind, false})
 	}
@@ -2751,7 +2767,7 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 }
 
 func healthEmpty(h k8s.Health) bool {
-	return h.Replicas == 0 && h.Restarts == 0 && len(h.RestartCauses) == 0 &&
+	return h.Replicas == 0 && h.DesiredReplicas == 0 && h.Restarts == 0 && len(h.RestartCauses) == 0 &&
 		len(h.Events) == 0 && len(h.RecentEvents) == 0 && len(h.OldEvents) == 0 && len(h.Waiting) == 0 &&
 		len(h.Conditions) == 0 && len(h.FailedReasons) == 0 && h.PendingPods == 0 && h.FailedPods == 0 && !h.Progressing && !h.Paused
 }
@@ -3328,6 +3344,7 @@ func (m Model) renderHelpOverlay() string {
 				{"✔", "healthy"},
 				{"✖", "unhealthy"},
 				{"⟳ Progressing 2/5", "rolling out · ready replicas"},
+				{"↑3 / ↓1", "scaling to target replicas"},
 				{"↻N", "restarts"},
 				{"↻OOMKilled", "last restart cause"},
 				{"⌛N", "pods pending"},

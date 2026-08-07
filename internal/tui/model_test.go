@@ -232,6 +232,54 @@ func TestHealthRoundTripPreservesEventAges(t *testing.T) {
 	}
 }
 
+func TestHealthRoundTripPreservesDesiredReplicas(t *testing.T) {
+	h := k8s.Health{Ready: true, Replicas: 2, ReadyReplicas: 2, DesiredReplicas: 4}
+	got := parseHealth(serializeHealth(h))
+	if got.DesiredReplicas != 4 || got.Replicas != 2 {
+		t.Fatalf("round-trip = %+v, want desired 4 current 2", got)
+	}
+}
+
+func TestParseHealthOldFormatWithoutDesired(t *testing.T) {
+	h := k8s.Health{Ready: true, Replicas: 3, ReadyReplicas: 3, Restarts: 2}
+	s := serializeHealth(h)
+	idx := strings.LastIndex(s, "|")
+	old := s[:idx]
+	got := parseHealth(old)
+	if got.DesiredReplicas != 0 {
+		t.Fatalf("old-format DesiredReplicas = %d, want 0", got.DesiredReplicas)
+	}
+	if got.Replicas != 3 || got.ReadyReplicas != 3 || got.Restarts != 2 {
+		t.Fatalf("old-format parse = %+v, want current/ready 3 restarts 2", got)
+	}
+}
+
+func TestFormatHealthScalingUpDown(t *testing.T) {
+	got := formatHealth(serializeHealth(k8s.Health{
+		Ready: true, Replicas: 2, ReadyReplicas: 2, DesiredReplicas: 4,
+	}), eventFilter{})
+	if got != "✔ ↑ 4" {
+		t.Fatalf("scaling up = %q, want %q", got, "✔ ↑ 4")
+	}
+	got = formatHealth(serializeHealth(k8s.Health{
+		Ready: true, Replicas: 3, ReadyReplicas: 3, DesiredReplicas: 1,
+	}), eventFilter{})
+	if got != "✔ ↓ 1" {
+		t.Fatalf("scaling down = %q, want %q", got, "✔ ↓ 1")
+	}
+}
+
+func TestHealthScalingColdStartNotEmpty(t *testing.T) {
+	h := k8s.Health{Ready: false, Replicas: 0, ReadyReplicas: 0, DesiredReplicas: 2}
+	if healthEmpty(h) {
+		t.Fatal("cold-start scaling workload treated as empty")
+	}
+	got := formatHealth(serializeHealth(h), eventFilter{})
+	if got != "↑ 2" {
+		t.Fatalf("cold-start scaling = %q, want %q", got, "↑ 2")
+	}
+}
+
 func TestRenderRowMarginOnlyHighlight(t *testing.T) {
 	forceColor()
 	r := row{

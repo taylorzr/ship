@@ -8,21 +8,22 @@ import (
 )
 
 type Health struct {
-	Ready         bool
-	ReadyReplicas int32
-	Replicas      int32
-	Restarts      int32
-	RestartCauses []string // last termination reason per restarted container, e.g. "OOMKilled", "Exit137"
-	Events        []string // Warning reasons within the warn window, e.g. "OOMKilled", "BackOff"
-	RecentEvents  []string // Warning reasons within the recent window (rendered red)
-	OldEvents     []string // Warning reasons within the history window (rendered muted)
-	Waiting       []string // container State.Waiting reasons, e.g. "ImagePullBackOff", "CrashLoopBackOff"
-	Progressing   bool     // workload is mid-rollout (a deploy is in progress)
-	Paused        bool     // rollout paused awaiting manual approval (DeploymentPaused condition reason)
-	Conditions    []string // deployment condition reasons, e.g. "ProgressDeadlineExceeded"
-	PendingPods   int32    // pods stuck in Pending phase (scheduling, etc.)
-	FailedPods    int32    // pods in Failed phase
-	FailedReasons []string // pod Status.Reason for Failed pods, e.g. "Evicted", "NodeLost"
+	Ready           bool
+	ReadyReplicas   int32
+	Replicas        int32 // current running replicas (status.replicas)
+	DesiredReplicas int32 // desired spec.replicas; scale direction is desired vs current
+	Restarts        int32
+	RestartCauses   []string // last termination reason per restarted container, e.g. "OOMKilled", "Exit137"
+	Events          []string // Warning reasons within the warn window, e.g. "OOMKilled", "BackOff"
+	RecentEvents    []string // Warning reasons within the recent window (rendered red)
+	OldEvents       []string // Warning reasons within the history window (rendered muted)
+	Waiting         []string // container State.Waiting reasons, e.g. "ImagePullBackOff", "CrashLoopBackOff"
+	Progressing     bool     // workload is mid-rollout (a deploy is in progress)
+	Paused          bool     // rollout paused awaiting manual approval (DeploymentPaused condition reason)
+	Conditions      []string // deployment condition reasons, e.g. "ProgressDeadlineExceeded"
+	PendingPods     int32    // pods stuck in Pending phase (scheduling, etc.)
+	FailedPods      int32    // pods in Failed phase
+	FailedReasons   []string // pod Status.Reason for Failed pods, e.g. "Evicted", "NodeLost"
 }
 
 type Workload struct {
