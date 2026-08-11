@@ -67,12 +67,17 @@ func Resolve(ctx context.Context, k8sClient k8s.Client, ghClient *gh.Client, svc
 	r.AheadBy = compare.AheadBy
 	r.Commits = compare.Commits
 
-	pending, err := ghClient.PendingTags(ctx, svc.Repo, r.ProdSHA, branch, svc.ReleaseSource, r.ProdTag, compare.Commits)
-	if err != nil {
-		// non-fatal, just no pending tags
-		return r
+	// sha versioning has no release train: every merge is itself a deployable
+	// SHA, so git tags are never pending. Skip tag detection entirely and let
+	// the untagged-commit list stand in for "what's waiting to ship".
+	if svc.VersionStrategy != "sha" {
+		pending, err := ghClient.PendingTags(ctx, svc.Repo, r.ProdSHA, branch, svc.ReleaseSource, r.ProdTag, compare.Commits)
+		if err != nil {
+			// non-fatal, just no pending tags
+			return r
+		}
+		r.PendingTags = pending
 	}
-	r.PendingTags = pending
 
 	if !svc.SkipUntagged {
 		untagged, err := ghClient.UntaggedFirstParent(ctx, svc.Repo, r.ProdSHA, branch, compare.Commits)
