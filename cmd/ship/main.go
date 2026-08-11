@@ -5,12 +5,15 @@ import (
 	"fmt"
 	"os"
 	"os/exec"
+	"os/signal"
 	"runtime"
 	"strings"
 	"sync"
+	"syscall"
 	"time"
 
 	tea "github.com/charmbracelet/bubbletea"
+	"github.com/charmbracelet/lipgloss"
 	"github.com/spf13/cobra"
 	"github.com/zach/ship/internal/config"
 	gh "github.com/zach/ship/internal/github"
@@ -80,7 +83,7 @@ func init() {
 	rootCmd.AddCommand(reviewPRsCmd)
 	rootCmd.AddCommand(depPRsCmd)
 	rootCmd.AddCommand(doctorCmd)
-	rootCmd.Flags().StringToStringVar(&mockK8sSpecs, "mock-k8s", nil, "mock k8s per service (e.g. svc1=repo/app:v10.1.0,svc2=repo/other:v2.0.0|restarts=3|events=OOMKilling+BackOff)")
+	rootCmd.Flags().StringToStringVar(&mockK8sSpecs, "mock-k8s", nil, "mock k8s per service (e.g. svc1=repo/app:v10.1.0,svc2=repo/other:v2.0.0|restarts=3|events=OOMKilling+BackOff); without a terminal prints the health columns as text")
 	releasesCmd.Flags().StringToStringVar(&mockK8sSpecs, "mock-k8s", nil, "mock k8s per service (e.g. svc1=repo/app:v10.1.0,svc2=repo/other:v2.0.0|restarts=3|events=OOMKilling+BackOff)")
 	releasesCmd.Flags().StringVar(&releasesRepo, "repo", "", "filter to a specific repo (e.g. taylorzr/kitty-meow)")
 	reviewPRsCmd.Flags().BoolVar(&reviewMeOnly, "me", false, "only run the user-review-requested query")
@@ -95,6 +98,11 @@ func init() {
 }
 
 func main() {
+	// A TUI dies loudly on SIGPIPE when its terminal or output pipe closes
+	// mid-render (dropped SSH session, piped through head, ...). Ignore the
+	// signal so writes fail with EPIPE and the program exits cleanly instead
+	// of crashing with "signal: broken pipe".
+	signal.Ignore(syscall.SIGPIPE)
 	if err := rootCmd.Execute(); err != nil {
 		os.Exit(1)
 	}
@@ -104,6 +112,13 @@ func runTUI(cmd *cobra.Command, args []string) error {
 	cfg, err := config.Load("")
 	if err != nil {
 		return fmt.Errorf("config: %w", err)
+	}
+
+	if f, err := os.Stdout.Stat(); err != nil || f.Mode()&os.ModeCharDevice == 0 {
+		if len(mockK8sSpecs) > 0 {
+			return renderMockNonTTY(cfg)
+		}
+		return fmt.Errorf("ship is an interactive TUI and needs a terminal — run it in a real one (not piped/redirected)")
 	}
 
 	st, err := store.Open("")
@@ -140,6 +155,57 @@ func toCached(p gh.PR, role string) store.CachedPR {
 		Mergeable:      p.Mergeable,
 		UpdatedAt:      p.UpdatedAt,
 	}
+}
+
+// renderMockNonTTY prints each mocked service's health column as aligned text so
+// --mock-k8s specs can be exercised without a terminal. Column widths are
+// computed over all services first so every line lines up, and the health
+// column keeps the TUI's ANSI styling (it is always the last column, so the
+// escape sequences never throw off alignment).
+func renderMockNonTTY(cfg *config.Config) error {
+	// stdout is not a terminal here, so lipgloss picks the Ascii profile and
+	// strips color — raw ANSI escapes would just show up as garbage in piped
+	// output. NO_COLOR is respected for free.
+	specs := parseMockSpecs(mockK8sSpecs)
+
+	type row struct{ name, img, health string }
+	var rows []row
+	maxName, maxImg := 0, 0
+	for _, svc := range cfg.Services {
+		spec, ok := specs[svc.Name]
+		if !ok {
+			spec, ok = specs[svc.Repo]
+		}
+		if !ok {
+			spec, ok = specs["*"]
+		}
+		if !ok {
+			rows = append(rows, row{name: svc.Name, health: lipgloss.NewStyle().Foreground(lipgloss.Color("196")).Render("✗ no mock spec for this service (key by name, repo, or *)")})
+			continue
+		}
+		r := row{
+			name: svc.Name,
+			img:  spec.Image,
+			health: tui.FormatHealthColored(tui.SerializeHealth(spec.Health),
+				cfg.K8s.HideTransient, cfg.K8s.TransientEvents),
+		}
+		rows = append(rows, r)
+		if n := len(r.name); n > maxName {
+			maxName = n
+		}
+		if m := len(r.img); m > maxImg {
+			maxImg = m
+		}
+	}
+
+	for _, r := range rows {
+		if r.health == "" {
+			fmt.Printf("%-*s  %s\n", maxName, r.name, r.img)
+			continue
+		}
+		fmt.Printf("%-*s  %-*s  →  %s\n", maxName, r.name, maxImg, r.img, r.health)
+	}
+	return nil
 }
 
 // parseMockSpecs converts the raw --mock-k8s string map into per-service

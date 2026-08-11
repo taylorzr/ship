@@ -54,6 +54,13 @@ func TestParseMockSpecBareReasonsUnchanged(t *testing.T) {
 	}
 }
 
+func TestParseMockSpecProbeFailureReasons(t *testing.T) {
+	spec := ParseMockSpec("img|recent_events=StartupProbeFailed+LivenessProbeFailed")
+	if len(spec.RecentEvents) != 2 || spec.RecentEvents[0] != "StartupProbeFailed" || spec.RecentEvents[1] != "LivenessProbeFailed" {
+		t.Fatalf("RecentEvents = %v, want [StartupProbeFailed LivenessProbeFailed]", spec.RecentEvents)
+	}
+}
+
 func TestParseMockSpecDesiredReplicas(t *testing.T) {
 	spec := ParseMockSpec("img|replicas=2|desired_replicas=3|ready_replicas=1")
 	if spec.DesiredReplicas != 3 {

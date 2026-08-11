@@ -14,7 +14,7 @@ type Health struct {
 	DesiredReplicas  int32 // desired spec.replicas; scale direction is desired vs current
 	Restarts         int32
 	RestartCauses    []string // last termination reason per restarted container, e.g. "OOMKilled", "Exit137"
-	Events           []string // Warning reasons within the warn window, e.g. "OOMKilled", "BackOff"
+	Events           []string // Warning reasons within the warn window, e.g. "OOMKilled", "BackOff"; probe failures surface as "StartupProbeFailed"/"LivenessProbeFailed"/"ReadinessProbeFailed"
 	RecentEvents     []string // Warning reasons within the recent window (rendered red)
 	OldEvents        []string // Warning reasons within the history window (rendered muted)
 	Waiting          []string // container State.Waiting reasons, e.g. "ImagePullBackOff", "CrashLoopBackOff"
@@ -80,6 +80,9 @@ func (t EventTimebox) Normalized() EventTimebox {
 // value is a matter of taste rather than collection policy.
 var DefaultTransientEvents = []string{
 	"Unhealthy",
+	"StartupProbeFailed",
+	"LivenessProbeFailed",
+	"ReadinessProbeFailed",
 	"FailedCreate",
 	"FailedCreatePodSandBox",
 	"FailedCreatePod",

@@ -166,6 +166,59 @@ func TestCollectHealthNodeEventDropped(t *testing.T) {
 	}
 }
 
+func unhealthyProbeEvent(name, objName, message string) *corev1.Event {
+	ev := warningEvent(name, "Pod", objName, "Unhealthy")
+	ev.Message = message
+	return ev
+}
+
+func TestProbeKind(t *testing.T) {
+	cases := map[string]string{
+		"Startup probe failed: Get \"http://10.0.0.1:8000/livez\": connect: connection refused": "Startup",
+		"Liveness probe failed: cat: can't open '/tmp/healthy': No such file or directory":      "Liveness",
+		"Readiness probe failed: HTTP probe failed with statuscode: 500":                        "Readiness",
+		"":                                     "",
+		"Back-off restarting failed container": "",
+	}
+	for msg, want := range cases {
+		if got := probeKind(msg); got != want {
+			t.Errorf("probeKind(%q) = %q, want %q", msg, got, want)
+		}
+	}
+}
+
+func TestCollectHealthProbeFailureReasons(t *testing.T) {
+	c := newTestClient(t,
+		testPod("web-abc", corev1.PodRunning),
+		unhealthyProbeEvent("su", "web-abc", "Startup probe failed: Get \"http://10.0.0.1:8000/livez\": connect: connection refused"),
+		unhealthyProbeEvent("lv", "web-abc", "Liveness probe failed: cat: can't open '/tmp/healthy': No such file or directory"),
+		unhealthyProbeEvent("rd", "web-abc", "Readiness probe failed: HTTP probe failed with statuscode: 503"),
+	)
+	h := c.collectHealthFor(t, "web", "Deployment")
+	for _, want := range []string{"StartupProbeFailed", "LivenessProbeFailed", "ReadinessProbeFailed"} {
+		if !slices.Contains(h.RecentEvents, want) {
+			t.Fatalf("RecentEvents = %v, want it to contain %s", h.RecentEvents, want)
+		}
+	}
+	if slices.Contains(h.RecentEvents, "Unhealthy") {
+		t.Fatalf("RecentEvents = %v, want probe reasons to replace Unhealthy", h.RecentEvents)
+	}
+}
+
+func TestCollectHealthUnhealthyWithoutProbeMessageKept(t *testing.T) {
+	c := newTestClient(t,
+		testPod("web-abc", corev1.PodRunning),
+		unhealthyProbeEvent("oo", "web-abc", ""),
+	)
+	h := c.collectHealthFor(t, "web", "Deployment")
+	if !slices.Contains(h.RecentEvents, "Unhealthy") {
+		t.Fatalf("RecentEvents = %v, want it to contain Unhealthy", h.RecentEvents)
+	}
+	if slices.Contains(h.RecentEvents, "StartupProbeFailed") {
+		t.Fatalf("RecentEvents = %v, want no probe annotation", h.RecentEvents)
+	}
+}
+
 func TestCollectHealthFailedPodReason(t *testing.T) {
 	pod := testPod("web-abc", corev1.PodFailed)
 	pod.Status.Reason = "Evicted"

@@ -14,6 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/key"
 	"github.com/charmbracelet/bubbles/spinner"
@@ -2450,16 +2451,16 @@ func (m Model) View() string {
 				if maxPen > 60 {
 					maxPen = 60
 				}
-				if maxCon > 60 {
-					maxCon = 60
-				}
+				// Details keeps every column the other fields don't need so
+				// long health summaries (event history, probe failures) stay
+				// visible instead of being cut at a fixed cap.
 				if m.width > 0 {
-					avail := m.width - maxName - maxCur - maxCon - 6 // 3 separators + padding
-					if avail < maxPen {
-						maxPen = avail
+					avail := m.width - maxName - maxCur - maxPen - 10 // row prefix + separators + margin
+					if avail < 11 {
+						avail = 11
 					}
-					if maxPen < 4 {
-						maxPen = 4
+					if maxCon > avail {
+						maxCon = avail
 					}
 				}
 				sep := "  "
@@ -2683,8 +2684,8 @@ func (m *Model) eventFilter() eventFilter {
 
 // healthSegments splits a workload's health into display parts so callers can
 // style each individually. Plain ✔ is current readiness. Blue is deployment
-// state: ⟳ Progressing (with the new-pods-ready fraction over desired, e.g.
-// "⟳ Progressing 2/5" — ready pods on the current ReplicaSet), ⏸DeploymentPaused
+// state: ⟳Progressing (with the new-pods-ready fraction over desired, e.g.
+// "⟳Progressing 2/5" — ready pods on the current ReplicaSet), ⏸DeploymentPaused
 // awaiting manual approval, and ⇑ N / ⇓ N while scaling to the target replica
 // count (the arrow is the headline when not yet ready, trailing the ✔
 // otherwise). Yellow is history and waiting: ↻N restarts, their causes, and
@@ -2717,9 +2718,9 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 		if problems {
 			segs = append(segs, healthSeg{"✖", segBad, false})
 		}
-		icon := "⟳ Progressing"
+		icon := "⟳Progressing"
 		if h.DesiredReplicas > 0 && h.NewReadyReplicas >= 0 {
-			icon = fmt.Sprintf("⟳ Progressing %d/%d", h.NewReadyReplicas, h.DesiredReplicas)
+			icon = fmt.Sprintf("⟳Progressing %d/%d", h.NewReadyReplicas, h.DesiredReplicas)
 		}
 		segs = append(segs, healthSeg{icon, segInfo, false})
 	case h.Ready && !problems:
@@ -2779,7 +2780,7 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 	// HPA rescale totals share the muted │ section with past events, sitting
 	// ahead of them so the hour view reads as one auxiliary block.
 	if h.ScaleUp > 0 || h.ScaleDown > 0 {
-		text := "⇅HPA"
+		text := "HPA"
 		if h.ScaleUp > 0 {
 			text += fmt.Sprintf(" ↑%d", h.ScaleUp)
 		}
@@ -2791,7 +2792,7 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 	hidden := 0
 	addEvents := func(list []string, kind int) {
 		for _, e := range list {
-			reason, age, hasAge := eventReasonAge(e)
+			reason, _, _ := eventReasonAge(e)
 			s := shortEvent(reason)
 			if s == "" {
 				continue
@@ -2801,9 +2802,6 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 				continue
 			}
 			text := reasonPrefix(s) + s
-			if hasAge {
-				text += "(-" + relativeDur(age) + ")"
-			}
 			events = append(events, healthSeg{text, kind, true})
 		}
 	}
@@ -2830,12 +2828,12 @@ func healthEmpty(h k8s.Health) bool {
 }
 
 // formatHealth renders the cached health string as a compact plain-text column
-// value: ✔ healthy, ⟳ Progressing (new pods ready / desired, e.g. "⟳ Progressing 2/5"),
+// value: ✔ healthy, ⟳Progressing (new pods ready / desired, e.g. "⟳Progressing 2/5"),
 // ⇑ N / ⇓ N scaling to the target replica count, ✖ not ready,
 // ⏸DeploymentPaused paused,
 // ↻N restarts, ↻OOMKilled restart causes, ⚠ error events (colored by age in
 // the TUI), ∞ waiting/retrying, ⌛N pending, 💀N failed, ⚠ conditions.
-// HPA rescale totals from the last hour (⇅HPA ↑N ↓N) are grouped with past
+// HPA rescale totals from the last hour (HPA ↑N ↓N) are grouped with past
 // events behind a │ separator.
 func formatHealth(health string, ev eventFilter) string {
 	h := parseHealth(health)
@@ -2848,6 +2846,38 @@ func formatHealth(health string, ev eventFilter) string {
 		parts[i] = s.text
 	}
 	return strings.Join(parts, " ")
+}
+
+// SerializeHealth encodes a k8s.Health value into the compact cache string used
+// by the health column. Exported for non-interactive rendering of mock specs.
+func SerializeHealth(h k8s.Health) string { return serializeHealth(h) }
+
+// eventFilterFor resolves the transient-event display filter. An empty
+// transientReasons falls back to k8s.DefaultTransientEvents.
+func eventFilterFor(hideTransient bool, transientReasons []string) eventFilter {
+	f := eventFilter{hide: hideTransient}
+	if hideTransient {
+		if len(transientReasons) == 0 {
+			transientReasons = k8s.DefaultTransientEvents
+		}
+		f.transient = make(map[string]bool, len(transientReasons))
+		for _, r := range transientReasons {
+			f.transient[r] = true
+		}
+	}
+	return f
+}
+
+// FormatHealthText renders a serialized health value as the unstyled plain-text
+// health column, applying the transient-event filter.
+func FormatHealthText(health string, hideTransient bool, transientReasons []string) string {
+	return formatHealth(health, eventFilterFor(hideTransient, transientReasons))
+}
+
+// FormatHealthColored renders a serialized health value as the health column
+// with the same ANSI styling the TUI uses.
+func FormatHealthColored(health string, hideTransient bool, transientReasons []string) string {
+	return renderHealthColored(health, eventFilterFor(hideTransient, transientReasons))
 }
 
 // shortEvent filters benign k8s event/condition reasons that don't deserve a
@@ -3034,6 +3064,10 @@ func (m *Model) formatContributors(releaseAuthor string, contributors []string) 
 	return strings.Join(names, ", ")
 }
 
+// truncateWidth cuts s to max display columns, appending an ellipsis. ANSI
+// escape sequences are zero-width and copied atomically so colored strings
+// truncate at the right width without emitting dangling escapes; a reset is
+// appended when the cut lands inside an open sequence.
 func truncateWidth(s string, max int) string {
 	if max < 1 {
 		return ""
@@ -3043,16 +3077,45 @@ func truncateWidth(s string, max int) string {
 	}
 	var out strings.Builder
 	var w int
-	for _, r := range s {
+	escaped := false
+	for i := 0; i < len(s); {
+		if s[i] == '\x1b' {
+			escaped = true
+			end := i + 1
+			if end < len(s) && s[end] == '[' {
+				end = csiEnd(s, i)
+			}
+			out.WriteString(s[i:end])
+			i = end
+			continue
+		}
+		r, size := utf8.DecodeRuneInString(s[i:])
 		rw := lipgloss.Width(string(r))
 		if w+rw > max-1 {
 			out.WriteString("…")
+			if escaped {
+				out.WriteString("\x1b[0m")
+			}
 			break
 		}
 		out.WriteRune(r)
 		w += rw
+		i += size
 	}
 	return out.String()
+}
+
+// csiEnd returns the index just past the CSI escape sequence starting at the
+// ESC at s[start] (e.g. "\x1b[38;5;196m"), scanning to its final byte.
+func csiEnd(s string, start int) int {
+	i := start + 2 // skip ESC [
+	for i < len(s) && s[i] >= 0x20 && s[i] < 0x40 {
+		i++
+	}
+	if i < len(s) {
+		i++
+	}
+	return i
 }
 
 func padWidth(s string, w int) string {
@@ -3407,14 +3470,15 @@ func (m Model) renderHelpOverlay() string {
 			legend = helpSection("legend", [][2]string{
 				{"✔", "healthy"},
 				{"✖", "unhealthy"},
-				{"⟳ Progressing 2/5", "rolling out · new pods ready / desired"},
+				{"⟳Progressing 2/5", "rolling out · new pods ready / desired"},
 				{"⇑3 / ⇓1", "scaling to target replicas"},
-				{"⇅HPA ↑4 ↓2", "HPA rescaled pods (last hour)"},
+				{"HPA ↑4 ↓2", "HPA rescaled pods (last hour)"},
 				{"↻N", "restarts"},
 				{"↻OOMKilled", "last restart cause"},
 				{"⌛N", "pods pending"},
 				{"💀N", "pods failed"},
 				{"⚠SomeError", "past error event (dimmed)"},
+				{"⚠StartupProbeFailed", "probe failure · startup/liveness/readiness"},
 				{"∞SomeBackoff", "retrying event"},
 				{"~N", "transient events hidden"},
 				{"│", "separates events from details"},
@@ -3424,7 +3488,7 @@ func (m Model) renderHelpOverlay() string {
 				{"red", healthBad, "unhealthy · conditions · failed pods · events ≤" + shortDur(tb.Recent)},
 				{"yellow", healthWarn, "events " + rangeDur(tb.Recent, tb.Warn) + " · restarts · pending"},
 				{"gray", healthMuted, "older events " + rangeDur(tb.Warn, tb.History)},
-				{"blue", healthInfo, "⟳ Progressing · ⏸DeploymentPaused"},
+				{"blue", healthInfo, "⟳Progressing · ⏸DeploymentPaused"},
 			})
 		}
 	}

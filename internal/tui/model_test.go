@@ -45,44 +45,93 @@ func TestEventReasonAge(t *testing.T) {
 	}
 }
 
-func TestEventReasonAgeEmitsAgedSegment(t *testing.T) {
+func TestEventsRenderBareReasonWithoutAge(t *testing.T) {
 	ts := time.Now().Add(-15 * time.Minute).Unix()
 	h := k8s.Health{OldEvents: []string{"Unhealthy@" + strconv.FormatInt(ts, 10)}}
 	segs := healthSegments(h, eventFilter{})
 	found := false
 	for _, s := range segs {
-		if strings.HasPrefix(s.text, "⚠Unhealthy(-") && strings.HasSuffix(s.text, "m)") {
+		if s.text == "⚠Unhealthy" {
 			found = true
+		}
+		if strings.HasPrefix(s.text, "⚠Unhealthy(") {
+			t.Fatalf("segments = %v, age suffix still rendered", segs)
 		}
 	}
 	if !found {
-		t.Fatalf("segments = %v, want an aged ⚠Unhealthy segment", segs)
+		t.Fatalf("segments = %v, want a bare ⚠Unhealthy segment", segs)
+	}
+}
+
+func TestHealthSegmentsProbeFailureReasons(t *testing.T) {
+	h := k8s.Health{Ready: true, Replicas: 1, ReadyReplicas: 1, DesiredReplicas: 1,
+		RecentEvents: []string{"StartupProbeFailed", "LivenessProbeFailed"}}
+	segs := healthSegments(h, eventFilter{})
+	for _, want := range []string{"⚠StartupProbeFailed", "⚠LivenessProbeFailed"} {
+		found := false
+		for _, s := range segs {
+			if s.text == want {
+				found = true
+				if s.kind != segBad {
+					t.Fatalf("%s kind = %d, want segBad (recent)", want, s.kind)
+				}
+			}
+		}
+		if !found {
+			t.Fatalf("segments = %v, want %s", segs, want)
+		}
+	}
+	if got := formatHealth(serializeHealth(h), eventFilter{}); !strings.Contains(got, "⚠StartupProbeFailed") {
+		t.Fatalf("formatHealth round-trip = %q, want it to contain ⚠StartupProbeFailed", got)
+	}
+}
+
+func TestHideTransientHidesProbeFailureReasons(t *testing.T) {
+	h := k8s.Health{RecentEvents: []string{"StartupProbeFailed", "Unhealthy"}}
+	f := eventFilter{hide: true, transient: map[string]bool{}}
+	for _, r := range k8s.DefaultTransientEvents {
+		f.transient[r] = true
+	}
+	segs := healthSegments(h, f)
+	for _, s := range segs {
+		if strings.HasPrefix(s.text, "⚠") {
+			t.Fatalf("segments = %v, transient probe events should be hidden", segs)
+		}
+	}
+	foundHidden := false
+	for _, s := range segs {
+		if strings.HasPrefix(s.text, "~") {
+			foundHidden = true
+		}
+	}
+	if !foundHidden {
+		t.Fatalf("segments = %v, want ~N hidden marker", segs)
 	}
 }
 
 func TestProgressingHealthShowsReplicaProgress(t *testing.T) {
 	h := k8s.Health{Progressing: true, DesiredReplicas: 5, NewReadyReplicas: 2}
 	segs := healthSegments(h, eventFilter{})
-	if len(segs) == 0 || segs[0].text != "⟳ Progressing 2/5" {
-		t.Fatalf("segments = %v, want first segment ⟳ Progressing 2/5", segs)
+	if len(segs) == 0 || segs[0].text != "⟳Progressing 2/5" {
+		t.Fatalf("segments = %v, want first segment ⟳Progressing 2/5", segs)
 	}
 
 	zero := k8s.Health{Progressing: true}
 	segs = healthSegments(zero, eventFilter{})
-	if len(segs) == 0 || segs[0].text != "⟳ Progressing" {
-		t.Fatalf("segments = %v, want first segment ⟳ Progressing", segs)
+	if len(segs) == 0 || segs[0].text != "⟳Progressing" {
+		t.Fatalf("segments = %v, want first segment ⟳Progressing", segs)
 	}
 
-	if got := formatHealth(serializeHealth(h), eventFilter{}); !strings.Contains(got, "⟳ Progressing 2/5") {
-		t.Fatalf("formatHealth round-trip = %q, want it to contain ⟳ Progressing 2/5", got)
+	if got := formatHealth(serializeHealth(h), eventFilter{}); !strings.Contains(got, "⟳Progressing 2/5") {
+		t.Fatalf("formatHealth round-trip = %q, want it to contain ⟳Progressing 2/5", got)
 	}
 }
 
 func TestHealthSegmentsRolloutIgnoresTransientSignals(t *testing.T) {
 	h := k8s.Health{Progressing: true, DesiredReplicas: 3, NewReadyReplicas: 1, PendingPods: 2, Conditions: []string{"Unavailable"}}
 	segs := healthSegments(h, eventFilter{})
-	if len(segs) == 0 || segs[0].text != "⟳ Progressing 1/3" {
-		t.Fatalf("segments = %v, want first segment ⟳ Progressing 1/3", segs)
+	if len(segs) == 0 || segs[0].text != "⟳Progressing 1/3" {
+		t.Fatalf("segments = %v, want first segment ⟳Progressing 1/3", segs)
 	}
 	for _, s := range segs {
 		if strings.HasPrefix(s.text, "✖") {
@@ -127,7 +176,7 @@ func TestHealthSegmentsRolloutFlagsRealProblems(t *testing.T) {
 				if s.text == tc.want {
 					hasWant = true
 				}
-				if strings.HasPrefix(s.text, "⟳ Progressing") {
+				if strings.HasPrefix(s.text, "⟳Progressing") {
 					hasFraction = true
 				}
 			}
@@ -147,8 +196,8 @@ func TestHealthSegmentsRolloutFlagsRealProblems(t *testing.T) {
 func TestHealthSegmentsFailingRolloutXPrecedesFraction(t *testing.T) {
 	h := k8s.Health{Progressing: true, DesiredReplicas: 3, NewReadyReplicas: 1, PendingPods: 2, StuckPendingPods: 1}
 	segs := healthSegments(h, eventFilter{})
-	if len(segs) < 2 || segs[0].text != "✖" || segs[1].text != "⟳ Progressing 1/3" {
-		t.Fatalf("segments = %v, want ✖ then ⟳ Progressing 1/3", segs)
+	if len(segs) < 2 || segs[0].text != "✖" || segs[1].text != "⟳Progressing 1/3" {
+		t.Fatalf("segments = %v, want ✖ then ⟳Progressing 1/3", segs)
 	}
 }
 
@@ -330,24 +379,24 @@ func TestHealthScalingProblemShowsArrow(t *testing.T) {
 func TestFormatHealthScaleHistory(t *testing.T) {
 	h := k8s.Health{Ready: true, Replicas: 2, ReadyReplicas: 2, ScaleUp: 4, ScaleDown: 2}
 	got := formatHealth(serializeHealth(h), eventFilter{})
-	if got != "✔ │ ⇅HPA ↑4 ↓2" {
-		t.Fatalf("scale history = %q, want %q", got, "✔ │ ⇅HPA ↑4 ↓2")
+	if got != "✔ │ HPA ↑4 ↓2" {
+		t.Fatalf("scale history = %q, want %q", got, "✔ │ HPA ↑4 ↓2")
 	}
 }
 
 func TestFormatHealthScaleHistoryUpOnly(t *testing.T) {
 	h := k8s.Health{Ready: true, Replicas: 2, ReadyReplicas: 2, ScaleUp: 4}
 	got := formatHealth(serializeHealth(h), eventFilter{})
-	if got != "✔ │ ⇅HPA ↑4" {
-		t.Fatalf("scale-up history = %q, want %q", got, "✔ │ ⇅HPA ↑4")
+	if got != "✔ │ HPA ↑4" {
+		t.Fatalf("scale-up history = %q, want %q", got, "✔ │ HPA ↑4")
 	}
 }
 
 func TestFormatHealthScaleHistoryDownOnly(t *testing.T) {
 	h := k8s.Health{Ready: true, Replicas: 2, ReadyReplicas: 2, ScaleDown: 2}
 	got := formatHealth(serializeHealth(h), eventFilter{})
-	if got != "✔ │ ⇅HPA ↓2" {
-		t.Fatalf("scale-down history = %q, want %q", got, "✔ │ ⇅HPA ↓2")
+	if got != "✔ │ HPA ↓2" {
+		t.Fatalf("scale-down history = %q, want %q", got, "✔ │ HPA ↓2")
 	}
 }
 
@@ -357,8 +406,8 @@ func TestHealthScaleHistoryScaledToZeroNotEmpty(t *testing.T) {
 		t.Fatal("scaled-to-zero workload with HPA history treated as empty")
 	}
 	got := formatHealth(serializeHealth(h), eventFilter{})
-	if got != "⇅HPA ↓6" {
-		t.Fatalf("scaled-to-zero history = %q, want %q", got, "⇅HPA ↓6")
+	if got != "HPA ↓6" {
+		t.Fatalf("scaled-to-zero history = %q, want %q", got, "HPA ↓6")
 	}
 }
 
@@ -417,6 +466,34 @@ func TestHealthProblemsScalingWithStuckContainer(t *testing.T) {
 	h := k8s.Health{Ready: false, Replicas: 4, ReadyReplicas: 3, DesiredReplicas: 4, Waiting: []string{"CrashLoopBackOff"}}
 	if !healthProblems(h) {
 		t.Fatalf("scaling with stuck container %+v not treated as a problem", h)
+	}
+}
+
+func TestTruncateWidthPreservesANSI(t *testing.T) {
+	forceColor()
+	colored := renderHealthColored(serializeHealth(k8s.Health{
+		Ready:         true,
+		ReadyReplicas: 1,
+		Replicas:      1,
+		Restarts:      1,
+		RestartCauses: []string{"OOMKilled"},
+		RecentEvents:  []string{"StartupProbeFailed"},
+		ScaleUp:       4,
+	}), eventFilter{})
+	// The colored string must truncate to exactly the requested visible width,
+	// keep every escape sequence intact, and end with a reset so no color
+	// bleeds into the next row.
+	for _, max := range []int{16, 20, 26, 34} {
+		got := truncateWidth(colored, max)
+		if w := lipgloss.Width(got); w != max {
+			t.Fatalf("truncateWidth(max=%d) visible width = %d, got %q", max, w, got)
+		}
+		if strings.Contains(got, "\x1b[") && !strings.HasSuffix(got, "\x1b[0m") {
+			t.Fatalf("truncateWidth(max=%d) dangling escape, got %q", max, got)
+		}
+	}
+	if got := truncateWidth("plain text", 6); got != "plain…" {
+		t.Fatalf("truncateWidth plain = %q, want %q", got, "plain…")
 	}
 }
 

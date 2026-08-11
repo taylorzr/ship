@@ -390,6 +390,22 @@ func terminationCause(cs corev1.ContainerStatus) string {
 	return t.Reason
 }
 
+// probeKind reports which container probe a kubelet Warning "Unhealthy" event
+// came from, by parsing its "<Probe> probe failed: ..." message. Returns ""
+// when the event isn't a probe failure (or the message is unrecognized).
+func probeKind(msg string) string {
+	switch {
+	case strings.Contains(msg, "Startup probe failed"):
+		return "Startup"
+	case strings.Contains(msg, "Liveness probe failed"):
+		return "Liveness"
+	case strings.Contains(msg, "Readiness probe failed"):
+		return "Readiness"
+	default:
+		return ""
+	}
+}
+
 // collectHealth augments the workload with pod restart counts, Pending/Failed
 // pod phases, workload conditions, and recent warning events (OOM kills,
 // backoff, failed scheduling, ...).
@@ -472,7 +488,10 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 	// ongoing problem keeps refreshing into the recent (red) bucket while a
 	// resolved one ages through yellow and muted before being dropped at the
 	// history window. Transient reasons are kept too — hiding them is a
-	// display-side preference, not a collection policy.
+	// display-side preference, not a collection policy. Warning "Unhealthy"
+	// events are also annotated with the probe that failed (see probeKind) so
+	// the display can tell a startup-probe hiccup apart from a real liveness
+	// failure.
 	now := metav1.Now()
 	recentCutoff := metav1.NewTime(now.Add(-c.timebox.Recent))
 	warnCutoff := metav1.NewTime(now.Add(-c.timebox.Warn))
@@ -553,6 +572,16 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 		reason := ev.Reason
 		if reason == "" {
 			continue
+		}
+		// The kubelet emits a separate Warning "Unhealthy" event per probe
+		// type ("Startup probe failed: ...", "Liveness probe failed: ..."), but
+		// events are keyed by reason below, which would collapse them all into
+		// a bare "Unhealthy". Surface the probe type so the display can keep
+		// them apart, mirroring k8s's own per-probe granularity.
+		if reason == "Unhealthy" {
+			if p := probeKind(ev.Message); p != "" {
+				reason = p + "ProbeFailed"
+			}
 		}
 		if prev, ok := latest[reason]; !ok || ev.LastTimestamp.After(prev.Time) {
 			latest[reason] = ev.LastTimestamp
