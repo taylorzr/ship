@@ -349,6 +349,27 @@ func TestFormatHealthScalingUpDown(t *testing.T) {
 	}
 }
 
+func TestHealthReadyShowsReplicaFraction(t *testing.T) {
+	got := formatHealth(serializeHealth(k8s.Health{
+		Ready: true, Replicas: 3, ReadyReplicas: 3, DesiredReplicas: 3,
+	}), eventFilter{})
+	if got != "✔3/3" {
+		t.Fatalf("at-target healthy = %q, want %q", got, "✔3/3")
+	}
+
+	segs := healthSegments(k8s.Health{Ready: true, Replicas: 1, ReadyReplicas: 1, DesiredReplicas: 1}, eventFilter{})
+	if len(segs) == 0 || segs[0].text != "✔1/1" {
+		t.Fatalf("segments = %v, want first segment ✔1/1", segs)
+	}
+
+	legacy := formatHealth(serializeHealth(k8s.Health{
+		Ready: true, Replicas: 2, ReadyReplicas: 2,
+	}), eventFilter{})
+	if legacy != "✔" {
+		t.Fatalf("legacy format (desired unknown) = %q, want %q", legacy, "✔")
+	}
+}
+
 func TestHealthScalingColdStartNotEmpty(t *testing.T) {
 	h := k8s.Health{Ready: false, Replicas: 0, ReadyReplicas: 0, DesiredReplicas: 2}
 	if healthEmpty(h) {

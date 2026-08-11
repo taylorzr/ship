@@ -2683,7 +2683,9 @@ func (m *Model) eventFilter() eventFilter {
 }
 
 // healthSegments splits a workload's health into display parts so callers can
-// style each individually. Plain ✔ is current readiness. Blue is deployment
+// style each individually. Plain ✔ is current readiness — for at-target
+// workloads it carries the ready/desired replica fraction (e.g. "✔3/3"). Blue
+// is deployment
 // state: ⟳Progressing (with the new-pods-ready fraction over desired, e.g.
 // "⟳Progressing 2/5" — ready pods on the current ReplicaSet), ⏸DeploymentPaused
 // awaiting manual approval, and ⇑ N / ⇓ N while scaling to the target replica
@@ -2724,7 +2726,11 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 		}
 		segs = append(segs, healthSeg{icon, segInfo, false})
 	case h.Ready && !problems:
-		segs = append(segs, healthSeg{"✔", segOK, false})
+		icon := "✔"
+		if !scaling && h.DesiredReplicas > 0 {
+			icon = fmt.Sprintf("✔%d/%d", h.ReadyReplicas, h.DesiredReplicas)
+		}
+		segs = append(segs, healthSeg{icon, segOK, false})
 	case scaling && !problems:
 		dir := "⇓"
 		if up {
@@ -2828,7 +2834,8 @@ func healthEmpty(h k8s.Health) bool {
 }
 
 // formatHealth renders the cached health string as a compact plain-text column
-// value: ✔ healthy, ⟳Progressing (new pods ready / desired, e.g. "⟳Progressing 2/5"),
+// value: ✔ healthy (✔N/N when at target: ready/desired replicas), ⟳Progressing (new
+// pods ready / desired, e.g. "⟳Progressing 2/5"),
 // ⇑ N / ⇓ N scaling to the target replica count, ✖ not ready,
 // ⏸DeploymentPaused paused,
 // ↻N restarts, ↻OOMKilled restart causes, ⚠ error events (colored by age in
@@ -3468,7 +3475,7 @@ func (m Model) renderHelpOverlay() string {
 			}
 			actions = helpSection("actions", svcEntries)
 			legend = helpSection("legend", [][2]string{
-				{"✔", "healthy"},
+				{"✔3/3", "healthy · ready/desired replicas"},
 				{"✖", "unhealthy"},
 				{"⟳Progressing 2/5", "rolling out · new pods ready / desired"},
 				{"⇑3 / ⇓1", "scaling to target replicas"},
