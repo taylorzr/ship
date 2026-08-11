@@ -187,6 +187,28 @@ func TestProbeKind(t *testing.T) {
 	}
 }
 
+func normalEvent(name, objKind, objName, reason string) *corev1.Event {
+	ev := warningEvent(name, objKind, objName, reason)
+	ev.Type = corev1.EventTypeNormal
+	return ev
+}
+
+func TestCollectHealthNormalEvictedOrphanedPod(t *testing.T) {
+	// Karpenter and similar controllers emit "Evicted" as a Normal event (not
+	// Warning), e.g. with note "Evicted pod: Forceful Termination". It must
+	// still surface for an orphaned pod whose name matches the workload's
+	// ReplicaSet prefix, despite the Warning-only collection filter.
+	c := newTestClient(t,
+		testPod("podium-deploy-api-846886bd9d-77777", corev1.PodRunning),
+		testReplicaSet("podium-deploy-api-846886bd9d", "Deployment", "podium-deploy-api"),
+		normalEvent("evicted", "Pod", "podium-deploy-api-846886bd9d-97mrb", "Evicted"),
+	)
+	h := c.collectHealthFor(t, "podium-deploy-api", "Deployment")
+	if !slices.Contains(h.RecentEvents, "Evicted") {
+		t.Fatalf("RecentEvents = %v, want it to contain Evicted (Normal-typed orphaned pod)", h.RecentEvents)
+	}
+}
+
 func TestCollectHealthProbeFailureReasons(t *testing.T) {
 	c := newTestClient(t,
 		testPod("web-abc", corev1.PodRunning),
