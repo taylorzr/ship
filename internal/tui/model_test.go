@@ -1164,20 +1164,17 @@ func TestModePromptRendersUnderHeader(t *testing.T) {
 	}
 	plain := stripANSI(got.View())
 	lines := strings.Split(plain, "\n")
-	if !strings.Contains(lines[0], "🚀") {
-		t.Fatalf("first line should be the header, got %q", lines[0])
+	if !strings.Contains(lines[0], ">") {
+		t.Fatalf("first line should be the prompt, got %q", lines[0])
 	}
-	if !strings.Contains(lines[1], ">") {
-		t.Fatalf("second line should be the prompt, got %q", lines[1])
+	if !strings.Contains(lines[0], "> s") {
+		t.Fatalf("prompt should have a space after >, got %q", lines[0])
 	}
-	if !strings.Contains(lines[1], "> s") {
-		t.Fatalf("prompt should have a space after >, got %q", lines[1])
+	if !strings.Contains(lines[0], "services") || !strings.Contains(lines[0], "svc") {
+		t.Fatalf("prompt missing suggestions: %q", lines[0])
 	}
-	if !strings.Contains(lines[1], "services") || !strings.Contains(lines[1], "svc") {
-		t.Fatalf("prompt missing suggestions: %q", lines[1])
-	}
-	if !strings.Contains(lines[2], "Services") {
-		t.Fatalf("prompt should reuse the header margin (no blank line), got %q", lines[2])
+	if !strings.Contains(lines[1], "Services") {
+		t.Fatalf("prompt should reuse the section margin (no blank line), got %q", lines[1])
 	}
 }
 
@@ -1225,7 +1222,7 @@ func TestCmdModeHidesSelectedRow(t *testing.T) {
 	lines := strings.Split(outCmd, "\n")
 	var body []string
 	for i, l := range lines {
-		if i == 1 {
+		if i == 0 {
 			continue // prompt line keeps its own reverse highlighting
 		}
 		body = append(body, l)

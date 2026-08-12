@@ -46,10 +46,6 @@ func init() {
 }
 
 var (
-	titleStyle = lipgloss.NewStyle().
-			Bold(true).
-			Foreground(lipgloss.Color("212"))
-
 	sectionStyle = lipgloss.NewStyle().
 			Bold(true).
 			Foreground(lipgloss.Color("86")).
@@ -90,8 +86,8 @@ func (m *Model) maxVisibleRows() int {
 	if n == 0 {
 		return 15
 	}
-	// chrome: title + one header per section + blank line + help footer
-	chrome := 1 + n + 1 + 1
+	// chrome: one header per section + blank line + help footer
+	chrome := n + 1 + 1
 	for _, i := range idx {
 		s := &m.sections[i]
 		if _, ok := m.sectionErrs[s.name]; ok {
@@ -2495,9 +2491,6 @@ func (m Model) View() string {
 	var globalIdx int
 	var b strings.Builder
 
-	b.WriteString(titleStyle.Render("·································🚀"))
-	b.WriteString("\n")
-
 	m.ensureSectionViews()
 
 	visibleSet := make(map[int]bool, len(m.sections))
@@ -2518,7 +2511,7 @@ func (m Model) View() string {
 		firstRendered = false
 		if m.cmdMode && isFirst {
 			// Reuse the section header's top margin for the command prompt so
-			// it doesn't add an extra line below the title.
+			// it doesn't add an extra line.
 			b.WriteString(m.renderModePrompt())
 			b.WriteString("\n")
 		}
@@ -2533,13 +2526,13 @@ func (m Model) View() string {
 		if i == m.sectionIdx {
 			headerText = "▸ " + headerText
 			sty := sectionStyle
-			if m.cmdMode && isFirst {
+			if isFirst {
 				sty = sectionStyle.UnsetMarginTop()
 			}
 			b.WriteString(sty.Copy().Foreground(lipgloss.Color("212")).Render(headerText))
 		} else {
 			sty := sectionStyle
-			if m.cmdMode && isFirst {
+			if isFirst {
 				sty = sectionStyle.UnsetMarginTop()
 			}
 			b.WriteString(sty.Render(headerText))
@@ -3438,7 +3431,7 @@ func renderRow(r row, selected bool, refreshing bool, refreshIcon string, repoWi
 }
 
 func (m Model) viewHelp() string {
-	line := helpKey.Render("ship")
+	line := helpKey.Render("🛸 ship")
 	if !m.lastRefreshed.IsZero() {
 		line += helpKey.Render(" (refresh in " + refreshCountdown(m.lastRefreshed, m.cfg.RefreshInterval) + ")")
 	}
