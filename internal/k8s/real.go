@@ -366,14 +366,6 @@ var benignWaitingReasons = map[string]bool{
 	"PodInitializing":   true,
 }
 
-// normalFailureReasons are event reasons that some controllers (e.g. Karpenter)
-// emit as Normal rather than Warning even though they represent real failures
-// (a pod being evicted/killed). The collector otherwise keeps only Warning
-// events, so these are let through regardless of type.
-var normalFailureReasons = map[string]bool{
-	"Evicted": true,
-}
-
 // terminationCause returns a human label for why a container last terminated,
 // preferring a stable reason (e.g. "OOMKilled") over a generic "Error" plus
 // exit code (e.g. "Exit137"). Returns "" for containers that never terminated.
@@ -545,7 +537,7 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 	latest := map[string]metav1.Time{}
 	for i := range events {
 		ev := &events[i]
-		if ev.Type != "Warning" && !normalFailureReasons[ev.Reason] {
+		if ev.Type != "Warning" {
 			continue
 		}
 		obj := ev.InvolvedObject
