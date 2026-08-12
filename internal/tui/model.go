@@ -334,7 +334,7 @@ var keys = keyMap{
 	HelpToggle:    key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 	TagAction:     key.NewBinding(key.WithKeys("T"), key.WithHelp("T", "tag/release")),
 	Notifications: key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "notifications")),
-	ModeCommand:   key.NewBinding(key.WithKeys(">", ":"), key.WithHelp(">", "modes")),
+	ModeCommand:   key.NewBinding(key.WithKeys(">", ":"), key.WithHelp(":", "modes")),
 }
 
 type refreshDoneMsg struct {
@@ -3600,10 +3600,12 @@ func (m Model) renderHelpOverlay() string {
 	})
 
 	var actions, filters, legend string
+	prHelp := false
 	if len(m.sections) > m.sectionIdx {
 		s := m.sections[m.sectionIdx]
 		switch s.name {
 		case "My PRs", "Dependencies":
+			prHelp = true
 			actions = helpSection("actions", [][2]string{
 				{"enter", "open in browser"},
 				{"r", "refresh item"},
@@ -3629,6 +3631,7 @@ func (m Model) renderHelpOverlay() string {
 				{"/", "CI failing (not required)"},
 			})
 		case "To Review", "Team Review":
+			prHelp = true
 			teamLabel := "show team"
 			if s.hideTeamReviews {
 				teamLabel = "show mine only"
@@ -3705,18 +3708,21 @@ func (m Model) renderHelpOverlay() string {
 	if filters != "" {
 		left += "\n" + filters
 	}
-	if actions != "" {
+	if actions != "" && !prHelp {
 		left += "\n" + actions
 	}
 	left += "\n" + helpSection("modes", [][2]string{
-		{">services", "services only"},
-		{">mine", "my prs only"},
-		{">review", "to review only"},
-		{">deps", "dependencies only"},
-		{">all", "all sections"},
-		{">quit", "quit"},
+		{":services", "services only"},
+		{":mine", "my prs only"},
+		{":review", "to review only"},
+		{":deps", "dependencies only"},
+		{":all", "all sections"},
+		{":quit", "quit"},
 	})
 	right := legend
+	if prHelp && actions != "" {
+		right = actions + "\n" + right
+	}
 	if right != "" {
 		left = lipgloss.NewStyle().PaddingRight(6).Render(left)
 		left = lipgloss.JoinHorizontal(lipgloss.Top, left, right)
