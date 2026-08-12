@@ -22,6 +22,25 @@ func forceColor() {
 	lipgloss.SetColorProfile(termenv.ANSI256)
 }
 
+func stripANSI(s string) string {
+	var b strings.Builder
+	in := false
+	for _, r := range s {
+		if in {
+			if r == 'm' {
+				in = false
+			}
+			continue
+		}
+		if r == '\x1b' {
+			in = true
+			continue
+		}
+		b.WriteRune(r)
+	}
+	return b.String()
+}
+
 func TestEventReasonAge(t *testing.T) {
 	if reason, age, ok := eventReasonAge("Unhealthy"); ok || age != 0 || reason != "Unhealthy" {
 		t.Fatalf("plain entry = (%q, %v, %v), want (Unhealthy, 0, false)", reason, age, ok)
@@ -711,6 +730,33 @@ func TestViewRendersViewportPanes(t *testing.T) {
 	}
 }
 
+func TestViewModeHidesOtherSections(t *testing.T) {
+	forceColor()
+	m := testModel(100, 40)
+	m.sections = modeTestSections()
+	m.enterMode("services")
+	out := m.View()
+	if !strings.Contains(out, "Services") {
+		t.Fatalf("View() in services mode missing Services header:\n%s", out)
+	}
+	for _, hidden := range []string{"My PRs", "To Review", "Dependencies"} {
+		if strings.Contains(out, hidden) {
+			t.Fatalf("View() in services mode still rendered %q:\n%s", hidden, out)
+		}
+	}
+}
+
+func TestViewModeFooterShowsChip(t *testing.T) {
+	forceColor()
+	m := testModel(100, 40)
+	m.sections = modeTestSections()
+	m.enterMode("deps")
+	out := m.View()
+	if !strings.Contains(out, "mode: deps") {
+		t.Fatalf("View() footer missing mode chip:\n%s", out)
+	}
+}
+
 func TestViewportPageDownScrollsActiveSection(t *testing.T) {
 	forceColor()
 	m := testModel(100, 30)
@@ -879,6 +925,402 @@ func TestRateLimitTickRefreshesAndRearms(t *testing.T) {
 	if got.gh == nil {
 		t.Fatal("gh client lost during rate-limit tick")
 	}
+}
+
+func TestParseMode(t *testing.T) {
+	cases := []struct {
+		in   string
+		want string
+		ok   bool
+	}{
+		{"", "all", true},
+		{"all", "all", true},
+		{"ALL", "all", true},
+		{"services", "services", true},
+		{"svc", "services", true},
+		{"  services  ", "services", true},
+		{"mine", "mine", true},
+		{"prs", "mine", true},
+		{"myprs", "mine", true},
+		{"review", "review", true},
+		{"toreview", "review", true},
+		{"deps", "deps", true},
+		{"dependencies", "deps", true},
+		{"garbage", "all", false},
+	}
+	for _, tt := range cases {
+		got, ok := parseMode(tt.in)
+		if got != tt.want || ok != tt.ok {
+			t.Errorf("parseMode(%q) = (%q, %v), want (%q, %v)", tt.in, got, ok, tt.want, tt.ok)
+		}
+	}
+}
+
+func modeTestSections() []section {
+	names := []string{"Services", "My PRs", "To Review", "Dependencies"}
+	sections := make([]section, 0, len(names))
+	for _, n := range names {
+		sections = append(sections, section{
+			name:    n,
+			rows:    []row{{repo: "org/app", num: 1, title: n}},
+			allRows: []row{{repo: "org/app", num: 1, title: n}},
+		})
+	}
+	return sections
+}
+
+func TestVisibleSectionIndices(t *testing.T) {
+	m := Model{sections: modeTestSections()}
+	cases := []struct {
+		mode string
+		want []int
+	}{
+		{"all", []int{0, 1, 2, 3}},
+		{"services", []int{0}},
+		{"mine", []int{1}},
+		{"review", []int{2}},
+		{"deps", []int{3}},
+	}
+	for _, tt := range cases {
+		m.mode = tt.mode
+		got := m.visibleSectionIndices()
+		if len(got) != len(tt.want) {
+			t.Fatalf("mode %q: visibleSectionIndices() = %v, want %v", tt.mode, got, tt.want)
+		}
+		for i := range tt.want {
+			if got[i] != tt.want[i] {
+				t.Errorf("mode %q: visibleSectionIndices()[%d] = %d, want %d", tt.mode, i, got[i], tt.want[i])
+			}
+		}
+	}
+}
+
+func TestEnterModeSnapsActiveSection(t *testing.T) {
+	m := Model{sections: modeTestSections()}
+	m.mode = "all"
+	m.sectionIdx = 3
+	m.enterMode("mine")
+	if m.mode != "mine" {
+		t.Fatalf("enterMode set mode = %q, want mine", m.mode)
+	}
+	if m.sectionIdx != 1 {
+		t.Fatalf("after entering mine, sectionIdx = %d, want 1 (My PRs)", m.sectionIdx)
+	}
+	if m.cursor != 1 {
+		t.Fatalf("after entering mine, cursor = %d, want 1 (first visible global row)", m.cursor)
+	}
+	m.enterMode("all")
+	if m.sectionIdx != 1 {
+		t.Fatalf("after returning to all, sectionIdx = %d, want 1 (unchanged)", m.sectionIdx)
+	}
+}
+
+func TestAdvanceSectionSkipsHidden(t *testing.T) {
+	m := Model{sections: modeTestSections()}
+	m.enterMode("services")
+	if m.sectionIdx != 0 {
+		t.Fatalf("services mode starts at sectionIdx %d, want 0", m.sectionIdx)
+	}
+	m.advanceSection(1)
+	if m.sectionIdx != 0 {
+		t.Fatalf("advance in single-section mode moved to %d, want 0", m.sectionIdx)
+	}
+	m.advanceSection(-1)
+	if m.sectionIdx != 0 {
+		t.Fatalf("retreat in single-section mode moved to %d, want 0", m.sectionIdx)
+	}
+
+	m.enterMode("all")
+	m.sectionIdx = 1
+	m.advanceSection(1)
+	if m.sectionIdx != 2 {
+		t.Fatalf("advance from My PRs = %d, want 2 (To Review)", m.sectionIdx)
+	}
+}
+
+func TestUpdateModeCommandPrompt(t *testing.T) {
+	forceColor()
+	m := testModel(100, 40)
+	m.sections = modeTestSections()
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(":")})
+	got := nm.(Model)
+	if !got.cmdMode {
+		t.Fatal(": did not enter command mode")
+	}
+
+	for _, c := range "services" {
+		nm, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{c}})
+		got = nm.(Model)
+	}
+	if got.cmdBuf != "services" {
+		t.Fatalf("cmdBuf = %q, want services", got.cmdBuf)
+	}
+
+	nm, _ = got.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got = nm.(Model)
+	if got.cmdMode {
+		t.Fatal("Enter did not close command mode")
+	}
+	if got.mode != "services" {
+		t.Fatalf("mode = %q, want services", got.mode)
+	}
+
+	nm, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(":")})
+	got = nm.(Model)
+	nm, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune("g")})
+	got = nm.(Model)
+	nm, _ = got.Update(tea.KeyMsg{Type: tea.KeyEsc})
+	got = nm.(Model)
+	if got.cmdMode || got.cmdBuf != "" {
+		t.Fatal("esc did not cancel command mode")
+	}
+	if got.mode != "services" {
+		t.Fatalf("mode changed after cancel: %q", got.mode)
+	}
+}
+
+func TestUpdateModeCommandIgnoresUnknown(t *testing.T) {
+	forceColor()
+	m := testModel(100, 40)
+	m.sections = modeTestSections()
+	m.mode = "all"
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(":")})
+	got := nm.(Model)
+	for _, c := range "nope" {
+		nm, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{c}})
+		got = nm.(Model)
+	}
+	nm, _ = got.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got = nm.(Model)
+	if got.mode != "all" {
+		t.Fatalf("unknown mode command changed mode to %q, want all", got.mode)
+	}
+}
+
+func TestUpdateModeTabCyclesSuggestions(t *testing.T) {
+	forceColor()
+	m := testModel(100, 40)
+	m.sections = modeTestSections()
+	m.mode = "all"
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(":")})
+	got := nm.(Model)
+	for _, c := range "s" {
+		nm, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{c}})
+		got = nm.(Model)
+	}
+	if got.cmdSug != 0 {
+		t.Fatalf("cmdSug = %d after typing, want 0", got.cmdSug)
+	}
+
+	nm, _ = got.Update(tea.KeyMsg{Type: tea.KeyTab})
+	got = nm.(Model)
+	if got.cmdSug != 1 {
+		t.Fatalf("cmdSug = %d after tab, want 1", got.cmdSug)
+	}
+
+	nm, _ = got.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got = nm.(Model)
+	if got.mode != "services" {
+		t.Fatalf("enter after cycling applied mode %q, want services", got.mode)
+	}
+	if got.cmdMode || got.cmdBuf != "" || got.cmdSug != 0 {
+		t.Fatalf("prompt not reset after enter: cmdMode=%v cmdBuf=%q cmdSug=%d", got.cmdMode, got.cmdBuf, got.cmdSug)
+	}
+}
+
+func TestUpdateModeTabUniqueMatchCompletes(t *testing.T) {
+	forceColor()
+	m := testModel(100, 40)
+	m.sections = modeTestSections()
+	m.mode = "all"
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(":")})
+	got := nm.(Model)
+	for _, c := range "rev" {
+		nm, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{c}})
+		got = nm.(Model)
+	}
+	nm, _ = got.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	got = nm.(Model)
+	if got.mode != "review" {
+		t.Fatalf("unique prefix enter applied mode %q, want review", got.mode)
+	}
+}
+
+func TestModePromptRendersUnderHeader(t *testing.T) {
+	forceColor()
+	m := testModel(100, 40)
+	m.sections = modeTestSections()
+	m.mode = "all"
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(":")})
+	got := nm.(Model)
+	for _, c := range "s" {
+		nm, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{c}})
+		got = nm.(Model)
+	}
+	plain := stripANSI(got.View())
+	lines := strings.Split(plain, "\n")
+	if !strings.Contains(lines[0], "🚀") {
+		t.Fatalf("first line should be the header, got %q", lines[0])
+	}
+	if !strings.Contains(lines[1], ">") {
+		t.Fatalf("second line should be the prompt, got %q", lines[1])
+	}
+	if !strings.Contains(lines[1], "> s") {
+		t.Fatalf("prompt should have a space after >, got %q", lines[1])
+	}
+	if !strings.Contains(lines[1], "services") || !strings.Contains(lines[1], "svc") {
+		t.Fatalf("prompt missing suggestions: %q", lines[1])
+	}
+	if !strings.Contains(lines[2], "Services") {
+		t.Fatalf("prompt should reuse the header margin (no blank line), got %q", lines[2])
+	}
+}
+
+func TestModePromptCursorHighlight(t *testing.T) {
+	forceColor()
+	m := testModel(100, 40)
+	m.sections = modeTestSections()
+	m.mode = "all"
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(":")})
+	got := nm.(Model)
+	for _, c := range "d" {
+		nm, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{c}})
+		got = nm.(Model)
+	}
+	out := got.View()
+	line := ""
+	for _, l := range strings.Split(out, "\n") {
+		if strings.Contains(l, "█") {
+			line = l
+			break
+		}
+	}
+	if line == "" {
+		t.Fatalf("no prompt line with cursor found:\n%s", out)
+	}
+	if !strings.Contains(line, "\x1b[1;7m█") {
+		t.Fatalf("cursor not reverse-highlighted: %q", line)
+	}
+}
+
+func TestCmdModeHidesSelectedRow(t *testing.T) {
+	forceColor()
+	m := testModel(100, 40)
+	m.sections = modeTestSections()
+	m.mode = "all"
+
+	outNormal := m.View()
+	if !strings.Contains(outNormal, "\x1b[1;7m") {
+		t.Fatalf("expected a selected-row highlight before cmd mode:\n%s", outNormal)
+	}
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(">")})
+	got := nm.(Model)
+	outCmd := got.View()
+	lines := strings.Split(outCmd, "\n")
+	var body []string
+	for i, l := range lines {
+		if i == 1 {
+			continue // prompt line keeps its own reverse highlighting
+		}
+		body = append(body, l)
+	}
+	if strings.Contains(strings.Join(body, "\n"), "\x1b[1;7m") {
+		t.Fatalf("selected row still highlighted in cmd mode:\n%s", strings.Join(body, "\n"))
+	}
+}
+
+func TestModePromptGutterHighlight(t *testing.T) {
+	forceColor()
+	m := testModel(100, 40)
+	m.sections = modeTestSections()
+	m.mode = "all"
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(":")})
+	got := nm.(Model)
+	for _, c := range "d" {
+		nm, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{c}})
+		got = nm.(Model)
+	}
+	out := got.View()
+	plain := stripANSI(out)
+	line := ""
+	for _, l := range strings.Split(plain, "\n") {
+		if strings.Contains(l, "> d") {
+			line = l
+			break
+		}
+	}
+	if line == "" {
+		t.Fatalf("no prompt line found:\n%s", plain)
+	}
+	if !strings.HasPrefix(line, "    > d█") {
+		t.Fatalf("prompt missing 3-col pad + space + >, got %q", line)
+	}
+	if !strings.Contains(out, "\x1b[7m") {
+		t.Fatalf("prompt missing reverse-highlighted gutter:\n%s", out)
+	}
+	if strings.Contains(out, "\x1b[48;5;212m") {
+		t.Fatalf("pink background still present:\n%s", out)
+	}
+}
+
+func TestUpdateModeQuitExits(t *testing.T) {
+	for _, tok := range []string{"quit", "exit"} {
+		t.Run(tok, func(t *testing.T) {
+			forceColor()
+			m := testModel(100, 40)
+			m.sections = modeTestSections()
+			m.mode = "all"
+
+			nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(":")})
+			got := nm.(Model)
+			for _, c := range tok {
+				nm, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{c}})
+				got = nm.(Model)
+			}
+			nm, cmd := got.Update(tea.KeyMsg{Type: tea.KeyEnter})
+			if cmd == nil {
+				t.Fatalf(":%s did not issue a quit command", tok)
+			}
+			if msg := cmd(); !isQuitMsg(msg) {
+				t.Fatalf(":%s command returned %T, want tea.QuitMsg", tok, msg)
+			}
+			_ = nm
+		})
+	}
+}
+
+func TestUpdateModeTabCompleteQuitExits(t *testing.T) {
+	forceColor()
+	m := testModel(100, 40)
+	m.sections = modeTestSections()
+	m.mode = "all"
+
+	nm, _ := m.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune(":")})
+	got := nm.(Model)
+	for _, c := range "e" {
+		nm, _ = got.Update(tea.KeyMsg{Type: tea.KeyRunes, Runes: []rune{c}})
+		got = nm.(Model)
+	}
+	nm, _ = got.Update(tea.KeyMsg{Type: tea.KeyTab})
+	got = nm.(Model)
+	nm, cmd := got.Update(tea.KeyMsg{Type: tea.KeyEnter})
+	if cmd == nil {
+		t.Fatal("tab-completed exit did not issue a quit command")
+	}
+	if msg := cmd(); !isQuitMsg(msg) {
+		t.Fatalf("tab-completed exit returned %T, want tea.QuitMsg", msg)
+	}
+}
+
+func isQuitMsg(msg tea.Msg) bool {
+	_, ok := msg.(tea.QuitMsg)
+	return ok
 }
 
 func TestRateLimitStyle(t *testing.T) {

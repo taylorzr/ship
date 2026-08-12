@@ -77,19 +77,23 @@ var (
 	dialogTitle = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("212"))
 	dialogHelp  = lipgloss.NewStyle().Foreground(lipgloss.Color("241"))
 	inputStyle  = lipgloss.NewStyle().Bold(true).Foreground(lipgloss.Color("15"))
+	modeCursor  = selectedStyle
+	modePad     = selectedStyle.Copy().Width(3)
 )
 
 func (m *Model) maxVisibleRows() int {
 	if m.height <= 0 {
 		return 15
 	}
-	n := len(m.sections)
+	idx := m.visibleSectionIndices()
+	n := len(idx)
 	if n == 0 {
 		return 15
 	}
 	// chrome: title + one header per section + blank line + help footer
 	chrome := 1 + n + 1 + 1
-	for _, s := range m.sections {
+	for _, i := range idx {
+		s := &m.sections[i]
 		if _, ok := m.sectionErrs[s.name]; ok {
 			chrome++ // section error line
 		}
@@ -188,7 +192,9 @@ func (m Model) renderPRRows(s *section, startGlobal int, repoWidth, maxWidth int
 	var bb strings.Builder
 	for i := range s.rows {
 		r := s.rows[i]
-		line := renderRow(r, startGlobal+i == m.cursor,
+		// While the command prompt is open, don't keep a row highlighted as
+		// selected in the sections behind it.
+		line := renderRow(r, startGlobal+i == m.cursor && !m.cmdMode,
 			m.refreshingItem.repo == r.repo && m.refreshingItem.num == r.num,
 			m.spin.View(), repoWidth, maxWidth)
 		bb.WriteString(line)
@@ -201,7 +207,7 @@ func (m Model) renderPaneRows(s *section, startGlobal, maxName, maxCur, maxPen, 
 	var bb strings.Builder
 	for i := range s.rows {
 		r := s.rows[i]
-		isSelected := startGlobal+i == m.cursor
+		isSelected := startGlobal+i == m.cursor && !m.cmdMode
 		isRefreshing := m.refreshingItem.repo == r.repo && m.refreshingItem.num == r.num
 		loadCol := "   "
 		if isRefreshing && r.depth == 0 {
@@ -305,6 +311,7 @@ type keyMap struct {
 	HelpToggle    key.Binding
 	TagAction     key.Binding
 	Notifications key.Binding
+	ModeCommand   key.Binding
 }
 
 var keys = keyMap{
@@ -331,6 +338,7 @@ var keys = keyMap{
 	HelpToggle:    key.NewBinding(key.WithKeys("?"), key.WithHelp("?", "help")),
 	TagAction:     key.NewBinding(key.WithKeys("T"), key.WithHelp("T", "tag/release")),
 	Notifications: key.NewBinding(key.WithKeys("n"), key.WithHelp("n", "notifications")),
+	ModeCommand:   key.NewBinding(key.WithKeys(">", ":"), key.WithHelp(">", "modes")),
 }
 
 type refreshDoneMsg struct {
@@ -387,6 +395,10 @@ type Model struct {
 		repo string
 		num  int
 	}
+	mode    string
+	cmdMode bool
+	cmdBuf  string
+	cmdSug  int
 }
 
 type tagState struct {
@@ -403,7 +415,7 @@ type tagMetaMsg struct {
 	hasReleases bool
 }
 
-func New(cfg *config.Config, st *store.Store, ghClient *gh.Client, mockK8sSpecs map[string]k8s.MockSpec) Model {
+func New(cfg *config.Config, st *store.Store, ghClient *gh.Client, mockK8sSpecs map[string]k8s.MockSpec, mode string) Model {
 	s := spinner.New()
 	s.Spinner = spinner.Ellipsis
 	s.Style = lipgloss.NewStyle().Foreground(lipgloss.Color("205"))
@@ -426,6 +438,11 @@ func New(cfg *config.Config, st *store.Store, ghClient *gh.Client, mockK8sSpecs 
 		sectionErrs:  map[string]string{},
 		mockK8sSpecs: mockK8sSpecs,
 		cursor:       0,
+	}
+	if parsed, ok := parseMode(mode); ok {
+		m.mode = parsed
+	} else {
+		m.mode = "all"
 	}
 	m.loadFromCache()
 	m.reloadNotifications()
@@ -975,11 +992,121 @@ func (m *Model) sectionEnd(idx int) int {
 	return m.sectionOffset(idx) + visibleRows(m.sections[idx])
 }
 
-func (m *Model) advanceSection(dir int) {
-	m.sectionIdx = (m.sectionIdx + dir) % len(m.sections)
-	if m.sectionIdx < 0 {
-		m.sectionIdx = len(m.sections) - 1
+// modeSection maps a mode to the only section it makes visible; the empty
+// string ("all") keeps every section visible.
+var modeSection = map[string]string{
+	"services": "Services",
+	"mine":     "My PRs",
+	"review":   "To Review",
+	"deps":     "Dependencies",
+}
+
+// modeTokens lists every autocompletable token for the : prompt (modes plus
+// the quit/exit commands).
+var modeTokens = []string{"all", "services", "svc", "mine", "prs", "myprs", "review", "toreview", "deps", "dependencies", "quit", "exit"}
+
+// modeMatches returns the command tokens the current buffer is a prefix of,
+// in the order Tab cycles through them.
+func (m Model) modeMatches() []string {
+	prefix := strings.ToLower(m.cmdBuf)
+	if prefix == "" {
+		return nil
 	}
+	var matches []string
+	for _, tok := range modeTokens {
+		if strings.HasPrefix(tok, prefix) {
+			matches = append(matches, tok)
+		}
+	}
+	return matches
+}
+
+// parseMode normalizes a command token into a canonical mode. An unknown token
+// returns ("all", false) so callers can ignore the input instead of switching.
+func parseMode(s string) (string, bool) {
+	switch strings.ToLower(strings.TrimSpace(s)) {
+	case "", "all":
+		return "all", true
+	case "services", "svc":
+		return "services", true
+	case "mine", "prs", "myprs":
+		return "mine", true
+	case "review", "toreview":
+		return "review", true
+	case "deps", "dependencies":
+		return "deps", true
+	}
+	return "all", false
+}
+
+// visibleSectionIndices returns the indices of the sections rendered under the
+// current mode, preserving their original order.
+func (m Model) visibleSectionIndices() []int {
+	only := modeSection[m.mode]
+	if only == "" {
+		indices := make([]int, len(m.sections))
+		for i := range m.sections {
+			indices[i] = i
+		}
+		return indices
+	}
+	var indices []int
+	for i := range m.sections {
+		if m.sections[i].name == only {
+			indices = append(indices, i)
+		}
+	}
+	return indices
+}
+
+// enterMode switches the active mode, snapping the cursor and active section
+// onto a visible section when the current one no longer renders.
+func (m *Model) enterMode(mode string) {
+	if mode == m.mode {
+		return
+	}
+	m.mode = mode
+	m.ensureSectionViews()
+	vis := m.visibleSectionIndices()
+	if len(vis) == 0 {
+		m.cursor = -1
+		return
+	}
+	visible := false
+	for _, idx := range vis {
+		if idx == m.sectionIdx {
+			visible = true
+			break
+		}
+	}
+	if !visible {
+		m.sectionIdx = vis[0]
+	}
+	if visibleRows(m.sections[m.sectionIdx]) > 0 {
+		m.cursor = m.sectionOffset(m.sectionIdx) + m.sections[m.sectionIdx].scrollOffset
+	} else {
+		m.cursor = -1
+	}
+}
+
+func (m *Model) advanceSection(dir int) {
+	vis := m.visibleSectionIndices()
+	if len(vis) == 0 {
+		m.cursor = -1
+		return
+	}
+	pos := 0
+	for i, idx := range vis {
+		if idx == m.sectionIdx {
+			pos = i
+			break
+		}
+	}
+	pos = (pos + dir) % len(vis)
+	if pos < 0 {
+		pos = len(vis) - 1
+	}
+	m.sectionIdx = vis[pos]
 	if visibleRows(m.sections[m.sectionIdx]) > 0 {
 		m.cursor = m.sectionOffset(m.sectionIdx) + m.sections[m.sectionIdx].scrollOffset
 	} else {
@@ -1639,7 +1766,7 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, nil
 
 	case tea.MouseMsg:
-		if m.confirm == nil && !m.searching && !m.tagging && !m.showNotif && m.sectionIdx < len(m.sections) {
+		if m.confirm == nil && !m.searching && !m.tagging && !m.cmdMode && !m.showNotif && m.sectionIdx < len(m.sections) {
 			m.ensureSectionViews()
 			s := &m.sections[m.sectionIdx]
 			if s.view != nil && s.view.MouseWheelEnabled {
@@ -1733,6 +1860,52 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				r := []rune(msg.String())
 				if len(r) == 1 && r[0] >= 32 && r[0] <= 126 {
 					m.tagQuery += string(r[0])
+				}
+			}
+			return m, nil
+		}
+		if m.cmdMode {
+			m.gPending = false
+			switch {
+			case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
+				m.cmdMode = false
+				m.cmdBuf = ""
+				m.cmdSug = 0
+			case key.Matches(msg, keys.Enter):
+				raw := strings.ToLower(strings.TrimSpace(m.cmdBuf))
+				if raw == "quit" || raw == "exit" || raw == "q" {
+					return m, tea.Quit
+				}
+				mode, ok := parseMode(raw)
+				if !ok {
+					if matches := m.modeMatches(); len(matches) > 0 {
+						target := matches[m.cmdSug%len(matches)]
+						if target == "quit" || target == "exit" {
+							return m, tea.Quit
+						}
+						mode, ok = parseMode(target)
+					}
+				}
+				m.cmdMode = false
+				m.cmdBuf = ""
+				m.cmdSug = 0
+				if ok {
+					m.enterMode(mode)
+				}
+			case key.Matches(msg, key.NewBinding(key.WithKeys("tab"))):
+				if matches := m.modeMatches(); len(matches) > 0 {
+					m.cmdSug = (m.cmdSug + 1) % len(matches)
+				}
+			case key.Matches(msg, key.NewBinding(key.WithKeys("backspace"))):
+				if len(m.cmdBuf) > 0 {
+					m.cmdBuf = m.cmdBuf[:len(m.cmdBuf)-1]
+					m.cmdSug = 0
+				}
+			default:
+				r := []rune(msg.String())
+				if len(r) == 1 && r[0] >= 32 && r[0] <= 126 {
+					m.cmdBuf += string(r[0])
+					m.cmdSug = 0
 				}
 			}
 			return m, nil
@@ -2084,6 +2257,10 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		case key.Matches(msg, keys.Notifications):
 			m.showNotif = !m.showNotif
 			return m, nil
+		case key.Matches(msg, keys.ModeCommand):
+			m.cmdMode = true
+			m.cmdBuf = ""
+			return m, nil
 		case key.Matches(msg, key.NewBinding(key.WithKeys("esc"))):
 			if m.showHelp {
 				m.showHelp = false
@@ -2323,8 +2500,28 @@ func (m Model) View() string {
 
 	m.ensureSectionViews()
 
+	visibleSet := make(map[int]bool, len(m.sections))
+	for _, idx := range m.visibleSectionIndices() {
+		visibleSet[idx] = true
+	}
+
+	firstRendered := true
 	for i := range m.sections {
 		s := &m.sections[i]
+		if !visibleSet[i] {
+			// Hidden sections still occupy global row space so cursor indices
+			// keep lining up with the sections that do render.
+			globalIdx += len(s.rows)
+			continue
+		}
+		isFirst := firstRendered
+		firstRendered = false
+		if m.cmdMode && isFirst {
+			// Reuse the section header's top margin for the command prompt so
+			// it doesn't add an extra line below the title.
+			b.WriteString(m.renderModePrompt())
+			b.WriteString("\n")
+		}
 		headerText := s.name
 		if len(s.allRows) > 0 && s.allRows[0].num > 0 {
 			if len(s.rows) == len(s.allRows) {
@@ -2335,9 +2532,17 @@ func (m Model) View() string {
 		}
 		if i == m.sectionIdx {
 			headerText = "▸ " + headerText
-			b.WriteString(sectionStyle.Copy().Foreground(lipgloss.Color("212")).Render(headerText))
+			sty := sectionStyle
+			if m.cmdMode && isFirst {
+				sty = sectionStyle.UnsetMarginTop()
+			}
+			b.WriteString(sty.Copy().Foreground(lipgloss.Color("212")).Render(headerText))
 		} else {
-			b.WriteString(sectionStyle.Render(headerText))
+			sty := sectionStyle
+			if m.cmdMode && isFirst {
+				sty = sectionStyle.UnsetMarginTop()
+			}
+			b.WriteString(sty.Render(headerText))
 		}
 		if s.draftFilter == "draft" && s.name != "Services" {
 			b.WriteString("  ")
@@ -3254,6 +3459,9 @@ func (m Model) viewHelp() string {
 	} else if m.showNotif {
 		line += helpKey.Render("  🔔 0")
 	}
+	if m.mode != "all" {
+		line += helpKey.Render("  mode: " + m.mode)
+	}
 	line += "  " + helpKey.Render("?:") + " " + helpKey.Render("help")
 	return line
 }
@@ -3507,6 +3715,14 @@ func (m Model) renderHelpOverlay() string {
 	if actions != "" {
 		left += "\n" + actions
 	}
+	left += "\n" + helpSection("modes", [][2]string{
+		{">services", "services only"},
+		{">mine", "my prs only"},
+		{">review", "to review only"},
+		{">deps", "dependencies only"},
+		{">all", "all sections"},
+		{">quit", "quit"},
+	})
 	right := legend
 	if right != "" {
 		left = lipgloss.NewStyle().PaddingRight(6).Render(left)
@@ -3605,6 +3821,29 @@ func notifAge(t time.Time) string {
 	default:
 		return fmt.Sprintf("%dd", int(d.Hours()/24))
 	}
+}
+
+func (m Model) renderModePrompt() string {
+	var b strings.Builder
+	// Highlighted left gutter matching the row loader column, then the row
+	// separator space, so the prompt text lines up with the section content.
+	b.WriteString(modePad.Render(""))
+	b.WriteString(" ")
+	b.WriteString(inputStyle.Render("> " + m.cmdBuf))
+	b.WriteString(modeCursor.Render("█"))
+	if matches := m.modeMatches(); len(matches) > 0 {
+		b.WriteString("  ")
+		var parts []string
+		for i, tok := range matches {
+			if i == m.cmdSug {
+				parts = append(parts, selectedStyle.Render(tok))
+			} else {
+				parts = append(parts, helpKey.Render(tok))
+			}
+		}
+		b.WriteString(strings.Join(parts, " "))
+	}
+	return b.String()
 }
 
 func (m Model) renderTagInput() string {

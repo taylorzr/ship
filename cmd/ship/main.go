@@ -75,6 +75,7 @@ var reviewTeamOnly bool
 var depRepos, depOwners, depTeams []string
 var useGraphQL bool
 var doctorLive bool
+var modeFlag string
 
 func init() {
 	rootCmd.AddCommand(countCmd)
@@ -84,6 +85,7 @@ func init() {
 	rootCmd.AddCommand(depPRsCmd)
 	rootCmd.AddCommand(doctorCmd)
 	rootCmd.Flags().StringToStringVar(&mockK8sSpecs, "mock-k8s", nil, "mock k8s per service (e.g. svc1=repo/app:v10.1.0,svc2=repo/other:v2.0.0|restarts=3|events=OOMKilling+BackOff); without a terminal prints the health columns as text")
+	rootCmd.Flags().StringVar(&modeFlag, "mode", "all", "start in a single-section mode: services, mine, review, deps (default all)")
 	releasesCmd.Flags().StringToStringVar(&mockK8sSpecs, "mock-k8s", nil, "mock k8s per service (e.g. svc1=repo/app:v10.1.0,svc2=repo/other:v2.0.0|restarts=3|events=OOMKilling+BackOff)")
 	releasesCmd.Flags().StringVar(&releasesRepo, "repo", "", "filter to a specific repo (e.g. taylorzr/kitty-meow)")
 	reviewPRsCmd.Flags().BoolVar(&reviewMeOnly, "me", false, "only run the user-review-requested query")
@@ -134,7 +136,7 @@ func runTUI(cmd *cobra.Command, args []string) error {
 
 	ghClient := gh.NewClient(token)
 
-	m := tui.New(cfg, st, ghClient, parseMockSpecs(mockK8sSpecs))
+	m := tui.New(cfg, st, ghClient, parseMockSpecs(mockK8sSpecs), modeFlag)
 	p := tea.NewProgram(m, tea.WithAltScreen(), tea.WithMouseCellMotion())
 	if _, err := p.Run(); err != nil {
 		return fmt.Errorf("tui: %w", err)
