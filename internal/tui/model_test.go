@@ -389,6 +389,41 @@ func TestHealthReadyShowsReplicaFraction(t *testing.T) {
 	}
 }
 
+func TestHealthStartupMaxSegment(t *testing.T) {
+	h := k8s.Health{Ready: true, Replicas: 3, ReadyReplicas: 3, DesiredReplicas: 3, StartupMax: 20 * time.Second}
+	segs := healthSegments(h, eventFilter{})
+	found := false
+	for _, s := range segs {
+		if s.text == "⏱20s" {
+			found = true
+			if s.kind != segMuted {
+				t.Fatalf("⏱20s kind = %d, want segMuted", s.kind)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("segments = %v, want a ⏱20s segment", segs)
+	}
+	if got := formatHealth(serializeHealth(h), eventFilter{}); !strings.Contains(got, "⏱20s") {
+		t.Fatalf("formatHealth round-trip = %q, want it to contain ⏱20s", got)
+	}
+}
+
+func TestSerializeHealthStartupMaxRoundTrip(t *testing.T) {
+	h := k8s.Health{Ready: true, Replicas: 1, ReadyReplicas: 1, DesiredReplicas: 1, StartupMax: 45 * time.Second}
+	got := parseHealth(serializeHealth(h))
+	if got.StartupMax != 45*time.Second {
+		t.Fatalf("parseHealth(serializeHealth).StartupMax = %v, want 45s", got.StartupMax)
+	}
+	zero := parseHealth(serializeHealth(k8s.Health{Ready: true, Replicas: 1, ReadyReplicas: 1, DesiredReplicas: 1}))
+	if zero.StartupMax != 0 {
+		t.Fatalf("StartupMax should default to 0, got %v", zero.StartupMax)
+	}
+	if serializeHealth(k8s.Health{StartupMax: 0}) != "" {
+		t.Fatal("serializeHealth with only zero StartupMax should be empty")
+	}
+}
+
 func TestHealthScalingColdStartNotEmpty(t *testing.T) {
 	h := k8s.Health{Ready: false, Replicas: 0, ReadyReplicas: 0, DesiredReplicas: 2}
 	if healthEmpty(h) {
@@ -465,7 +500,7 @@ func TestHealthRoundTripPreservesScaleTotals(t *testing.T) {
 func TestParseHealthOldFormatScaleZero(t *testing.T) {
 	h := k8s.Health{Ready: true, Replicas: 3, ReadyReplicas: 3, Restarts: 2, ScaleUp: 5, ScaleDown: 1, NewReadyReplicas: 2, StuckPendingPods: 1}
 	s := serializeHealth(h)
-	for range 4 {
+	for range 5 {
 		s = s[:strings.LastIndex(s, "|")]
 	}
 	got := parseHealth(s)
@@ -483,7 +518,7 @@ func TestParseHealthOldFormatScaleZero(t *testing.T) {
 func TestParseHealthPreviousVersionPreservesScaleButNotNewFields(t *testing.T) {
 	h := k8s.Health{Ready: true, Replicas: 3, ReadyReplicas: 3, Restarts: 2, ScaleUp: 5, ScaleDown: 1, NewReadyReplicas: 2, StuckPendingPods: 1}
 	s := serializeHealth(h)
-	for range 2 {
+	for range 3 {
 		s = s[:strings.LastIndex(s, "|")]
 	}
 	got := parseHealth(s)

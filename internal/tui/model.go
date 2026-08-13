@@ -2755,7 +2755,7 @@ func serializePendingTags(tags []gh.PendingTag) (pending string, contribs string
 // serializeHealth turns service health into a compact on-disk string so the
 // Services column survives cache reloads.
 func serializeHealth(h k8s.Health) string {
-	if h.Replicas == 0 && h.DesiredReplicas == 0 && h.Restarts == 0 && len(h.RestartCauses) == 0 && len(h.Events) == 0 && len(h.RecentEvents) == 0 && len(h.OldEvents) == 0 && len(h.Waiting) == 0 && len(h.Conditions) == 0 && h.PendingPods == 0 && h.FailedPods == 0 && !h.Progressing && !h.Paused && h.ScaleUp == 0 && h.ScaleDown == 0 {
+	if h.Replicas == 0 && h.DesiredReplicas == 0 && h.Restarts == 0 && len(h.RestartCauses) == 0 && len(h.Events) == 0 && len(h.RecentEvents) == 0 && len(h.OldEvents) == 0 && len(h.Waiting) == 0 && len(h.Conditions) == 0 && h.PendingPods == 0 && h.FailedPods == 0 && !h.Progressing && !h.Paused && h.ScaleUp == 0 && h.ScaleDown == 0 && h.StartupMax == 0 {
 		return ""
 	}
 	events := strings.Join(h.Events, ",")
@@ -2764,7 +2764,7 @@ func serializeHealth(h k8s.Health) string {
 	recent := strings.Join(h.RecentEvents, ",")
 	old := strings.Join(h.OldEvents, ",")
 	waiting := strings.Join(h.Waiting, ",")
-	return fmt.Sprintf("%v|%d|%d|%d|%s|%s|%d|%d|%s|%s|%s|%s|%v|%v|%d|%d|%d|%d|%d", h.Ready, h.ReadyReplicas, h.Replicas, h.Restarts, events, conditions, h.PendingPods, h.FailedPods, causes, recent, old, waiting, h.Progressing, h.Paused, h.DesiredReplicas, h.ScaleUp, h.ScaleDown, h.NewReadyReplicas, h.StuckPendingPods)
+	return fmt.Sprintf("%v|%d|%d|%d|%s|%s|%d|%d|%s|%s|%s|%s|%v|%v|%d|%d|%d|%d|%d|%d", h.Ready, h.ReadyReplicas, h.Replicas, h.Restarts, events, conditions, h.PendingPods, h.FailedPods, causes, recent, old, waiting, h.Progressing, h.Paused, h.DesiredReplicas, h.ScaleUp, h.ScaleDown, h.NewReadyReplicas, h.StuckPendingPods, h.StartupMax.Nanoseconds())
 }
 
 // parseHealth decodes a value produced by serializeHealth. Older cache rows
@@ -2772,7 +2772,7 @@ func serializeHealth(h k8s.Health) string {
 func parseHealth(s string) k8s.Health {
 	var h k8s.Health
 	h.NewReadyReplicas = -1
-	parts := strings.SplitN(s, "|", 19)
+	parts := strings.SplitN(s, "|", 20)
 	if len(parts) < 5 {
 		return h
 	}
@@ -2824,6 +2824,11 @@ func parseHealth(s string) k8s.Health {
 	}
 	if len(parts) > 18 {
 		fmt.Sscanf(parts[18], "%d", &h.StuckPendingPods)
+	}
+	if len(parts) > 19 {
+		var ns int64
+		fmt.Sscanf(parts[19], "%d", &ns)
+		h.StartupMax = time.Duration(ns)
 	}
 	return h
 }
@@ -2938,6 +2943,9 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 	case h.Replicas > 0:
 		segs = append(segs, healthSeg{"✖", segBad, false})
 	}
+	if h.StartupMax > 0 {
+		segs = append(segs, healthSeg{fmt.Sprintf("⏱%s", shortDur(h.StartupMax)), segMuted, false})
+	}
 	if h.Paused {
 		segs = append(segs, healthSeg{"⏸DeploymentPaused", segInfo, false})
 	}
@@ -3028,7 +3036,7 @@ func healthEmpty(h k8s.Health) bool {
 	return h.Replicas == 0 && h.DesiredReplicas == 0 && h.Restarts == 0 && len(h.RestartCauses) == 0 &&
 		len(h.Events) == 0 && len(h.RecentEvents) == 0 && len(h.OldEvents) == 0 && len(h.Waiting) == 0 &&
 		len(h.Conditions) == 0 && len(h.FailedReasons) == 0 && h.PendingPods == 0 && h.FailedPods == 0 &&
-		!h.Progressing && !h.Paused && h.ScaleUp == 0 && h.ScaleDown == 0
+		!h.Progressing && !h.Paused && h.ScaleUp == 0 && h.ScaleDown == 0 && h.StartupMax == 0
 }
 
 // formatHealth renders the cached health string as a compact plain-text column
@@ -3684,6 +3692,7 @@ func (m Model) renderHelpOverlay() string {
 				{"⟳Progressing 2/5", "rolling out · new pods ready / desired"},
 				{"⇑3 / ⇓1", "scaling to target replicas"},
 				{"HPA ↑4 ↓2", "HPA rescaled pods (last hour)"},
+				{"⏱30s", "startup · max app-start→ready (probe sizing)"},
 				{"↻N", "restarts"},
 				{"↻OOMKilled", "last restart cause"},
 				{"⌛N", "pods pending"},

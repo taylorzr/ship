@@ -191,7 +191,7 @@ func (c *RealClient) getDeployment(ctx context.Context, namespace, name string) 
 			d.Health.NewReadyReplicas = n
 		}
 	}
-	c.collectHealth(ctx, namespace, name, dep.Spec.Selector, "Deployment", &d.Health)
+	c.collectHealth(ctx, namespace, name, dep.Spec.Selector, "Deployment", dep.Spec.Template.Spec.Containers[0].Name, &d.Health)
 	return d, nil
 }
 
@@ -284,7 +284,7 @@ func (c *RealClient) getRollout(ctx context.Context, namespace, name string) (*W
 			w.Health.NewReadyReplicas = n
 		}
 	}
-	c.collectHealth(ctx, namespace, name, ro.Spec.Selector, "Rollout", &w.Health)
+	c.collectHealth(ctx, namespace, name, ro.Spec.Selector, "Rollout", ro.Spec.Template.Spec.Containers[0].Name, &w.Health)
 	return w, nil
 }
 
@@ -409,7 +409,7 @@ func probeKind(msg string) string {
 // collectHealth augments the workload with pod restart counts, Pending/Failed
 // pod phases, workload conditions, and recent warning events (OOM kills,
 // backoff, failed scheduling, ...).
-func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, sel *metav1.LabelSelector, kind string, h *Health) {
+func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, sel *metav1.LabelSelector, kind, containerName string, h *Health) {
 	labelSel, err := metav1.LabelSelectorAsSelector(sel)
 	if err != nil {
 		return
@@ -458,6 +458,38 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 				if reason := cs.State.Waiting.Reason; reason != "" && !benignWaitingReasons[reason] && !seenWaiting[reason] {
 					seenWaiting[reason] = true
 					h.Waiting = append(h.Waiting, reason)
+				}
+			}
+		}
+		// Startup time excludes image pull: kubelet sets Running.StartedAt only
+		// after the image is pulled and the container process starts, so app
+		// start -> Ready transition measures the window a startup probe's
+		// failureThreshold*periodSeconds must cover. Only ready pods with a
+		// running app container count; clock skew (ready before started) is
+		// skipped.
+		var readyAt metav1.Time
+		ready := false
+		for _, cond := range pod.Status.Conditions {
+			if cond.Type == corev1.PodReady && cond.Status == corev1.ConditionTrue {
+				readyAt = cond.LastTransitionTime
+				ready = true
+				break
+			}
+		}
+		if ready {
+			started := time.Time{}
+			for _, cs := range pod.Status.ContainerStatuses {
+				if containerName != "" && cs.Name != containerName {
+					continue
+				}
+				if cs.State.Running != nil {
+					started = cs.State.Running.StartedAt.Time
+					break
+				}
+			}
+			if !started.IsZero() && !readyAt.Time.Before(started) {
+				if d := readyAt.Time.Sub(started); d > h.StartupMax {
+					h.StartupMax = d
 				}
 			}
 		}

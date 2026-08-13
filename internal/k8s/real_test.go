@@ -32,7 +32,7 @@ func (c *RealClient) collectHealthFor(t *testing.T, name, kind string) *Health {
 	t.Helper()
 	h := &Health{}
 	c.collectHealth(context.Background(), testNamespace, name,
-		&metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}}, kind, h)
+		&metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}}, kind, "", h)
 	return h
 }
 
@@ -202,6 +202,48 @@ func TestCollectHealthProbeFailureReasons(t *testing.T) {
 	}
 	if slices.Contains(h.RecentEvents, "Unhealthy") {
 		t.Fatalf("RecentEvents = %v, want probe reasons to replace Unhealthy", h.RecentEvents)
+	}
+}
+
+func readyRunningPod(pod, container string, readyAt, startedAt time.Time) *corev1.Pod {
+	p := testPod(pod, corev1.PodRunning)
+	p.Status.Conditions = []corev1.PodCondition{{
+		Type:               corev1.PodReady,
+		Status:             corev1.ConditionTrue,
+		LastTransitionTime: metav1.NewTime(readyAt),
+	}}
+	p.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name: container,
+		State: corev1.ContainerState{
+			Running: &corev1.ContainerStateRunning{StartedAt: metav1.NewTime(startedAt)},
+		},
+	}}
+	return p
+}
+
+func TestCollectHealthStartupMax(t *testing.T) {
+	now := time.Now()
+	c := newTestClient(t,
+		readyRunningPod("web-1", "web", now.Add(-2*time.Second), now.Add(-8*time.Second)),  // startup 6s
+		readyRunningPod("web-2", "web", now.Add(-5*time.Second), now.Add(-25*time.Second)), // startup 20s
+	)
+	h := c.collectHealthFor(t, "web", "Deployment")
+	if h.StartupMax != 20*time.Second {
+		t.Fatalf("StartupMax = %v, want 20s", h.StartupMax)
+	}
+}
+
+func TestCollectHealthStartupMaxSkipsUnreadyOrWaiting(t *testing.T) {
+	now := time.Now()
+	unready := testPod("web-3", corev1.PodRunning) // no Ready condition
+	waiting := readyRunningPod("web-4", "web", now, now.Add(-time.Second))
+	waiting.Status.ContainerStatuses[0].State.Running = nil
+	waiting.Status.ContainerStatuses[0].State.Waiting = &corev1.ContainerStateWaiting{Reason: "ContainerCreating"}
+	skew := readyRunningPod("web-5", "web", now.Add(-time.Second), now) // started after ready
+	c := newTestClient(t, unready, waiting, skew)
+	h := c.collectHealthFor(t, "web", "Deployment")
+	if h.StartupMax != 0 {
+		t.Fatalf("StartupMax = %v, want 0 (no qualifying pods)", h.StartupMax)
 	}
 }
 
@@ -388,7 +430,7 @@ func collectHealthForWithDesired(t *testing.T, c *RealClient, desired int32) *He
 	t.Helper()
 	h := &Health{DesiredReplicas: desired}
 	c.collectHealth(context.Background(), testNamespace, "web",
-		&metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}}, "Deployment", h)
+		&metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}}, "Deployment", "", h)
 	return h
 }
 

@@ -100,6 +100,17 @@ func TestParseMockSpecNewReadyReplicasAndStuckPending(t *testing.T) {
 	}
 }
 
+func TestParseMockSpecStartupMax(t *testing.T) {
+	spec := ParseMockSpec("img|startup_max=30s")
+	if spec.StartupMax != 30*time.Second {
+		t.Fatalf("StartupMax = %v, want 30s", spec.StartupMax)
+	}
+	spec = ParseMockSpec("img")
+	if spec.StartupMax != 0 {
+		t.Fatalf("default StartupMax = %v, want 0", spec.StartupMax)
+	}
+}
+
 func unixSeconds(t *testing.T, s string) time.Time {
 	t.Helper()
 	n, err := strconv.ParseInt(s, 10, 64)

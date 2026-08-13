@@ -13,21 +13,22 @@ type Health struct {
 	Replicas         int32 // current running replicas (status.replicas)
 	DesiredReplicas  int32 // desired spec.replicas; scale direction is desired vs current
 	Restarts         int32
-	RestartCauses    []string // last termination reason per restarted container, e.g. "OOMKilled", "Exit137"
-	Events           []string // Warning reasons within the warn window, e.g. "OOMKilled", "BackOff"; probe failures surface as "StartupProbeFailed"/"LivenessProbeFailed"/"ReadinessProbeFailed"
-	RecentEvents     []string // Warning reasons within the recent window (rendered red)
-	OldEvents        []string // Warning reasons within the history window (rendered muted)
-	Waiting          []string // container State.Waiting reasons, e.g. "ImagePullBackOff", "CrashLoopBackOff"
-	Progressing      bool     // workload is mid-rollout (a deploy is in progress)
-	Paused           bool     // rollout paused awaiting manual approval (DeploymentPaused condition reason)
-	Conditions       []string // deployment condition reasons, e.g. "ProgressDeadlineExceeded"
-	PendingPods      int32    // pods stuck in Pending phase (scheduling, etc.)
-	StuckPendingPods int32    // pending pods with a non-empty Status.Reason (Unschedulable, FailedMount, ...)
-	FailedPods       int32    // pods in Failed phase
-	FailedReasons    []string // pod Status.Reason for Failed pods, e.g. "Evicted", "NodeLost"
-	ScaleUp          int32    // pods added by HPA rescales within the history window
-	ScaleDown        int32    // pods removed by HPA rescales within the history window
-	NewReadyReplicas int32    // ready pods on the current ReplicaSet (-1 = unknown/unavailable)
+	RestartCauses    []string      // last termination reason per restarted container, e.g. "OOMKilled", "Exit137"
+	Events           []string      // Warning reasons within the warn window, e.g. "OOMKilled", "BackOff"; probe failures surface as "StartupProbeFailed"/"LivenessProbeFailed"/"ReadinessProbeFailed"
+	RecentEvents     []string      // Warning reasons within the recent window (rendered red)
+	OldEvents        []string      // Warning reasons within the history window (rendered muted)
+	Waiting          []string      // container State.Waiting reasons, e.g. "ImagePullBackOff", "CrashLoopBackOff"
+	Progressing      bool          // workload is mid-rollout (a deploy is in progress)
+	Paused           bool          // rollout paused awaiting manual approval (DeploymentPaused condition reason)
+	Conditions       []string      // deployment condition reasons, e.g. "ProgressDeadlineExceeded"
+	PendingPods      int32         // pods stuck in Pending phase (scheduling, etc.)
+	StuckPendingPods int32         // pending pods with a non-empty Status.Reason (Unschedulable, FailedMount, ...)
+	FailedPods       int32         // pods in Failed phase
+	FailedReasons    []string      // pod Status.Reason for Failed pods, e.g. "Evicted", "NodeLost"
+	ScaleUp          int32         // pods added by HPA rescales within the history window
+	ScaleDown        int32         // pods removed by HPA rescales within the history window
+	NewReadyReplicas int32         // ready pods on the current ReplicaSet (-1 = unknown/unavailable)
+	StartupMax       time.Duration // max app-startup→ready across ready pods (excludes image pull)
 }
 
 type Workload struct {
