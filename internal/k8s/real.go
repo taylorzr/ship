@@ -335,13 +335,11 @@ const (
 	// rolloutsPodTemplateHashLabel ties an Argo Rollout's ReplicaSets back to
 	// its status.currentPodHash; the current (canary/preview) RS is the match.
 	rolloutsPodTemplateHashLabel = "rollouts-pod-template-hash"
-	// startupSampleWindow bounds which pods contribute to StartupMax. A pod's
-	// Ready condition only keeps its LAST transition, so on a long-running pod
-	// that went NotReady and recovered without a container restart, readyAt
-	// minus the original process start spans the whole outage, not the startup.
-	// Only containers that started recently (an actual rollout) measure a real
-	// startup, which is the window a startup probe must cover.
-	startupSampleWindow = 10 * time.Minute
+	// startupCapGrace absorbs kubelet<->API server clock skew and informer
+	// lag when comparing a pod's startup window against the rollout duration.
+	// Gross exceedances (a pod that recovered readiness long after its process
+	// started) are still filtered; see collectHealth.
+	startupCapGrace = 30 * time.Second
 )
 
 // currentRS reports the number of ready pods and creation time of the
@@ -482,6 +480,10 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 	seenCauses := make(map[string]bool)
 	seenWaiting := make(map[string]bool)
 	seenFailedReasons := make(map[string]bool)
+	var (
+		startupMax time.Duration // largest sample consistent with the rollout duration
+		startupAny time.Duration // largest sample regardless (shown if nothing is plausible)
+	)
 	for i := range pods.Items {
 		pod := &pods.Items[i]
 		podNames[pod.Name] = true
@@ -525,10 +527,12 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 		// start -> Ready transition measures the window a startup probe's
 		// failureThreshold*periodSeconds must cover. Only ready pods with a
 		// running app container count; clock skew (ready before started) is
-		// skipped, and pods whose container started long ago (startupSampleWindow)
-		// are dropped — a Ready LastTransitionTime is the latest transition, so
-		// on a pod that recovered readiness without a restart it is the recovery
-		// time, not the startup.
+		// skipped. A pod's startup can't exceed its rollout's duration (RS
+		// created -> all replicas ready bounds container start -> pod ready),
+		// so a sample larger than DeployDuration means Ready.LastTransitionTime
+		// is a later recovery, not the startup. Those samples are excluded, but
+		// if nothing plausible remains the largest one is still shown — an
+		// inflated value is easier to spot than a missing one.
 		var readyAt metav1.Time
 		ready := false
 		for _, cond := range pod.Status.Conditions {
@@ -549,12 +553,23 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 					break
 				}
 			}
-			if !started.IsZero() && !readyAt.Time.Before(started) && time.Since(started) <= startupSampleWindow {
-				if d := readyAt.Time.Sub(started); d > h.StartupMax {
-					h.StartupMax = d
+			if !started.IsZero() && !readyAt.Time.Before(started) {
+				d := readyAt.Time.Sub(started)
+				if d > startupAny {
+					startupAny = d
+				}
+				if h.DeployDuration == 0 || d <= h.DeployDuration+startupCapGrace {
+					if d > startupMax {
+						startupMax = d
+					}
 				}
 			}
 		}
+	}
+	if startupMax > 0 {
+		h.StartupMax = startupMax
+	} else {
+		h.StartupMax = startupAny
 	}
 
 	// The API server caps list pages (default 500), and a plain List does not

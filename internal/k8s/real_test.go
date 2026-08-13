@@ -249,18 +249,51 @@ func TestCollectHealthStartupMaxSkipsUnreadyOrWaiting(t *testing.T) {
 	}
 }
 
-func TestCollectHealthStartupMaxSkipsLongRunningPod(t *testing.T) {
+func TestCollectHealthStartupMaxCapsAtDeployDuration(t *testing.T) {
 	// Ready LastTransitionTime is the latest transition: a pod that recovered
 	// readiness without a container restart reports a window from the original
-	// process start, which is not a startup. Only fresh containers count.
+	// process start. A startup can't exceed the rollout duration, so samples
+	// beyond it are recovery artifacts, not startups — filtered while any
+	// plausible sample remains.
 	now := time.Now()
 	c := newTestClient(t,
-		readyRunningPod("web-1", "web", now.Add(-30*time.Second), now.Add(-2*time.Minute)), // fresh, startup 90s
-		readyRunningPod("web-2", "web", now.Add(-time.Minute), now.Add(-16*time.Hour)),     // stale, ignored
+		readyRunningPod("web-1", "web", now.Add(-30*time.Second), now.Add(-2*time.Minute)), // startup 90s
+		readyRunningPod("web-2", "web", now.Add(-time.Minute), now.Add(-16*time.Hour)),     // recovery artifact
+	)
+	h := &Health{DeployDuration: 2 * time.Minute}
+	c.collectHealth(context.Background(), testNamespace, "web",
+		&metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}}, "Deployment", "", h)
+	if h.StartupMax != 90*time.Second {
+		t.Fatalf("StartupMax = %v, want 90s (artifact filtered by the rollout cap)", h.StartupMax)
+	}
+}
+
+func TestCollectHealthStartupMaxShowsInflatedWhenNothingPlausible(t *testing.T) {
+	// When every sample exceeds the rollout duration, show the largest one
+	// anyway — an inflated value is easier to spot than a missing one.
+	now := time.Now()
+	c := newTestClient(t,
+		readyRunningPod("web-1", "web", now.Add(-time.Minute), now.Add(-16*time.Hour)),
+	)
+	h := &Health{DeployDuration: 2 * time.Minute}
+	c.collectHealth(context.Background(), testNamespace, "web",
+		&metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}}, "Deployment", "", h)
+	if h.StartupMax != 16*time.Hour-time.Minute {
+		t.Fatalf("StartupMax = %v, want %v (inflated fallback shown)", h.StartupMax, 16*time.Hour-time.Minute)
+	}
+}
+
+func TestCollectHealthStartupMaxWithoutRolloutDurationShowsAll(t *testing.T) {
+	// With no rollout duration to cap against (DeployDuration == 0), every
+	// sample counts, including long-running pods.
+	now := time.Now()
+	c := newTestClient(t,
+		readyRunningPod("web-1", "web", now.Add(-30*time.Second), now.Add(-2*time.Minute)), // startup 90s
+		readyRunningPod("web-2", "web", now.Add(-time.Minute), now.Add(-16*time.Hour)),     // 16h-1m
 	)
 	h := c.collectHealthFor(t, "web", "Deployment")
-	if h.StartupMax != 90*time.Second {
-		t.Fatalf("StartupMax = %v, want 90s (stale pod ignored)", h.StartupMax)
+	if h.StartupMax != 16*time.Hour-time.Minute {
+		t.Fatalf("StartupMax = %v, want %v (no cap)", h.StartupMax, 16*time.Hour-time.Minute)
 	}
 }
 
