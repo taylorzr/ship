@@ -192,6 +192,11 @@ func (c *RealClient) getDeployment(ctx context.Context, namespace, name string) 
 			d.Health.NewReadyReplicas = n
 		}
 		curCreated = createdAt
+	} else if !d.Health.Progressing {
+		// ReplicaSet listing can be denied by RBAC even when deployments and
+		// pods are readable. Fall back to the newest pod's creation as the
+		// rollout baseline so the duration still shows.
+		curCreated = c.latestPodCreation(ctx, namespace, dep.Spec.Selector)
 	}
 	// Last completed rollout duration: current RS created → rollout became
 	// available (all desired replicas ready, incl. image pull and
@@ -376,6 +381,27 @@ func (c *RealClient) currentRS(ctx context.Context, namespace string, sel *metav
 		}
 	}
 	return ready, createdAt, found
+}
+
+// latestPodCreation returns the newest creation time among pods matching the
+// selector, or the zero time when none match. Used as a fallback rollout
+// baseline when ReplicaSet listing is denied by RBAC.
+func (c *RealClient) latestPodCreation(ctx context.Context, namespace string, sel *metav1.LabelSelector) time.Time {
+	labelSel, err := metav1.LabelSelectorAsSelector(sel)
+	if err != nil {
+		return time.Time{}
+	}
+	pods, err := c.clientset.CoreV1().Pods(namespace).List(ctx, metav1.ListOptions{LabelSelector: labelSel.String()})
+	if err != nil {
+		return time.Time{}
+	}
+	var latest time.Time
+	for i := range pods.Items {
+		if ts := pods.Items[i].CreationTimestamp.Time; ts.After(latest) {
+			latest = ts
+		}
+	}
+	return latest
 }
 
 // progressingReasons are the Deployment/Rollout "Progressing" condition

@@ -452,6 +452,32 @@ func TestGetDeploymentNoDeployDurationWithoutCompletion(t *testing.T) {
 	}
 }
 
+func TestGetDeploymentDeployDurationFallsBackToPodsWithoutRBAC(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	dep := testDeployment(nil)
+	dep.Status.Replicas = 3
+	dep.Status.ReadyReplicas = 3
+	dep.Status.Conditions = []appsv1.DeploymentCondition{{
+		Type:               appsv1.DeploymentProgressing,
+		Status:             corev1.ConditionTrue,
+		Reason:             "NewReplicaSetAvailable",
+		LastTransitionTime: metav1.NewTime(now.Add(-4 * time.Minute)),
+	}}
+	pod := testPod("web-abc-xyz", corev1.PodRunning)
+	pod.CreationTimestamp = metav1.NewTime(now.Add(-10 * time.Minute))
+	c := newTestClient(t, dep, pod)
+	c.clientset.(*fake.Clientset).PrependReactor("list", "replicasets", func(action k8stesting.Action) (bool, runtime.Object, error) {
+		return true, nil, errors.New("replicasets is forbidden")
+	})
+	w, err := c.GetWorkload(context.Background(), "", testNamespace, "web", "deployment")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.Health.DeployDuration != 6*time.Minute {
+		t.Fatalf("DeployDuration = %v, want 6m from the pod baseline", w.Health.DeployDuration)
+	}
+}
+
 func TestGetRolloutComputesDeployDuration(t *testing.T) {
 	now := time.Now().UTC().Truncate(time.Second)
 	ro := &rollout{}
