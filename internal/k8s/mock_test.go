@@ -111,6 +111,17 @@ func TestParseMockSpecStartupMax(t *testing.T) {
 	}
 }
 
+func TestParseMockSpecDeployDuration(t *testing.T) {
+	spec := ParseMockSpec("img|deploy_duration=5m30s")
+	if spec.DeployDuration != 5*time.Minute+30*time.Second {
+		t.Fatalf("DeployDuration = %v, want 5m30s", spec.DeployDuration)
+	}
+	spec = ParseMockSpec("img")
+	if spec.DeployDuration != 0 {
+		t.Fatalf("default DeployDuration = %v, want 0", spec.DeployDuration)
+	}
+}
+
 func unixSeconds(t *testing.T, s string) time.Time {
 	t.Helper()
 	n, err := strconv.ParseInt(s, 10, 64)

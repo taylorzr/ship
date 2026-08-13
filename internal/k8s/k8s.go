@@ -29,6 +29,7 @@ type Health struct {
 	ScaleDown        int32         // pods removed by HPA rescales within the history window
 	NewReadyReplicas int32         // ready pods on the current ReplicaSet (-1 = unknown/unavailable)
 	StartupMax       time.Duration // max app-startup→ready across ready pods (excludes image pull)
+	DeployDuration   time.Duration // last completed rollout duration (RS created → healthy), incl. image pull
 }
 
 type Workload struct {

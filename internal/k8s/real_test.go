@@ -13,7 +13,9 @@ import (
 	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime"
+	dynamicfake "k8s.io/client-go/dynamic/fake"
 	"k8s.io/client-go/kubernetes/fake"
 	k8stesting "k8s.io/client-go/testing"
 )
@@ -383,6 +385,100 @@ func TestGetDeploymentNotProgressingNewReadyReplicasUnknown(t *testing.T) {
 		t.Fatalf("NewReadyReplicas = %d, want -1 (unknown) when not progressing", w.Health.NewReadyReplicas)
 	}
 }
+
+func TestGetDeploymentComputesDeployDuration(t *testing.T) {
+	now := time.Now()
+	rs := testRS("web-def", 2, 3, 3)
+	rs.CreationTimestamp = metav1.NewTime(now.Add(-10 * time.Minute))
+	dep := testDeployment(nil)
+	dep.Status.Replicas = 3
+	dep.Status.ReadyReplicas = 3
+	dep.Status.Conditions = []appsv1.DeploymentCondition{{
+		Type:               appsv1.DeploymentProgressing,
+		Status:             corev1.ConditionTrue,
+		Reason:             "NewReplicaSetAvailable",
+		LastTransitionTime: metav1.NewTime(now.Add(-4 * time.Minute)),
+	}}
+	c := newTestClient(t, dep, rs)
+	w, err := c.GetWorkload(context.Background(), "", testNamespace, "web", "deployment")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.Health.DeployDuration != 6*time.Minute {
+		t.Fatalf("DeployDuration = %v, want 6m", w.Health.DeployDuration)
+	}
+}
+
+func TestGetDeploymentNoDeployDurationWhileProgressing(t *testing.T) {
+	now := time.Now()
+	rs := testRS("web-def", 2, 3, 1)
+	rs.CreationTimestamp = metav1.NewTime(now.Add(-10 * time.Minute))
+	c := newTestClient(t, testProgressingDeployment(), rs)
+	w, err := c.GetWorkload(context.Background(), "", testNamespace, "web", "deployment")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.Health.DeployDuration != 0 {
+		t.Fatalf("DeployDuration = %v, want 0 while progressing", w.Health.DeployDuration)
+	}
+}
+
+func TestGetDeploymentNoDeployDurationWithoutCompletion(t *testing.T) {
+	now := time.Now()
+	rs := testRS("web-def", 2, 3, 3)
+	rs.CreationTimestamp = metav1.NewTime(now.Add(-10 * time.Minute))
+	c := newTestClient(t, testDeployment(nil), rs)
+	w, err := c.GetWorkload(context.Background(), "", testNamespace, "web", "deployment")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.Health.DeployDuration != 0 {
+		t.Fatalf("DeployDuration = %v, want 0 without a completion condition", w.Health.DeployDuration)
+	}
+}
+
+func TestGetRolloutComputesDeployDuration(t *testing.T) {
+	now := time.Now().UTC().Truncate(time.Second)
+	ro := &rollout{}
+	ro.Spec.Replicas = int32Ptr(3)
+	ro.Spec.Selector = &metav1.LabelSelector{MatchLabels: map[string]string{"app": "web"}}
+	ro.Spec.Template.Spec.Containers = []struct {
+		Name  string `json:"name"`
+		Image string `json:"image"`
+	}{{Name: "web", Image: "img:1"}}
+	ro.Status.Replicas = 3
+	ro.Status.ReadyReplicas = 3
+	ro.Status.StableRS = "web-abc"
+	ro.Status.Conditions = []metav1.Condition{{
+		Type:               "Healthy",
+		Status:             metav1.ConditionTrue,
+		LastTransitionTime: metav1.NewTime(now.Add(-4 * time.Minute)),
+	}}
+	roMap, err := runtime.DefaultUnstructuredConverter.ToUnstructured(ro)
+	if err != nil {
+		t.Fatal(err)
+	}
+	roMap["apiVersion"] = rolloutGVR.GroupVersion().String()
+	roMap["kind"] = "Rollout"
+	roMap["metadata"] = map[string]interface{}{"name": "web", "namespace": testNamespace}
+	rs := testRS("web-abc", 2, 3, 3)
+	rs.CreationTimestamp = metav1.NewTime(now.Add(-10 * time.Minute))
+	rs.Spec.Template.Spec.Containers = []corev1.Container{{Name: "web", Image: "img:1"}}
+	c := &RealClient{
+		clientset:     fake.NewSimpleClientset(rs),
+		dynamicClient: dynamicfake.NewSimpleDynamicClient(runtime.NewScheme(), &unstructured.Unstructured{Object: roMap}),
+		timebox:       (EventTimebox{}).Normalized(),
+	}
+	w, err := c.GetWorkload(context.Background(), "", testNamespace, "web", "rollout")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.Health.DeployDuration != 6*time.Minute {
+		t.Fatalf("DeployDuration = %v, want 6m", w.Health.DeployDuration)
+	}
+}
+
+func int32Ptr(v int32) *int32 { return &v }
 
 func TestCollectHealthStuckPendingPods(t *testing.T) {
 	pod := testPod("web-abc12345", corev1.PodPending)
