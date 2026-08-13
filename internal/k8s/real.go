@@ -330,6 +330,13 @@ const (
 	// rolloutsPodTemplateHashLabel ties an Argo Rollout's ReplicaSets back to
 	// its status.currentPodHash; the current (canary/preview) RS is the match.
 	rolloutsPodTemplateHashLabel = "rollouts-pod-template-hash"
+	// startupSampleWindow bounds which pods contribute to StartupMax. A pod's
+	// Ready condition only keeps its LAST transition, so on a long-running pod
+	// that went NotReady and recovered without a container restart, readyAt
+	// minus the original process start spans the whole outage, not the startup.
+	// Only containers that started recently (an actual rollout) measure a real
+	// startup, which is the window a startup probe must cover.
+	startupSampleWindow = 10 * time.Minute
 )
 
 // currentRS reports the number of ready pods and creation time of the
@@ -492,7 +499,10 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 		// start -> Ready transition measures the window a startup probe's
 		// failureThreshold*periodSeconds must cover. Only ready pods with a
 		// running app container count; clock skew (ready before started) is
-		// skipped.
+		// skipped, and pods whose container started long ago (startupSampleWindow)
+		// are dropped — a Ready LastTransitionTime is the latest transition, so
+		// on a pod that recovered readiness without a restart it is the recovery
+		// time, not the startup.
 		var readyAt metav1.Time
 		ready := false
 		for _, cond := range pod.Status.Conditions {
@@ -513,7 +523,7 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 					break
 				}
 			}
-			if !started.IsZero() && !readyAt.Time.Before(started) {
+			if !started.IsZero() && !readyAt.Time.Before(started) && time.Since(started) <= startupSampleWindow {
 				if d := readyAt.Time.Sub(started); d > h.StartupMax {
 					h.StartupMax = d
 				}

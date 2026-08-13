@@ -249,6 +249,21 @@ func TestCollectHealthStartupMaxSkipsUnreadyOrWaiting(t *testing.T) {
 	}
 }
 
+func TestCollectHealthStartupMaxSkipsLongRunningPod(t *testing.T) {
+	// Ready LastTransitionTime is the latest transition: a pod that recovered
+	// readiness without a container restart reports a window from the original
+	// process start, which is not a startup. Only fresh containers count.
+	now := time.Now()
+	c := newTestClient(t,
+		readyRunningPod("web-1", "web", now.Add(-30*time.Second), now.Add(-2*time.Minute)), // fresh, startup 90s
+		readyRunningPod("web-2", "web", now.Add(-time.Minute), now.Add(-16*time.Hour)),     // stale, ignored
+	)
+	h := c.collectHealthFor(t, "web", "Deployment")
+	if h.StartupMax != 90*time.Second {
+		t.Fatalf("StartupMax = %v, want 90s (stale pod ignored)", h.StartupMax)
+	}
+}
+
 func TestCollectHealthUnhealthyWithoutProbeMessageKept(t *testing.T) {
 	c := newTestClient(t,
 		testPod("web-abc", corev1.PodRunning),
