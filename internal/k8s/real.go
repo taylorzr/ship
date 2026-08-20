@@ -121,18 +121,18 @@ func (c *RealClient) GetWorkload(ctx context.Context, context, namespace, name, 
 	}
 	switch resource {
 	case "rollout":
-		dep, err = c.getRollout(ctx, namespace, name)
+		dep, err = c.getRollout(ctx, namespace, name, nil)
 	default:
-		dep, err = c.getDeployment(ctx, namespace, name)
+		dep, err = c.getDeployment(ctx, namespace, name, nil)
 	}
 	if err != nil && c.loginCmd != "" && isAuthErr(err) {
 		if lerr := relogin(c.loginCmd); lerr != nil {
 			err = fmt.Errorf("%w (login failed: %v)", err, lerr)
 		} else {
 			if resource == "rollout" {
-				dep, err = c.getRollout(ctx, namespace, name)
+				dep, err = c.getRollout(ctx, namespace, name, nil)
 			} else {
-				dep, err = c.getDeployment(ctx, namespace, name)
+				dep, err = c.getDeployment(ctx, namespace, name, nil)
 			}
 		}
 	}
@@ -148,7 +148,27 @@ func (c *RealClient) GetWorkload(ctx context.Context, context, namespace, name, 
 	return dep, nil
 }
 
-func (c *RealClient) getDeployment(ctx context.Context, namespace, name string) (*Workload, error) {
+// GetWorkloadDebug calls the same fetch path as GetWorkload but returns the
+// intermediate DeployDuration debug values alongside the workload.
+func (c *RealClient) GetWorkloadDebug(ctx context.Context, context, namespace, name, resource string) (*Workload, *DeployDurationDebug, error) {
+	if resource == "" {
+		resource = "deployment"
+	}
+	debug := &DeployDurationDebug{}
+	var (
+		dep *Workload
+		err error
+	)
+	switch resource {
+	case "rollout":
+		dep, err = c.getRollout(ctx, namespace, name, debug)
+	default:
+		dep, err = c.getDeployment(ctx, namespace, name, debug)
+	}
+	return dep, debug, err
+}
+
+func (c *RealClient) getDeployment(ctx context.Context, namespace, name string, debug *DeployDurationDebug) (*Workload, error) {
 	dep, err := c.clientset.AppsV1().Deployments(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
@@ -185,6 +205,16 @@ func (c *RealClient) getDeployment(ctx context.Context, namespace, name string) 
 			d.Health.Conditions = append(d.Health.Conditions, "Unavailable")
 		}
 	}
+	if debug != nil {
+		debug.Kind = "deployment"
+		debug.Progressing = d.Health.Progressing
+		for _, cond := range dep.Status.Conditions {
+			if cond.Type == appsv1.DeploymentProgressing {
+				debug.ProgressingCond = fmt.Sprintf("%s/%s", cond.Status, cond.Reason)
+				debug.ProgressingValue = fmt.Sprintf("lastTransitionTime=%s lastUpdateTime=%s", cond.LastTransitionTime.Time.Format(time.RFC3339), cond.LastUpdateTime.Time.Format(time.RFC3339))
+			}
+		}
+	}
 	d.Health.NewReadyReplicas = -1
 	var curCreated time.Time
 	if n, createdAt, ok := c.currentRS(ctx, namespace, dep.Spec.Selector, ""); ok {
@@ -192,11 +222,23 @@ func (c *RealClient) getDeployment(ctx context.Context, namespace, name string) 
 			d.Health.NewReadyReplicas = n
 		}
 		curCreated = createdAt
+		if debug != nil {
+			debug.CurrentRSFound = true
+			debug.CurrentRSReady = n
+			debug.CurrentRSCreatedAt = createdAt
+		}
 	} else if !d.Health.Progressing {
 		// ReplicaSet listing can be denied by RBAC even when deployments and
 		// pods are readable. Fall back to the newest pod's creation as the
 		// rollout baseline so the duration still shows.
 		curCreated = c.latestPodCreation(ctx, namespace, dep.Spec.Selector)
+		if debug != nil {
+			debug.LatestPodCreatedAt = curCreated
+			debug.FallbackUsed = true
+		}
+	}
+	if debug != nil {
+		debug.CurCreated = curCreated
 	}
 	// Last completed rollout duration: current RS created → rollout became
 	// available (all desired replicas ready, incl. image pull and
@@ -206,9 +248,17 @@ func (c *RealClient) getDeployment(ctx context.Context, namespace, name string) 
 		for _, cond := range dep.Status.Conditions {
 			if cond.Type == appsv1.DeploymentProgressing && cond.Reason == "NewReplicaSetAvailable" && !cond.LastTransitionTime.Time.Before(curCreated) {
 				d.Health.DeployDuration = cond.LastTransitionTime.Time.Sub(curCreated)
+				if debug != nil {
+					debug.CompletionCondFound = true
+					debug.CompletionLTT = cond.LastTransitionTime.Time
+					debug.CompletionCond = fmt.Sprintf("%s/%s", cond.Status, cond.Reason)
+				}
 				break
 			}
 		}
+	}
+	if debug != nil {
+		debug.DeployDuration = d.Health.DeployDuration
 	}
 	c.collectHealth(ctx, namespace, name, dep.Spec.Selector, "Deployment", dep.Spec.Template.Spec.Containers[0].Name, &d.Health)
 	return d, nil
@@ -245,7 +295,7 @@ type rollout struct {
 	} `json:"status"`
 }
 
-func (c *RealClient) getRollout(ctx context.Context, namespace, name string) (*Workload, error) {
+func (c *RealClient) getRollout(ctx context.Context, namespace, name string, debug *DeployDurationDebug) (*Workload, error) {
 	u, err := c.dynamicClient.Resource(rolloutGVR).Namespace(namespace).Get(ctx, name, metav1.GetOptions{})
 	if err != nil {
 		return nil, err
@@ -299,6 +349,16 @@ func (c *RealClient) getRollout(ctx context.Context, namespace, name string) (*W
 			w.Health.Conditions = append(w.Health.Conditions, "Degraded")
 		}
 	}
+	if debug != nil {
+		debug.Kind = "rollout"
+		debug.Progressing = w.Health.Progressing
+		for _, cond := range ro.Status.Conditions {
+			if cond.Type == "Progressing" {
+				debug.ProgressingCond = fmt.Sprintf("%s/%s", cond.Status, cond.Reason)
+				debug.ProgressingValue = fmt.Sprintf("lastTransitionTime=%s", cond.LastTransitionTime.Time.Format(time.RFC3339))
+			}
+		}
+	}
 	w.Health.NewReadyReplicas = -1
 	if w.Health.Progressing && ro.Status.CurrentPodHash != "" {
 		if n, _, ok := c.currentRS(ctx, namespace, ro.Spec.Selector, ro.Status.CurrentPodHash); ok {
@@ -311,9 +371,19 @@ func (c *RealClient) getRollout(ctx context.Context, namespace, name string) (*W
 		for _, cond := range ro.Status.Conditions {
 			if cond.Type == "Healthy" && cond.Status == metav1.ConditionTrue && !cond.LastTransitionTime.Time.Before(stableCreated) {
 				w.Health.DeployDuration = cond.LastTransitionTime.Time.Sub(stableCreated)
+				if debug != nil {
+					debug.CompletionCondFound = true
+					debug.CompletionLTT = cond.LastTransitionTime.Time
+					debug.CompletionCond = fmt.Sprintf("%s/%s", cond.Status, cond.Type)
+				}
 				break
 			}
 		}
+	}
+	if debug != nil {
+		debug.CurrentRSCreatedAt = stableCreated
+		debug.CurCreated = stableCreated
+		debug.DeployDuration = w.Health.DeployDuration
 	}
 	c.collectHealth(ctx, namespace, name, ro.Spec.Selector, "Rollout", ro.Spec.Template.Spec.Containers[0].Name, &w.Health)
 	return w, nil

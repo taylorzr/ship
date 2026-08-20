@@ -39,7 +39,36 @@ type Workload struct {
 	Health    Health
 }
 
-// Client reads the deployed image and health for a service's k8s workload.
+// DeployDurationDebug captures the intermediate values computed while deriving
+// DeployDuration so callers can inspect which branch zeroed the duration.
+type DeployDurationDebug struct {
+	Kind string // "deployment" or "rollout"
+
+	// Progressing — the condition that gates duration computation.
+	Progressing      bool
+	ProgressingCond  string // e.g. "True/ReplicaSetUpdated" or "True/NewReplicaSetAvailable"
+	ProgressingValue string // full condition as the controller reports it
+
+	// Current ReplicaSet — the baseline (curCreated).
+	CurrentRSFound     bool
+	CurrentRSName      string
+	CurrentRSCreatedAt time.Time
+	CurrentRSReady     int32
+
+	// Pod fallback — used when ReplicaSet listing is denied.
+	LatestPodCreatedAt time.Time
+	FallbackUsed       bool
+
+	// Completion condition — the finish line (deploy_duration = completion - curCreated).
+	CompletionCondFound bool
+	CompletionLTT       time.Time
+	CompletionCond      string // e.g. "True/NewReplicaSetAvailable" or "True/Healthy"
+
+	// Result.
+	CurCreated     time.Time // the actual baseline used
+	DeployDuration time.Duration
+}
+
 // resource is the workload kind ("deployment" or "rollout").
 type Client interface {
 	GetWorkload(ctx context.Context, context, namespace, name, resource string) (*Workload, error)

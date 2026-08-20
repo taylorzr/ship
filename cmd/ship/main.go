@@ -68,6 +68,12 @@ var doctorCmd = &cobra.Command{
 	RunE:    runDoctor,
 }
 
+var debugHealthCmd = &cobra.Command{
+	Use:   "debug-health",
+	Short: "Dump deploy_duration debug info for a service to help diagnose 0s",
+	RunE:  runDebugHealth,
+}
+
 var mockK8sSpecs map[string]string
 var releasesRepo string
 var reviewMeOnly bool
@@ -76,6 +82,7 @@ var depRepos, depOwners, depTeams []string
 var useGraphQL bool
 var doctorLive bool
 var modeFlag string
+var debugHealthService string
 
 func init() {
 	rootCmd.AddCommand(countCmd)
@@ -84,6 +91,7 @@ func init() {
 	rootCmd.AddCommand(reviewPRsCmd)
 	rootCmd.AddCommand(depPRsCmd)
 	rootCmd.AddCommand(doctorCmd)
+	rootCmd.AddCommand(debugHealthCmd)
 	rootCmd.Flags().StringToStringVar(&mockK8sSpecs, "mock-k8s", nil, "mock k8s per service (e.g. svc1=repo/app:v10.1.0,svc2=repo/other:v2.0.0|restarts=3|events=OOMKilling+BackOff); without a terminal prints the health columns as text")
 	rootCmd.Flags().StringVar(&modeFlag, "mode", "all", "start in a single-section mode: services, mine, review, deps (default all)")
 	releasesCmd.Flags().StringToStringVar(&mockK8sSpecs, "mock-k8s", nil, "mock k8s per service (e.g. svc1=repo/app:v10.1.0,svc2=repo/other:v2.0.0|restarts=3|events=OOMKilling+BackOff)")
@@ -97,6 +105,7 @@ func init() {
 	reviewPRsCmd.Flags().BoolVar(&useGraphQL, "graphql", false, "use the GraphQL search field (the flaky path) instead of REST")
 	depPRsCmd.Flags().BoolVar(&useGraphQL, "graphql", false, "use the GraphQL search field (the flaky path) instead of REST")
 	doctorCmd.Flags().BoolVar(&doctorLive, "live", false, "exercise real k8s login/connectivity per service (default: kubeconfig only)")
+	debugHealthCmd.Flags().StringVar(&debugHealthService, "service", "", "service name from config")
 }
 
 func main() {
@@ -632,6 +641,61 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	} else {
 		fmt.Println("doctor: ok")
 	}
+	return nil
+}
+
+func runDebugHealth(cmd *cobra.Command, args []string) error {
+	cfg, err := config.Load("")
+	if err != nil {
+		return fmt.Errorf("config: %w", err)
+	}
+	if debugHealthService == "" {
+		return fmt.Errorf("--service is required (pick a service name from config)")
+	}
+	var svc *config.ServiceConfig
+	for i := range cfg.Services {
+		if cfg.Services[i].Name == debugHealthService {
+			svc = &cfg.Services[i]
+			break
+		}
+	}
+	if svc == nil {
+		names := make([]string, len(cfg.Services))
+		for i, s := range cfg.Services {
+			names[i] = s.Name
+		}
+		return fmt.Errorf("service %q not found in config; available: %s", debugHealthService, strings.Join(names, ", "))
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+	rc, err := k8s.NewRealClient(ctx, "", svc.Context, cfg.K8s.LoginCommand, k8s.EventTimebox{
+		Recent:  cfg.K8s.EventRecent,
+		Warn:    cfg.K8s.EventWarn,
+		History: cfg.K8s.EventHistory,
+	})
+	if err != nil {
+		return fmt.Errorf("k8s client: %w", err)
+	}
+	w, debug, err := rc.GetWorkloadDebug(ctx, svc.Context, svc.Namespace, svc.Workload, svc.ResourceType())
+	if err != nil {
+		return fmt.Errorf("get workload: %w", err)
+	}
+	fmt.Printf("service:       %s\n", svc.Name)
+	fmt.Printf("kind:          %s\n", debug.Kind)
+	fmt.Printf("deploydur:    %s\n", debug.DeployDuration)
+	fmt.Printf("progressing:  %v\n", debug.Progressing)
+	fmt.Printf("progCond:     %s\n", debug.ProgressingCond)
+	fmt.Printf("progValue:    %s\n", debug.ProgressingValue)
+	fmt.Printf("curRSFound:   %v\n", debug.CurrentRSFound)
+	fmt.Printf("curRSReady:   %d\n", debug.CurrentRSReady)
+	fmt.Printf("curRSCreated: %s\n", debug.CurrentRSCreatedAt)
+	fmt.Printf("latestPodAt:  %s\n", debug.LatestPodCreatedAt)
+	fmt.Printf("fallback:     %v\n", debug.FallbackUsed)
+	fmt.Printf("completionFound: %v\n", debug.CompletionCondFound)
+	fmt.Printf("completionLTT:   %s\n", debug.CompletionLTT)
+	fmt.Printf("completionCond:  %s\n", debug.CompletionCond)
+	fmt.Printf("curCreated:      %s\n", debug.CurCreated)
+	fmt.Printf("image:          %s\n", w.Image)
 	return nil
 }
 
