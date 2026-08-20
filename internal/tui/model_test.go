@@ -486,24 +486,24 @@ func TestHealthScalingProblemShowsArrow(t *testing.T) {
 func TestFormatHealthScaleHistory(t *testing.T) {
 	h := k8s.Health{Ready: true, Replicas: 2, ReadyReplicas: 2, ScaleUp: 4, ScaleDown: 2}
 	got := formatHealth(serializeHealth(h), eventFilter{})
-	if got != "✔ │ HPA ↑4 ↓2" {
-		t.Fatalf("scale history = %q, want %q", got, "✔ │ HPA ↑4 ↓2")
+	if got != "✔ │ HPA↑4↓2" {
+		t.Fatalf("scale history = %q, want %q", got, "✔ │ HPA↑4↓2")
 	}
 }
 
 func TestFormatHealthScaleHistoryUpOnly(t *testing.T) {
 	h := k8s.Health{Ready: true, Replicas: 2, ReadyReplicas: 2, ScaleUp: 4}
 	got := formatHealth(serializeHealth(h), eventFilter{})
-	if got != "✔ │ HPA ↑4" {
-		t.Fatalf("scale-up history = %q, want %q", got, "✔ │ HPA ↑4")
+	if got != "✔ │ HPA↑4" {
+		t.Fatalf("scale-up history = %q, want %q", got, "✔ │ HPA↑4")
 	}
 }
 
 func TestFormatHealthScaleHistoryDownOnly(t *testing.T) {
 	h := k8s.Health{Ready: true, Replicas: 2, ReadyReplicas: 2, ScaleDown: 2}
 	got := formatHealth(serializeHealth(h), eventFilter{})
-	if got != "✔ │ HPA ↓2" {
-		t.Fatalf("scale-down history = %q, want %q", got, "✔ │ HPA ↓2")
+	if got != "✔ │ HPA↓2" {
+		t.Fatalf("scale-down history = %q, want %q", got, "✔ │ HPA↓2")
 	}
 }
 
@@ -513,8 +513,8 @@ func TestHealthScaleHistoryScaledToZeroNotEmpty(t *testing.T) {
 		t.Fatal("scaled-to-zero workload with HPA history treated as empty")
 	}
 	got := formatHealth(serializeHealth(h), eventFilter{})
-	if got != "HPA ↓6" {
-		t.Fatalf("scaled-to-zero history = %q, want %q", got, "HPA ↓6")
+	if got != "HPA↓6" {
+		t.Fatalf("scaled-to-zero history = %q, want %q", got, "HPA↓6")
 	}
 }
 

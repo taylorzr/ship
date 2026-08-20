@@ -246,14 +246,24 @@ func (c *RealClient) getDeployment(ctx context.Context, namespace, name string, 
 	// condition is missing.
 	if !d.Health.Progressing && !curCreated.IsZero() {
 		for _, cond := range dep.Status.Conditions {
-			if cond.Type == appsv1.DeploymentProgressing && cond.Reason == "NewReplicaSetAvailable" && !cond.LastTransitionTime.Time.Before(curCreated) {
-				d.Health.DeployDuration = cond.LastTransitionTime.Time.Sub(curCreated)
-				if debug != nil {
-					debug.CompletionCondFound = true
-					debug.CompletionLTT = cond.LastTransitionTime.Time
-					debug.CompletionCond = fmt.Sprintf("%s/%s", cond.Status, cond.Reason)
+			// lastTransitionTime only updates when the condition status flips,
+			// so for a long-running deployment it dates from the original
+			// deploy — not the current rollout. Use lastUpdateTime instead
+			// for the timestamp comparison when the reason is terminal.
+			if cond.Type == appsv1.DeploymentProgressing && cond.Reason == "NewReplicaSetAvailable" && cond.Status == corev1.ConditionTrue {
+				compared := cond.LastUpdateTime.Time
+				if compared.IsZero() {
+					compared = cond.LastTransitionTime.Time
 				}
-				break
+				if !compared.Before(curCreated) {
+					d.Health.DeployDuration = compared.Sub(curCreated)
+					if debug != nil {
+						debug.CompletionCondFound = true
+						debug.CompletionLTT = compared
+						debug.CompletionCond = fmt.Sprintf("%s/%s", cond.Status, cond.Reason)
+					}
+					break
+				}
 			}
 		}
 	}

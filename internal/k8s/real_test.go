@@ -457,6 +457,34 @@ func TestGetDeploymentComputesDeployDuration(t *testing.T) {
 	}
 }
 
+func TestGetDeploymentDeployDurationUsesLastUpdateTimeForTerminalCondition(t *testing.T) {
+	// Simulates a long-running deployment where lastTransitionTime dates from
+	// the original deploy (months ago) but lastUpdateTime was refreshed when
+	// the current rollout completed today. The old guard (!LTT.Before(curCreated))
+	// rejected it; the fix uses lastUpdateTime for the comparison instead.
+	now := time.Now()
+	rs := testRS("web-def", 2, 3, 3)
+	rs.CreationTimestamp = metav1.NewTime(now.Add(-10 * time.Minute))
+	dep := testDeployment(nil)
+	dep.Status.Replicas = 3
+	dep.Status.ReadyReplicas = 3
+	dep.Status.Conditions = []appsv1.DeploymentCondition{{
+		Type:               appsv1.DeploymentProgressing,
+		Status:             corev1.ConditionTrue,
+		Reason:             "NewReplicaSetAvailable",
+		LastTransitionTime: metav1.NewTime(now.Add(-365 * 24 * time.Hour)), // original deploy: 1 year ago
+		LastUpdateTime:     metav1.NewTime(now.Add(-4 * time.Minute)),      // refreshed today
+	}}
+	c := newTestClient(t, dep, rs)
+	w, err := c.GetWorkload(context.Background(), "", testNamespace, "web", "deployment")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if w.Health.DeployDuration != 6*time.Minute {
+		t.Fatalf("DeployDuration = %v, want 6m", w.Health.DeployDuration)
+	}
+}
+
 func TestGetDeploymentNoDeployDurationWhileProgressing(t *testing.T) {
 	now := time.Now()
 	rs := testRS("web-def", 2, 3, 1)

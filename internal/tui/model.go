@@ -3002,10 +3002,10 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 	if h.ScaleUp > 0 || h.ScaleDown > 0 {
 		text := "HPA"
 		if h.ScaleUp > 0 {
-			text += fmt.Sprintf(" ↑%d", h.ScaleUp)
+			text += fmt.Sprintf("↑%d", h.ScaleUp)
 		}
 		if h.ScaleDown > 0 {
-			text += fmt.Sprintf(" ↓%d", h.ScaleDown)
+			text += fmt.Sprintf("↓%d", h.ScaleDown)
 		}
 		events = append(events, healthSeg{text, segInfo, false})
 	}
@@ -3723,7 +3723,7 @@ func (m Model) renderHelpOverlay() string {
 				{"✖", "unhealthy"},
 				{"⟳Progressing 2/5", "rolling out · new pods ready / desired"},
 				{"⇑3 / ⇓1", "scaling to target replicas"},
-				{"HPA ↑4 ↓2", "HPA rescaled pods (last hour)"},
+				{"HPA↑4↓2", "HPA rescaled pods (last hour)"},
 				{"⏱30s", "startup · max app-start→ready (probe sizing)"},
 				{"⧗5m30s", "last deploy · rollout duration (start→healthy, incl. image pull)"},
 				{"↻N", "restarts"},
