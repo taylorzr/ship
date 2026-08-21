@@ -10,15 +10,15 @@ import (
 )
 
 type Config struct {
-	GitHub               GitHubConfig    `toml:"github"`
-	K8s                  K8sConfig       `toml:"k8s"`
-	RefreshInterval      int             `toml:"refresh_interval"`
-	ActiveRefreshInterval int            `toml:"refresh_active_interval"`
-	AI                   AIConfig        `toml:"ai"`
-	Notify               NotifyConfig    `toml:"notify"`
-	Repos                []RepoConfig    `toml:"repo"`
-	Services             []ServiceConfig `toml:"service"`
-	Jira                 []JiraConfig    `toml:"jira"`
+	GitHub                GitHubConfig    `toml:"github"`
+	K8s                   K8sConfig       `toml:"k8s"`
+	RefreshInterval       int             `toml:"refresh_interval"`
+	ActiveRefreshInterval int             `toml:"refresh_active_interval"`
+	AI                    AIConfig        `toml:"ai"`
+	Notify                NotifyConfig    `toml:"notify"`
+	Repos                 []RepoConfig    `toml:"repo"`
+	Services              []ServiceConfig `toml:"service"`
+	Jira                  []JiraConfig    `toml:"jira"`
 }
 
 type NotifyConfig struct {
@@ -35,6 +35,7 @@ type NotifyConfig struct {
 
 type K8sConfig struct {
 	LoginCommand    string        `toml:"login_command"`
+	LoginCooldown   time.Duration `toml:"login_cooldown"`   // min time between login attempts (default 60s)
 	EventRecent     time.Duration `toml:"event_recent"`     // warning events <= this age render red
 	EventWarn       time.Duration `toml:"event_warn"`       // warning events <= this age render yellow
 	EventHistory    time.Duration `toml:"event_history"`    // warning events <= this age render muted; older are dropped
@@ -100,16 +101,17 @@ func DefaultPath() string {
 
 func Load(path string) (*Config, error) {
 	cfg := &Config{
-		RefreshInterval:      300,
+		RefreshInterval:       300,
 		ActiveRefreshInterval: 5,
 		GitHub: GitHubConfig{
 			DepAuthors:         []string{"app/renovate", "app/dependabot"},
 			IgnoreContributors: []string{"github-actions[bot]", "dependabot[bot]", "renovate[bot]"},
 		},
 		K8s: K8sConfig{
-			EventRecent:  time.Minute,
-			EventWarn:    10 * time.Minute,
-			EventHistory: time.Hour,
+			EventRecent:   time.Minute,
+			EventWarn:     10 * time.Minute,
+			EventHistory:  time.Hour,
+			LoginCooldown: time.Minute,
 		},
 		AI: AIConfig{
 			ReviewProvider: "claude-cli",

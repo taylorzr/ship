@@ -1414,7 +1414,7 @@ func (m Model) resolveServiceVersion(svcCtx context.Context, svc config.ServiceC
 		rc = k8s.NewMock(map[string]k8s.MockSpec{"*": spec})
 	} else {
 		var err error
-		rc, err = k8s.NewRealClient(svcCtx, "", svc.Context, m.cfg.K8s.LoginCommand, m.k8sTimebox())
+		rc, err = k8s.NewRealClient(svcCtx, "", svc.Context, m.cfg.K8s.LoginCommand, m.cfg.K8s.LoginCooldown, m.k8sTimebox())
 		if err != nil {
 			return store.CachedVersion{}, err
 		}
@@ -1524,7 +1524,7 @@ func (m Model) refreshItemCmd(ctx context.Context) tea.Cmd {
 				rc = k8s.NewMock(map[string]k8s.MockSpec{"*": spec})
 			} else {
 				var err error
-				rc, err = k8s.NewRealClient(svcCtx, "", svc.Context, m.cfg.K8s.LoginCommand, m.k8sTimebox())
+				rc, err = k8s.NewRealClient(svcCtx, "", svc.Context, m.cfg.K8s.LoginCommand, m.cfg.K8s.LoginCooldown, m.k8sTimebox())
 				if err != nil {
 					return refreshDoneMsg{source: s.name, err: err}
 				}
@@ -1626,7 +1626,7 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 					rc = k8s.NewMock(map[string]k8s.MockSpec{"*": spec})
 				} else {
 					var err error
-					rc, err = k8s.NewRealClient(svcCtx, "", svc.Context, m.cfg.K8s.LoginCommand, m.k8sTimebox())
+					rc, err = k8s.NewRealClient(svcCtx, "", svc.Context, m.cfg.K8s.LoginCommand, m.cfg.K8s.LoginCooldown, m.k8sTimebox())
 					if err != nil {
 						results <- svcResult{Repo: svc.Repo, Error: fmt.Sprintf("k8s: %v", err)}
 						return

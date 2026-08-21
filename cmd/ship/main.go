@@ -452,7 +452,7 @@ func runReleases(cmd *cobra.Command, args []string) error {
 			fmt.Printf("(using mock k8s — service: %s, image: %s)\n\n", svc.Name, parsed.Image)
 		} else {
 			svcCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
-			rc, err := k8s.NewRealClient(svcCtx, "", svc.Context, cfg.K8s.LoginCommand, k8s.EventTimebox{
+			rc, err := k8s.NewRealClient(svcCtx, "", svc.Context, cfg.K8s.LoginCommand, cfg.K8s.LoginCooldown, k8s.EventTimebox{
 				Recent:  cfg.K8s.EventRecent,
 				Warn:    cfg.K8s.EventWarn,
 				History: cfg.K8s.EventHistory,
@@ -581,7 +581,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 	}
 	for cctx, names := range byCtx {
 		svcCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		_, err := k8s.NewRealClient(svcCtx, "", cctx, cfg.K8s.LoginCommand, timebox)
+		_, err := k8s.NewRealClient(svcCtx, "", cctx, cfg.K8s.LoginCommand, cfg.K8s.LoginCooldown, timebox)
 		cancel()
 		if err != nil {
 			check("kubeconfig", fmt.Sprintf("context %q: %v", cctx, err), false, true)
@@ -607,7 +607,7 @@ func runDoctor(cmd *cobra.Command, args []string) error {
 					defer wg.Done()
 					r := liveResult{name: svc.Name}
 					liveCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-					rc, err := k8s.NewRealClient(liveCtx, "", svc.Context, cfg.K8s.LoginCommand, timebox)
+					rc, err := k8s.NewRealClient(liveCtx, "", svc.Context, cfg.K8s.LoginCommand, cfg.K8s.LoginCooldown, timebox)
 					if err == nil {
 						_, err = rc.GetWorkload(liveCtx, svc.Context, svc.Namespace, svc.Workload, svc.ResourceType())
 					}
@@ -668,7 +668,7 @@ func runDebugHealth(cmd *cobra.Command, args []string) error {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
-	rc, err := k8s.NewRealClient(ctx, "", svc.Context, cfg.K8s.LoginCommand, k8s.EventTimebox{
+	rc, err := k8s.NewRealClient(ctx, "", svc.Context, cfg.K8s.LoginCommand, cfg.K8s.LoginCooldown, k8s.EventTimebox{
 		Recent:  cfg.K8s.EventRecent,
 		Warn:    cfg.K8s.EventWarn,
 		History: cfg.K8s.EventHistory,

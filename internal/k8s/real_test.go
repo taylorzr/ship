@@ -721,3 +721,62 @@ func TestRescaleSize(t *testing.T) {
 		}
 	}
 }
+
+func TestReloginFailedCooldown(t *testing.T) {
+	savedFailed, savedLogin := lastFailedLogin, lastLogin
+	t.Cleanup(func() { lastFailedLogin, lastLogin = savedFailed, savedLogin })
+	lastFailedLogin, lastLogin = time.Time{}, time.Time{}
+
+	cooldown := 30 * time.Minute
+
+	err := relogin("false", cooldown)
+	if err == nil {
+		t.Fatal("relogin with failing command should error")
+	}
+	if lastFailedLogin.IsZero() {
+		t.Fatal("lastFailedLogin should be set after failure")
+	}
+
+	err = relogin("false", cooldown)
+	if err != nil {
+		t.Fatalf("relogin within cooldown should skip, got: %v", err)
+	}
+}
+
+func TestReloginSuccessClearsFailedTimestamp(t *testing.T) {
+	savedFailed, savedLogin := lastFailedLogin, lastLogin
+	t.Cleanup(func() { lastFailedLogin, lastLogin = savedFailed, savedLogin })
+	lastFailedLogin, lastLogin = time.Now().Add(-1*time.Hour), time.Time{}
+
+	cooldown := 30 * time.Minute
+
+	err := relogin("true", cooldown)
+	if err != nil {
+		t.Fatalf("relogin with 'true' should succeed, got: %v", err)
+	}
+	if !lastFailedLogin.IsZero() {
+		t.Fatal("lastFailedLogin should be cleared after success")
+	}
+}
+
+func TestReloginCooldownResumesAfterWindow(t *testing.T) {
+	savedFailed, savedLogin := lastFailedLogin, lastLogin
+	t.Cleanup(func() { lastFailedLogin, lastLogin = savedFailed, savedLogin })
+	lastFailedLogin, lastLogin = time.Time{}, time.Time{}
+
+	cooldown := 30 * time.Minute
+
+	lastFailedLogin = time.Now().Add(-2 * time.Minute)
+
+	err := relogin("false", cooldown)
+	if err != nil {
+		t.Fatalf("relogin within cooldown should skip, got: %v", err)
+	}
+
+	lastFailedLogin = time.Now().Add(-31 * time.Minute)
+
+	err = relogin("false", cooldown)
+	if err == nil {
+		t.Fatal("relogin after cooldown should run the command")
+	}
+}

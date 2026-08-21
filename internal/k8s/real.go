@@ -46,10 +46,11 @@ type RealClient struct {
 	dynamicClient dynamic.Interface
 	context       string
 	loginCmd      string
+	loginCooldown time.Duration
 	timebox       EventTimebox
 }
 
-func NewRealClient(ctx context.Context, kubeconfig, context, loginCmd string, tb EventTimebox) (*RealClient, error) {
+func NewRealClient(ctx context.Context, kubeconfig, context, loginCmd string, loginCooldown time.Duration, tb EventTimebox) (*RealClient, error) {
 	type result struct {
 		client *RealClient
 		err    error
@@ -100,7 +101,7 @@ func NewRealClient(ctx context.Context, kubeconfig, context, loginCmd string, tb
 			ch <- result{nil, fmt.Errorf("dynamic client for %q: %w", actualCtx, err)}
 			return
 		}
-		ch <- result{&RealClient{clientset: clientset, dynamicClient: dyn, context: actualCtx, loginCmd: loginCmd, timebox: tb.Normalized()}, nil}
+		ch <- result{&RealClient{clientset: clientset, dynamicClient: dyn, context: actualCtx, loginCmd: loginCmd, loginCooldown: loginCooldown, timebox: tb.Normalized()}, nil}
 	}()
 
 	select {
@@ -126,7 +127,7 @@ func (c *RealClient) GetWorkload(ctx context.Context, context, namespace, name, 
 		dep, err = c.getDeployment(ctx, namespace, name, nil)
 	}
 	if err != nil && c.loginCmd != "" && isAuthErr(err) {
-		if lerr := relogin(c.loginCmd); lerr != nil {
+		if lerr := relogin(c.loginCmd, c.loginCooldown); lerr != nil {
 			err = fmt.Errorf("%w (login failed: %v)", err, lerr)
 		} else {
 			if resource == "rollout" {
@@ -944,8 +945,9 @@ func isAuthErr(err error) bool {
 // during a refresh, and lastLogin lets concurrent callers that arrive right
 // after a successful login skip straight to retrying their request.
 var (
-	loginMu   sync.Mutex
-	lastLogin time.Time
+	loginMu         sync.Mutex
+	lastLogin       time.Time
+	lastFailedLogin time.Time
 )
 
 // LastLogin returns the time of the last successful auto-login, or the zero
@@ -956,11 +958,14 @@ func LastLogin() time.Time {
 	return lastLogin
 }
 
-func relogin(loginCmd string) error {
+func relogin(loginCmd string, cooldown time.Duration) error {
 	loginMu.Lock()
 	defer loginMu.Unlock()
 
-	if time.Since(lastLogin) < time.Minute {
+	if cooldown <= 0 {
+		cooldown = time.Minute
+	}
+	if time.Since(lastLogin) < cooldown || time.Since(lastFailedLogin) < cooldown {
 		return nil
 	}
 
@@ -975,8 +980,10 @@ func relogin(loginCmd string) error {
 	defer cancel()
 	out, err := exec.CommandContext(ctx, parts[0], parts[1:]...).CombinedOutput()
 	if err != nil {
+		lastFailedLogin = time.Now()
 		return fmt.Errorf("k8s login (%s): %s: %w", loginCmd, strings.TrimSpace(string(out)), err)
 	}
 	lastLogin = time.Now()
+	lastFailedLogin = time.Time{}
 	return nil
 }
