@@ -2896,9 +2896,9 @@ func (m *Model) eventFilter() eventFilter {
 // is deployment
 // state: ⟳Progressing (with the new-pods-ready fraction over desired, e.g.
 // "⟳Progressing 2/5" — ready pods on the current ReplicaSet), ⏸DeploymentPaused
-// awaiting manual approval, and ⇑ N / ⇓ N while scaling to the target replica
-// count (the arrow is the headline when not yet ready, trailing the ✔
-// otherwise). Yellow is history and waiting: ↻N restarts, their causes, and
+// awaiting manual approval, and ⇑ current/desired / ⇓ current/desired while
+// scaling to the target replica count (the arrow is the headline when not yet
+// ready, trailing the ✔ otherwise). Yellow is history and waiting: ↻N restarts, their causes, and
 // pending pods. Red is current problems: ✖ not-ready (when not mid-rollout and
 // not scaling), hard deployment conditions (ReplicaFailure, Degraded,
 // ProgressDeadlineExceeded), failed pods and their reasons (e.g. Evicted),
@@ -2944,7 +2944,11 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 		if up {
 			dir = "⇑"
 		}
-		segs = append(segs, healthSeg{fmt.Sprintf("%s%d", dir, h.DesiredReplicas), segInfo, false})
+		if h.DesiredReplicas > 0 {
+			segs = append(segs, healthSeg{fmt.Sprintf("%s%d/%d", dir, h.ReadyReplicas, h.DesiredReplicas), segInfo, false})
+		} else {
+			segs = append(segs, healthSeg{fmt.Sprintf("%s", dir), segInfo, false})
+		}
 	case h.Replicas > 0:
 		segs = append(segs, healthSeg{"✖", segBad, false})
 	}
@@ -2962,7 +2966,11 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 		if up {
 			dir = "⇑"
 		}
-		segs = append(segs, healthSeg{fmt.Sprintf("%s%d", dir, h.DesiredReplicas), segInfo, false})
+		if h.DesiredReplicas > 0 {
+			segs = append(segs, healthSeg{fmt.Sprintf("%s%d/%d", dir, h.ReadyReplicas, h.DesiredReplicas), segInfo, false})
+		} else {
+			segs = append(segs, healthSeg{fmt.Sprintf("%s", dir), segInfo, false})
+		}
 	}
 	if h.Restarts > 0 {
 		segs = append(segs, healthSeg{fmt.Sprintf("↻%d", h.Restarts), restartKind, false})
@@ -2973,7 +2981,7 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 		}
 	}
 	for _, c := range h.Conditions {
-		if h.Progressing && c == "Unavailable" {
+		if (h.Progressing || scaling) && c == "Unavailable" {
 			continue
 		}
 		if s := shortEvent(c); s != "" {
@@ -3050,7 +3058,7 @@ func healthEmpty(h k8s.Health) bool {
 // formatHealth renders the cached health string as a compact plain-text column
 // value: ✔ healthy (✔N/N when at target: ready/desired replicas), ⟳Progressing (new
 // pods ready / desired, e.g. "⟳Progressing 2/5"),
-// ⇑ N / ⇓ N scaling to the target replica count, ✖ not ready,
+// ⇑ current/desired / ⇓ current/desired scaling to the target replica count, ✖ not ready,
 // ⏸DeploymentPaused paused,
 // ↻N restarts, ↻OOMKilled restart causes, ⚠ error events (colored by age in
 // the TUI), ∞ waiting/retrying, ⌛N pending, 💀N failed, ⚠ conditions.
@@ -3722,7 +3730,7 @@ func (m Model) renderHelpOverlay() string {
 				{"✔3/3", "healthy · ready/desired replicas"},
 				{"✖", "unhealthy"},
 				{"⟳Progressing 2/5", "rolling out · new pods ready / desired"},
-				{"⇑3 / ⇓1", "scaling to target replicas"},
+				{"⇑3/4 / ⇓3/1", "scaling to target replicas (current/desired)"},
 				{"HPA↑4↓2", "HPA rescaled pods (last hour)"},
 				{"⏱30s", "startup · max app-start→ready (probe sizing)"},
 				{"⧗5m30s", "last deploy · rollout duration (start→healthy, incl. image pull)"},

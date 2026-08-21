@@ -357,14 +357,14 @@ func TestFormatHealthScalingUpDown(t *testing.T) {
 	got := formatHealth(serializeHealth(k8s.Health{
 		Ready: true, Replicas: 2, ReadyReplicas: 2, DesiredReplicas: 4,
 	}), eventFilter{})
-	if got != "✔ ⇑4" {
-		t.Fatalf("scaling up = %q, want %q", got, "✔ ⇑4")
+	if got != "✔ ⇑2/4" {
+		t.Fatalf("scaling up = %q, want %q", got, "✔ ⇑2/4")
 	}
 	got = formatHealth(serializeHealth(k8s.Health{
 		Ready: true, Replicas: 3, ReadyReplicas: 3, DesiredReplicas: 1,
 	}), eventFilter{})
-	if got != "✔ ⇓1" {
-		t.Fatalf("scaling down = %q, want %q", got, "✔ ⇓1")
+	if got != "✔ ⇓3/1" {
+		t.Fatalf("scaling down = %q, want %q", got, "✔ ⇓3/1")
 	}
 }
 
@@ -462,24 +462,24 @@ func TestHealthScalingColdStartNotEmpty(t *testing.T) {
 		t.Fatal("cold-start scaling workload treated as empty")
 	}
 	got := formatHealth(serializeHealth(h), eventFilter{})
-	if got != "⇑2" {
-		t.Fatalf("cold-start scaling = %q, want %q", got, "⇑2")
+	if got != "⇑0/2" {
+		t.Fatalf("cold-start scaling = %q, want %q", got, "⇑0/2")
 	}
 }
 
 func TestHealthScalingMidScaleNotReady(t *testing.T) {
 	h := k8s.Health{Ready: false, Replicas: 4, ReadyReplicas: 3, DesiredReplicas: 4}
 	got := formatHealth(serializeHealth(h), eventFilter{})
-	if got != "⇑4" {
-		t.Fatalf("mid-scale not-ready = %q, want %q", got, "⇑4")
+	if got != "⇑3/4" {
+		t.Fatalf("mid-scale not-ready = %q, want %q", got, "⇑3/4")
 	}
 }
 
 func TestHealthScalingProblemShowsArrow(t *testing.T) {
 	h := k8s.Health{Ready: false, Replicas: 4, ReadyReplicas: 3, DesiredReplicas: 4, Waiting: []string{"CrashLoopBackOff"}}
 	got := formatHealth(serializeHealth(h), eventFilter{})
-	if !strings.Contains(got, "✖") || !strings.Contains(got, "⇑4") {
-		t.Fatalf("scaling with stuck container = %q, want both ✖ and ⇑4", got)
+	if !strings.Contains(got, "✖") || !strings.Contains(got, "⇑3/4") {
+		t.Fatalf("scaling with stuck container = %q, want both ✖ and ⇑3/4", got)
 	}
 }
 
