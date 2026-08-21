@@ -724,6 +724,7 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 		}
 	}
 	latest := map[string]metav1.Time{}
+	detailMsg := map[string]string{}
 	for i := range events {
 		ev := &events[i]
 		if ev.Type != "Warning" {
@@ -775,6 +776,9 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 		if prev, ok := latest[reason]; !ok || ev.LastTimestamp.After(prev.Time) {
 			latest[reason] = ev.LastTimestamp
 		}
+		if reason == "FailedScheduling" && ev.Message != "" {
+			detailMsg[reason] = ev.Message
+		}
 	}
 	reasons := make([]string, 0, len(latest))
 	for reason := range latest {
@@ -789,13 +793,20 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 	})
 	for _, reason := range reasons {
 		t := latest[reason]
+		entry := reason
+		if msg := detailMsg[reason]; msg != "" {
+			if len(msg) > 50 {
+				msg = msg[:50] + "…"
+			}
+			entry = reason + "#" + msg
+		}
 		switch {
 		case !t.Before(&recentCutoff):
-			h.RecentEvents = append(h.RecentEvents, reason)
+			h.RecentEvents = append(h.RecentEvents, entry)
 		case !t.Before(&warnCutoff):
-			h.Events = append(h.Events, fmt.Sprintf("%s@%d", reason, t.Unix()))
+			h.Events = append(h.Events, fmt.Sprintf("%s@%d", entry, t.Unix()))
 		case !t.Before(&historyCutoff):
-			h.OldEvents = append(h.OldEvents, fmt.Sprintf("%s@%d", reason, t.Unix()))
+			h.OldEvents = append(h.OldEvents, fmt.Sprintf("%s@%d", entry, t.Unix()))
 		}
 	}
 

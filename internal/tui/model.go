@@ -3020,7 +3020,7 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 	hidden := 0
 	addEvents := func(list []string, kind int) {
 		for _, e := range list {
-			reason, _, _ := eventReasonAge(e)
+			reason, detail, _, _ := eventReasonAge(e)
 			s := shortEvent(reason)
 			if s == "" {
 				continue
@@ -3030,6 +3030,9 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 				continue
 			}
 			text := reasonPrefix(s) + s
+			if detail != "" {
+				text += "(" + detail + ")"
+			}
 			events = append(events, healthSeg{text, kind, true})
 		}
 	}
@@ -3121,20 +3124,21 @@ func shortEvent(reason string) string {
 	}
 }
 
-// eventReasonAge splits an event entry into its reason and how long ago it last
-// occurred. Warn and old events carry their collection timestamp as
-// "reason@<unix seconds>"; recent events and cached rows without one return
-// ok=false so the display renders the bare reason.
-func eventReasonAge(entry string) (string, time.Duration, bool) {
-	reason, ts, ok := strings.Cut(entry, "@")
-	if !ok {
-		return entry, 0, false
-	}
+// eventReasonAge splits an event entry into its reason, detail message, and how
+// long ago it last occurred. Warn and old events carry their collection
+// timestamp as "reason[@detail]@<unix seconds>"; recent events and cached rows
+// without one return ok=false so the display renders the bare reason.
+func eventReasonAge(entry string) (reason, detail string, age time.Duration, ok bool) {
+	// Strip the optional @unix timestamp first.
+	prefix, ts, _ := strings.Cut(entry, "@")
 	secs, err := strconv.ParseInt(ts, 10, 64)
-	if err != nil {
-		return reason, 0, false
+	if err == nil {
+		age = time.Since(time.Unix(secs, 0))
+		ok = true
 	}
-	return reason, time.Since(time.Unix(secs, 0)), true
+	// Strip the optional #detail message.
+	reason, detail, _ = strings.Cut(prefix, "#")
+	return
 }
 
 // waitingReasons are k8s reasons that mean a container/pod is stuck retrying

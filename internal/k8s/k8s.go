@@ -14,9 +14,9 @@ type Health struct {
 	DesiredReplicas  int32 // desired spec.replicas; scale direction is desired vs current
 	Restarts         int32
 	RestartCauses    []string      // last termination reason per restarted container, e.g. "OOMKilled", "Exit137"
-	Events           []string      // Warning reasons within the warn window, e.g. "OOMKilled", "BackOff"; probe failures surface as "StartupProbeFailed"/"LivenessProbeFailed"/"ReadinessProbeFailed"
-	RecentEvents     []string      // Warning reasons within the recent window (rendered red)
-	OldEvents        []string      // Warning reasons within the history window (rendered muted)
+	Events           []string      // Warning reasons within the warn window, e.g. "OOMKilled", "BackOff"; FailedScheduling carries "#detail" with the scheduler message; probe failures surface as "StartupProbeFailed"/"LivenessProbeFailed"/"ReadinessProbeFailed"
+	RecentEvents     []string      // Warning reasons within the recent window (rendered red); may carry "#detail" suffix
+	OldEvents        []string      // Warning reasons within the history window (rendered muted); may carry "#detail" suffix
 	Waiting          []string      // container State.Waiting reasons, e.g. "ImagePullBackOff", "CrashLoopBackOff"
 	Progressing      bool          // workload is mid-rollout (a deploy is in progress)
 	Paused           bool          // rollout paused awaiting manual approval (DeploymentPaused condition reason)

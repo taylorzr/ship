@@ -42,13 +42,13 @@ func stripANSI(s string) string {
 }
 
 func TestEventReasonAge(t *testing.T) {
-	if reason, age, ok := eventReasonAge("Unhealthy"); ok || age != 0 || reason != "Unhealthy" {
+	if reason, _, age, ok := eventReasonAge("Unhealthy"); ok || age != 0 || reason != "Unhealthy" {
 		t.Fatalf("plain entry = (%q, %v, %v), want (Unhealthy, 0, false)", reason, age, ok)
 	}
 
 	ts := time.Now().Add(-15 * time.Minute).Unix()
 	entry := "Unhealthy@" + strconv.FormatInt(ts, 10)
-	reason, age, ok := eventReasonAge(entry)
+	reason, _, age, ok := eventReasonAge(entry)
 	if !ok {
 		t.Fatalf("encoded entry %q: ok = false", entry)
 	}
@@ -59,8 +59,37 @@ func TestEventReasonAge(t *testing.T) {
 		t.Fatalf("age = %v, want ~15m", age)
 	}
 
-	if _, _, ok := eventReasonAge("BackOff@notanumber"); ok {
+	if _, _, _, ok := eventReasonAge("BackOff@notanumber"); ok {
 		t.Fatal("malformed timestamp accepted")
+	}
+}
+
+func TestEventReasonAgeWithDetail(t *testing.T) {
+	reason, detail, _, ok := eventReasonAge("FailedScheduling#0/3 nodes are available: 2 Insufficient cpu, 1 Insufficient memory")
+	if reason != "FailedScheduling" || detail != "0/3 nodes are available: 2 Insufficient cpu, 1 Insufficient memory" {
+		t.Fatalf("detail entry = (%q, %q, %v), want (FailedScheduling, detail, false)", reason, detail, ok)
+	}
+
+	ts := time.Now().Add(-5 * time.Minute).Unix()
+	entry := "FailedScheduling#0/3 nodes: insufficient cpu@" + strconv.FormatInt(ts, 10)
+	reason, detail, age, ok := eventReasonAge(entry)
+	if !ok || reason != "FailedScheduling" || detail != "0/3 nodes: insufficient cpu" {
+		t.Fatalf("detail+age entry = (%q, %q, %v, %v), want (FailedScheduling, detail, ~5m, true)", reason, detail, age, ok)
+	}
+}
+
+func TestFailedSchedulingRendersWithMessage(t *testing.T) {
+	h := k8s.Health{Ready: true, Replicas: 1, ReadyReplicas: 1, DesiredReplicas: 1,
+		RecentEvents: []string{"FailedScheduling#0/3 nodes: 2 Insufficient cpu, 1 Insufficient memory"}}
+	segs := healthSegments(h, eventFilter{})
+	found := false
+	for _, s := range segs {
+		if s.text == "∞FailedScheduling(0/3 nodes: 2 Insufficient cpu, 1 Insufficient memory)" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("segments = %v, want FailedScheduling with detail in parens", segs)
 	}
 }
 
