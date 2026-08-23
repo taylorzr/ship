@@ -224,6 +224,10 @@ func (m Model) renderPaneRows(s *section, startGlobal, maxName, maxCur, maxPen, 
 				sep,
 				padWidth(truncateWidth(renderDetails(r.health, r.contributors, ev), maxCon), maxCon))
 		} else {
+			details := r.contributors
+			if details != "" {
+				details = healthMuted.Render(details)
+			}
 			rest = fmt.Sprintf("%s%s%s%s%s%s%s",
 				padWidth("", maxName),
 				sep,
@@ -231,7 +235,7 @@ func (m Model) renderPaneRows(s *section, startGlobal, maxName, maxCur, maxPen, 
 				sep,
 				padWidth(truncateWidth(r.pending, maxPen), maxPen),
 				sep,
-				padWidth(truncateWidth(r.contributors, maxCon), maxCon))
+				padWidth(truncateWidth(details, maxCon), maxCon))
 		}
 		if m.width > 4 {
 			rest = truncateWidth(rest, m.width-4)
