@@ -623,17 +623,21 @@ func (m *Model) loadFromCache() {
 				if parts := strings.SplitN(entry, "|", 2); len(parts) == 2 {
 					tag, title = parts[0], parts[1]
 				}
-				pending := tag
+				details := m.formatContributors(contribs[tag].ReleaseAuthor, contribs[tag].Contributors)
 				if title != "" {
-					pending = tag + ": " + title
+					if details != "" {
+						details = title + " · " + details
+					} else {
+						details = title
+					}
 				}
 				pr := row{
-					pending:      pending,
+					pending:      tag,
 					repo:         v.Repo,
 					prodRef:      v.ProdRef,
 					url:          fmt.Sprintf("https://github.com/%s/releases/tag/%s", v.Repo, tag),
 					depth:        1,
-					contributors: m.formatContributors(contribs[tag].ReleaseAuthor, contribs[tag].Contributors),
+					contributors: details,
 				}
 				s3.allRows = append(s3.allRows, pr)
 				s3.rows = append(s3.rows, pr)
@@ -648,13 +652,21 @@ func (m *Model) loadFromCache() {
 			}
 			if err := json.Unmarshal([]byte(v.UntaggedCommits), &commits); err == nil {
 				for _, c := range commits {
+					details := m.formatContributors("", c.Contributors)
+					if c.Message != "" {
+						if details != "" {
+							details = c.Message + " · " + details
+						} else {
+							details = c.Message
+						}
+					}
 					pr := row{
 						sha:          c.SHA,
-						pending:      fmt.Sprintf("%s: %s", c.SHA[:7], c.Message),
+						pending:      c.SHA[:7],
 						repo:         v.Repo,
 						prodRef:      v.ProdRef,
 						depth:        1,
-						contributors: m.formatContributors("", c.Contributors),
+						contributors: details,
 					}
 					s3.allRows = append(s3.allRows, pr)
 					s3.rows = append(s3.rows, pr)
