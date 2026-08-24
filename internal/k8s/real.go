@@ -948,7 +948,26 @@ var (
 	loginMu         sync.Mutex
 	lastLogin       time.Time
 	lastFailedLogin time.Time
+	loginFailures   int // consecutive failed logins; drives the backoff window
 )
+
+// loginMaxBackoff caps the exponential growth of the login retry window.
+const loginMaxBackoff = time.Hour
+
+// loginWindow returns how long to wait before the next login attempt: the
+// base cooldown doubling per consecutive failure, so a login command that
+// never succeeds opens fewer browser tabs over time. Capped at
+// loginMaxBackoff.
+func loginWindow(base time.Duration, failures int) time.Duration {
+	w := base
+	for i := 1; i < failures && w < loginMaxBackoff; i++ {
+		w *= 2
+	}
+	if w > loginMaxBackoff {
+		w = loginMaxBackoff
+	}
+	return w
+}
 
 // LastLogin returns the time of the last successful auto-login, or the zero
 // time if none has happened.
@@ -963,9 +982,10 @@ func relogin(loginCmd string, cooldown time.Duration) error {
 	defer loginMu.Unlock()
 
 	if cooldown <= 0 {
-		cooldown = time.Minute
+		cooldown = 10 * time.Minute
 	}
-	if time.Since(lastLogin) < cooldown || time.Since(lastFailedLogin) < cooldown {
+	eff := loginWindow(cooldown, loginFailures)
+	if time.Since(lastLogin) < eff || time.Since(lastFailedLogin) < eff {
 		return nil
 	}
 
@@ -974,16 +994,19 @@ func relogin(loginCmd string, cooldown time.Duration) error {
 		return fmt.Errorf("k8s: login_command is empty")
 	}
 
-	// Deliberately not tied to the caller's short request context — an
-	// interactive login (browser SSO) can take minutes.
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	// Deliberately not tied to the caller's short request context, and
+	// generous enough to outlast the command's own timeout (e.g. aws sso
+	// login self-terminates after ~10m) so it manages its own lifecycle.
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Minute)
 	defer cancel()
 	out, err := exec.CommandContext(ctx, parts[0], parts[1:]...).CombinedOutput()
 	if err != nil {
 		lastFailedLogin = time.Now()
+		loginFailures++
 		return fmt.Errorf("k8s login (%s): %s: %w", loginCmd, strings.TrimSpace(string(out)), err)
 	}
 	lastLogin = time.Now()
 	lastFailedLogin = time.Time{}
+	loginFailures = 0
 	return nil
 }

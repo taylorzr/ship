@@ -35,7 +35,7 @@ type NotifyConfig struct {
 
 type K8sConfig struct {
 	LoginCommand    string        `toml:"login_command"`
-	LoginCooldown   time.Duration `toml:"login_cooldown"`   // min time between login attempts (default 60s)
+	LoginCooldown   time.Duration `toml:"login_cooldown"`   // min time between login attempts (default 10m)
 	EventRecent     time.Duration `toml:"event_recent"`     // warning events <= this age render red
 	EventWarn       time.Duration `toml:"event_warn"`       // warning events <= this age render yellow
 	EventHistory    time.Duration `toml:"event_history"`    // warning events <= this age render muted; older are dropped
@@ -111,7 +111,7 @@ func Load(path string) (*Config, error) {
 			EventRecent:   time.Minute,
 			EventWarn:     10 * time.Minute,
 			EventHistory:  time.Hour,
-			LoginCooldown: time.Minute,
+			LoginCooldown: 10 * time.Minute,
 		},
 		AI: AIConfig{
 			ReviewProvider: "claude-cli",

@@ -780,3 +780,110 @@ func TestReloginCooldownResumesAfterWindow(t *testing.T) {
 		t.Fatal("relogin after cooldown should run the command")
 	}
 }
+
+func TestLoginWindow(t *testing.T) {
+	base := 10 * time.Minute
+	tests := []struct {
+		failures int
+		want     time.Duration
+	}{
+		{0, base},
+		{1, 10 * time.Minute},
+		{2, 20 * time.Minute},
+		{3, 40 * time.Minute},
+		{4, time.Hour}, // 80m uncapped
+		{9, time.Hour},
+	}
+	for _, tt := range tests {
+		if got := loginWindow(base, tt.failures); got != tt.want {
+			t.Fatalf("loginWindow(%s, %d) = %s, want %s", base, tt.failures, got, tt.want)
+		}
+	}
+	if got := loginWindow(time.Minute, 3); got != 4*time.Minute {
+		t.Fatalf("loginWindow(1m, 3) = %s, want 4m", got)
+	}
+	if got := loginWindow(base, -1); got != base {
+		t.Fatalf("loginWindow(%s, -1) = %s, want %s", base, got, base)
+	}
+}
+
+func TestReloginBackoffEscalates(t *testing.T) {
+	savedFailed, savedLogin, savedFailures := lastFailedLogin, lastLogin, loginFailures
+	t.Cleanup(func() { lastFailedLogin, lastLogin, loginFailures = savedFailed, savedLogin, savedFailures })
+	lastFailedLogin, lastLogin, loginFailures = time.Time{}, time.Time{}, 0
+
+	cooldown := 10 * time.Minute
+
+	if err := relogin("false", cooldown); err == nil {
+		t.Fatal("first failing attempt should error")
+	}
+	if loginFailures != 1 {
+		t.Fatalf("loginFailures after first failure = %d, want 1", loginFailures)
+	}
+
+	lastFailedLogin = time.Now().Add(-(cooldown + time.Minute))
+	if err := relogin("false", cooldown); err == nil {
+		t.Fatal("past the base window should run the command")
+	}
+
+	// second failure doubles the gate: 11 minutes back is still too recent
+	lastFailedLogin = time.Now().Add(-11 * time.Minute)
+	if err := relogin("false", cooldown); err != nil {
+		t.Fatal("within doubled window should skip")
+	}
+	lastFailedLogin = time.Now().Add(-21 * time.Minute)
+	if err := relogin("false", cooldown); err == nil {
+		t.Fatal("past doubled window should run the command")
+	}
+
+	// third failure quadruples it: 30 minutes back is still too recent
+	lastFailedLogin = time.Now().Add(-30 * time.Minute)
+	if err := relogin("false", cooldown); err != nil {
+		t.Fatal("within quadrupled window should skip")
+	}
+	lastFailedLogin = time.Now().Add(-41 * time.Minute)
+	if err := relogin("false", cooldown); err == nil {
+		t.Fatal("past quadrupled window should run the command")
+	}
+
+	// fourth failure hits the cap: even 50 minutes back is inside the hour
+	if loginFailures != 4 {
+		t.Fatalf("loginFailures = %d, want 4", loginFailures)
+	}
+	lastFailedLogin = time.Now().Add(-50 * time.Minute)
+	if err := relogin("false", cooldown); err != nil {
+		t.Fatal("within capped window should skip")
+	}
+}
+
+func TestReloginSuccessResetsBackoff(t *testing.T) {
+	savedFailed, savedLogin, savedFailures := lastFailedLogin, lastLogin, loginFailures
+	t.Cleanup(func() { lastFailedLogin, lastLogin, loginFailures = savedFailed, savedLogin, savedFailures })
+	lastFailedLogin, lastLogin, loginFailures = time.Time{}, time.Time{}, 0
+
+	cooldown := 10 * time.Minute
+
+	// two failures put the gate at 20m
+	if err := relogin("false", cooldown); err == nil {
+		t.Fatal("failing attempt should error")
+	}
+	lastFailedLogin = time.Now().Add(-11 * time.Minute)
+	if err := relogin("false", cooldown); err == nil {
+		t.Fatal("past base window should run the command")
+	}
+
+	lastFailedLogin = time.Now().Add(-21 * time.Minute)
+	if err := relogin("true", cooldown); err != nil {
+		t.Fatalf("successful attempt should pass, got: %v", err)
+	}
+	if !lastFailedLogin.IsZero() || loginFailures != 0 {
+		t.Fatalf("success should reset state, got failures=%d failed=%v", loginFailures, lastFailedLogin)
+	}
+
+	// with backoff reset, an attempt just past the base window runs again —
+	// the old 20m gate would have skipped it
+	lastLogin = time.Now().Add(-11 * time.Minute)
+	if err := relogin("false", cooldown); err == nil {
+		t.Fatal("just past reset window should run the command")
+	}
+}
