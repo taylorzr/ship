@@ -1777,18 +1777,6 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.ensureSectionViews()
 		return m, nil
 
-	case tea.MouseMsg:
-		if m.confirm == nil && !m.searching && !m.tagging && !m.cmdMode && !m.showNotif && m.sectionIdx < len(m.sections) {
-			m.ensureSectionViews()
-			s := &m.sections[m.sectionIdx]
-			if s.view != nil && s.view.MouseWheelEnabled {
-				updated, _ := s.view.Update(msg)
-				*s.view = updated
-				m.syncViewOffset(s)
-			}
-		}
-		return m, nil
-
 	case spinner.TickMsg:
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)

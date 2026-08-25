@@ -916,27 +916,6 @@ func TestViewportPageDownScrollsActiveSection(t *testing.T) {
 	}
 }
 
-func TestViewportWheelScrollsActiveSection(t *testing.T) {
-	forceColor()
-	m := testModel(100, 30)
-	rows := make([]row, 40)
-	for i := range rows {
-		rows[i] = row{repo: "org/app", num: i + 1, title: fmt.Sprintf("pr %d", i+1)}
-	}
-	m.sections = []section{{name: "My PRs", rows: rows, allRows: rows}}
-	_ = m.View() // seed viewport content
-
-	nm, _ := m.Update(tea.MouseMsg{
-		Action: tea.MouseActionPress,
-		Button: tea.MouseButtonWheelDown,
-		X:      50, Y: 10,
-	})
-	got := nm.(Model)
-	if got.sections[0].scrollOffset == 0 {
-		t.Fatal("mouse wheel down did not advance scrollOffset")
-	}
-}
-
 func TestViewportScrollOffsetClampedWhenContentShrinks(t *testing.T) {
 	forceColor()
 	m := testModel(100, 30)
