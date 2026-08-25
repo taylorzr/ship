@@ -702,6 +702,75 @@ func TestCollectHealthHPARescaleOutsideWindow(t *testing.T) {
 	}
 }
 
+func hpaCondition(condType autoscalingv2.HorizontalPodAutoscalerConditionType, reason string) autoscalingv2.HorizontalPodAutoscalerCondition {
+	return autoscalingv2.HorizontalPodAutoscalerCondition{
+		Type:               condType,
+		Status:             corev1.ConditionTrue,
+		Reason:             reason,
+		LastTransitionTime: metav1.NewTime(time.Now()),
+	}
+}
+
+func TestCollectHealthHpaScaleLimitCapped(t *testing.T) {
+	hpa := testHPA("web-hpa", "Deployment", "web")
+	hpa.Spec.MaxReplicas = 3
+	hpa.Status.Conditions = []autoscalingv2.HorizontalPodAutoscalerCondition{
+		hpaCondition("AbleToScale", "ReadyForNewScale"),
+		hpaCondition("ScalingLimited", "TooManyReplicas"),
+	}
+	c := newTestClient(t, testPod("web-abc", corev1.PodRunning), hpa)
+	h := c.collectHealthFor(t, "web", "Deployment")
+	if !h.HpaScaleLimited {
+		t.Fatalf("HpaScaleLimited = false, want true for ScalingLimited=True/TooManyReplicas")
+	}
+	if h.HpaMaxReplicas != 3 {
+		t.Fatalf("HpaMaxReplicas = %d, want 3", h.HpaMaxReplicas)
+	}
+}
+
+func TestCollectHealthHpaScaleLimitWithinRange(t *testing.T) {
+	hpa := testHPA("web-hpa", "Deployment", "web")
+	hpa.Spec.MaxReplicas = 10
+	hpa.Status.Conditions = []autoscalingv2.HorizontalPodAutoscalerCondition{
+		hpaCondition("ScalingLimited", "DesiredWithinRange"),
+	}
+	c := newTestClient(t, testPod("web-abc", corev1.PodRunning), hpa)
+	h := c.collectHealthFor(t, "web", "Deployment")
+	if h.HpaScaleLimited {
+		t.Fatal("HpaScaleLimited should stay false when the HPA is within range")
+	}
+	if h.HpaMaxReplicas != 10 {
+		t.Fatalf("HpaMaxReplicas = %d, want 10", h.HpaMaxReplicas)
+	}
+}
+
+func TestCollectHealthHpaScaleLimitIgnoresOtherTarget(t *testing.T) {
+	hpa := testHPA("other-hpa", "Deployment", "other")
+	hpa.Spec.MaxReplicas = 5
+	hpa.Status.Conditions = []autoscalingv2.HorizontalPodAutoscalerCondition{
+		hpaCondition("ScalingLimited", "TooManyReplicas"),
+	}
+	c := newTestClient(t, testPod("web-abc", corev1.PodRunning), hpa)
+	h := c.collectHealthFor(t, "web", "Deployment")
+	if h.HpaScaleLimited || h.HpaMaxReplicas != 0 {
+		t.Fatalf("limit info = (%v, %d), want zero values for unrelated HPA target", h.HpaScaleLimited, h.HpaMaxReplicas)
+	}
+}
+
+func TestCollectHealthHpaListDenied(t *testing.T) {
+	fc := fake.NewSimpleClientset(testPod("web-abc", corev1.PodRunning))
+	fc.PrependReactor("list", "horizontalpodautoscalers",
+		func(k8stesting.Action) (bool, runtime.Object, error) {
+			return true, nil, errors.New("horizontalpodautoscalers is forbidden")
+		})
+	c := &RealClient{clientset: fc, timebox: (EventTimebox{}).Normalized()}
+	h := collectHealthForWithDesired(t, c, 3)
+	if h.HpaScaleLimited || h.HpaMaxReplicas != 0 || h.ScaleUp != 0 || h.ScaleDown != 0 {
+		t.Fatalf("denied HPA list should fail open to zeros, got limit=(%v,%d) scale=%d/%d",
+			h.HpaScaleLimited, h.HpaMaxReplicas, h.ScaleUp, h.ScaleDown)
+	}
+}
+
 func TestRescaleSize(t *testing.T) {
 	tests := []struct {
 		msg  string

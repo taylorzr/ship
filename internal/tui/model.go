@@ -2771,7 +2771,7 @@ func serializePendingTags(tags []gh.PendingTag) (pending string, contribs string
 // serializeHealth turns service health into a compact on-disk string so the
 // Services column survives cache reloads.
 func serializeHealth(h k8s.Health) string {
-	if h.Replicas == 0 && h.DesiredReplicas == 0 && h.Restarts == 0 && len(h.RestartCauses) == 0 && len(h.Events) == 0 && len(h.RecentEvents) == 0 && len(h.OldEvents) == 0 && len(h.Waiting) == 0 && len(h.Conditions) == 0 && h.PendingPods == 0 && h.FailedPods == 0 && !h.Progressing && !h.Paused && h.ScaleUp == 0 && h.ScaleDown == 0 && h.StartupMax == 0 && h.DeployDuration == 0 {
+	if h.Replicas == 0 && h.DesiredReplicas == 0 && h.Restarts == 0 && len(h.RestartCauses) == 0 && len(h.Events) == 0 && len(h.RecentEvents) == 0 && len(h.OldEvents) == 0 && len(h.Waiting) == 0 && len(h.Conditions) == 0 && h.PendingPods == 0 && h.FailedPods == 0 && !h.Progressing && !h.Paused && h.ScaleUp == 0 && h.ScaleDown == 0 && h.StartupMax == 0 && h.DeployDuration == 0 && !h.HpaScaleLimited {
 		return ""
 	}
 	events := strings.Join(h.Events, ",")
@@ -2780,7 +2780,7 @@ func serializeHealth(h k8s.Health) string {
 	recent := strings.Join(h.RecentEvents, ",")
 	old := strings.Join(h.OldEvents, ",")
 	waiting := strings.Join(h.Waiting, ",")
-	return fmt.Sprintf("%v|%d|%d|%d|%s|%s|%d|%d|%s|%s|%s|%s|%v|%v|%d|%d|%d|%d|%d|%d|%d", h.Ready, h.ReadyReplicas, h.Replicas, h.Restarts, events, conditions, h.PendingPods, h.FailedPods, causes, recent, old, waiting, h.Progressing, h.Paused, h.DesiredReplicas, h.ScaleUp, h.ScaleDown, h.NewReadyReplicas, h.StuckPendingPods, h.StartupMax.Nanoseconds(), h.DeployDuration.Nanoseconds())
+	return fmt.Sprintf("%v|%d|%d|%d|%s|%s|%d|%d|%s|%s|%s|%s|%v|%v|%d|%d|%d|%d|%d|%d|%d|%d|%v", h.Ready, h.ReadyReplicas, h.Replicas, h.Restarts, events, conditions, h.PendingPods, h.FailedPods, causes, recent, old, waiting, h.Progressing, h.Paused, h.DesiredReplicas, h.ScaleUp, h.ScaleDown, h.NewReadyReplicas, h.StuckPendingPods, h.StartupMax.Nanoseconds(), h.DeployDuration.Nanoseconds(), h.HpaMaxReplicas, h.HpaScaleLimited)
 }
 
 // parseHealth decodes a value produced by serializeHealth. Older cache rows
@@ -2788,7 +2788,7 @@ func serializeHealth(h k8s.Health) string {
 func parseHealth(s string) k8s.Health {
 	var h k8s.Health
 	h.NewReadyReplicas = -1
-	parts := strings.SplitN(s, "|", 21)
+	parts := strings.SplitN(s, "|", 23)
 	if len(parts) < 5 {
 		return h
 	}
@@ -2850,6 +2850,12 @@ func parseHealth(s string) k8s.Health {
 		var ns int64
 		fmt.Sscanf(parts[20], "%d", &ns)
 		h.DeployDuration = time.Duration(ns)
+	}
+	if len(parts) > 21 {
+		fmt.Sscanf(parts[21], "%d", &h.HpaMaxReplicas)
+	}
+	if len(parts) > 22 {
+		fmt.Sscanf(parts[22], "%t", &h.HpaScaleLimited)
 	}
 	return h
 }
@@ -3020,6 +3026,11 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 	if h.FailedPods > 0 {
 		segs = append(segs, healthSeg{fmt.Sprintf("💀%d", h.FailedPods), segBad, false})
 	}
+	// HPA pinned at maxReplicas: a current capacity state, so it sits with the
+	// status segments rather than behind the past-events │ separator.
+	if h.HpaScaleLimited && h.HpaMaxReplicas > 0 {
+		segs = append(segs, healthSeg{fmt.Sprintf("⇪%d/%d", h.ReadyReplicas, h.HpaMaxReplicas), segWarn, false})
+	}
 	var events []healthSeg
 	// HPA rescale totals share the muted │ section with past events, sitting
 	// ahead of them so the hour view reads as one auxiliary block.
@@ -3071,7 +3082,8 @@ func healthEmpty(h k8s.Health) bool {
 	return h.Replicas == 0 && h.DesiredReplicas == 0 && h.Restarts == 0 && len(h.RestartCauses) == 0 &&
 		len(h.Events) == 0 && len(h.RecentEvents) == 0 && len(h.OldEvents) == 0 && len(h.Waiting) == 0 &&
 		len(h.Conditions) == 0 && len(h.FailedReasons) == 0 && h.PendingPods == 0 && h.FailedPods == 0 &&
-		!h.Progressing && !h.Paused && h.ScaleUp == 0 && h.ScaleDown == 0 && h.StartupMax == 0 && h.DeployDuration == 0
+		!h.Progressing && !h.Paused && h.ScaleUp == 0 && h.ScaleDown == 0 && h.StartupMax == 0 && h.DeployDuration == 0 &&
+		!h.HpaScaleLimited
 }
 
 // formatHealth renders the cached health string as a compact plain-text column
@@ -3081,8 +3093,9 @@ func healthEmpty(h k8s.Health) bool {
 // ⏸DeploymentPaused paused,
 // ↻N restarts, ↻OOMKilled restart causes, ⚠ error events (colored by age in
 // the TUI), ∞ waiting/retrying, ⌛N pending, 💀N failed, ⚠ conditions.
-// HPA rescale totals from the last hour (HPA ↑N ↓N) are grouped with past
-// events behind a │ separator.
+// ⇪N/max (yellow) marks an HPA pinned at maxReplicas that wanted to scale
+// higher. HPA rescale totals from the last hour (HPA ↑N ↓N) are grouped with
+// past events behind a │ separator.
 func formatHealth(health string, ev eventFilter) string {
 	h := parseHealth(health)
 	if healthEmpty(h) {
@@ -3752,6 +3765,7 @@ func (m Model) renderHelpOverlay() string {
 				{"⟳Progressing 2/5", "rolling out · new pods ready / desired"},
 				{"⇑3/4 / ⇓3/1", "scaling to target replicas (current/desired)"},
 				{"HPA↑4↓2", "HPA rescaled pods (last hour)"},
+				{"⇪10/10", "HPA at maxReplicas · wanted more"},
 				{"⏱30s", "startup · max app-start→ready (probe sizing)"},
 				{"⧗5m30s", "last deploy · rollout duration (start→healthy, incl. image pull)"},
 				{"↻N", "restarts"},

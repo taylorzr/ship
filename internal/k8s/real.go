@@ -13,7 +13,6 @@ import (
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
-	autoscalingv2 "k8s.io/api/autoscaling/v2"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -811,7 +810,7 @@ func (c *RealClient) collectHealth(ctx context.Context, namespace, name string, 
 		}
 	}
 
-	c.collectHpaRescales(ctx, namespace, name, kind, events, historyCutoff, h)
+	c.collectHpaInfo(ctx, namespace, name, kind, events, historyCutoff, h)
 }
 
 // rescaleSize parses the replica count from an HPA SuccessfulRescale event
@@ -839,37 +838,49 @@ func rescaleSize(msg string) (int32, bool) {
 	return int32(n), true
 }
 
-// collectHpaRescales reconstructs the last hour of HPA-driven scaling for the
-// workload, as pods added (ScaleUp) and removed (ScaleDown). HPA emits a
-// Normal SuccessfulRescale event ("New size: N") every time it changes a
-// target, and the events persist long enough (max-event-age + GC TTL) for a
-// single list to cover the history window. Deployments also emit
-// ScalingReplicaSet events, but a single rolling update produces ~7 of them,
-// so HPA events are the clean signal. Direction is derived from the deltas
-// between consecutive rescales plus a terminal transition to the workload's
-// current desired count, because the event message only carries the new size.
+// collectHpaInfo gathers everything ship shows about the HPA targeting this
+// workload. The scale-limit signal is the API's own verdict: an HPA clamps
+// its desired count at spec.maxReplicas and flags the condition
+// ScalingLimited=True/TooManyReplicas whenever that clamp bit — exactly
+// "scaled to the max and would scale higher if it could". Rescale totals are
+// reconstructed from events: HPA emits a Normal SuccessfulRescale event
+// ("New size: N") every time it changes a target, and the events persist long
+// enough (max-event-age + GC TTL) for a single list to cover the history
+// window. Deployments also emit ScalingReplicaSet events, but a single
+// rolling update produces ~7 of them, so HPA events are the clean signal.
+// Direction is derived from the deltas between consecutive rescales plus a
+// terminal transition to the workload's current desired count, because the
+// event message only carries the new size.
+//
+// The HPA list can be denied by read-only RBAC; that fails open as "no HPA
+// known", disabling both the limit indicator and rescale totals.
 //
 // Caveat: the API server aggregates events with identical messages and counts,
 // so a rapid size oscillation (e.g. 4→5→4) within an aggregation window can
 // undercount; typical gradual autoscaling reconstructs accurately.
-func (c *RealClient) collectHpaRescales(ctx context.Context, namespace, name, kind string, events []corev1.Event, cutoff metav1.Time, h *Health) {
-	// The HPA list is loaded lazily, only when a SuccessfulRescale HPA event
-	// is actually seen; it can be denied by read-only RBAC, so no list call is
-	// made for services without HPA activity.
-	var (
-		hpas      []autoscalingv2.HorizontalPodAutoscaler
-		hpaListed bool
-	)
-	loadHPAs := func() {
-		if hpaListed {
-			return
+func (c *RealClient) collectHpaInfo(ctx context.Context, namespace, name, kind string, events []corev1.Event, cutoff metav1.Time, h *Health) {
+	hpaList, err := c.clientset.AutoscalingV2().HorizontalPodAutoscalers(namespace).List(ctx, metav1.ListOptions{})
+	if err != nil {
+		return // fail-open: no limit info, no rescale totals
+	}
+	hpas := hpaList.Items
+
+	// Scale limit: first HPA targeting this workload. maxReplicas is required
+	// by the API and always positive on a valid object; the >0 guard keeps a
+	// degenerate object from rendering "⇪0/0".
+	for i := range hpas {
+		hpa := &hpas[i]
+		if hpa.Spec.ScaleTargetRef.Kind != kind || hpa.Spec.ScaleTargetRef.Name != name {
+			continue
 		}
-		hpaListed = true
-		hpaList, err := c.clientset.AutoscalingV2().HorizontalPodAutoscalers(namespace).List(ctx, metav1.ListOptions{})
-		if err != nil {
-			return // fail-open: nothing to match against
+		h.HpaMaxReplicas = hpa.Spec.MaxReplicas
+		for _, cond := range hpa.Status.Conditions {
+			if cond.Type == "ScalingLimited" && cond.Status == corev1.ConditionTrue && cond.Reason == "TooManyReplicas" {
+				h.HpaScaleLimited = true
+				break
+			}
 		}
-		hpas = append(hpas, hpaList.Items...)
+		break
 	}
 
 	type rescale struct {
@@ -883,7 +894,6 @@ func (c *RealClient) collectHpaRescales(ctx context.Context, namespace, name, ki
 		if ev.Type != "Normal" || ev.Reason != "SuccessfulRescale" || obj.Kind != "HorizontalPodAutoscaler" {
 			continue
 		}
-		loadHPAs()
 		matched := false
 		for j := range hpas {
 			hpa := &hpas[j]

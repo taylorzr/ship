@@ -27,6 +27,8 @@ type Health struct {
 	FailedReasons    []string      // pod Status.Reason for Failed pods, e.g. "Evicted", "NodeLost"
 	ScaleUp          int32         // pods added by HPA rescales within the history window
 	ScaleDown        int32         // pods removed by HPA rescales within the history window
+	HpaMaxReplicas   int32         // maxReplicas of the HPA targeting this workload (0 = no HPA / unknown)
+	HpaScaleLimited  bool          // HPA wanted more than maxReplicas and was clamped (ScalingLimited=True/TooManyReplicas)
 	NewReadyReplicas int32         // ready pods on the current ReplicaSet (-1 = unknown/unavailable)
 	StartupMax       time.Duration // max app-startup→ready across ready pods (excludes image pull)
 	DeployDuration   time.Duration // last completed rollout duration (RS created → healthy), incl. image pull

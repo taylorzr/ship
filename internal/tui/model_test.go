@@ -547,8 +547,35 @@ func TestHealthScaleHistoryScaledToZeroNotEmpty(t *testing.T) {
 	}
 }
 
+func TestHpaScaleLimitSegment(t *testing.T) {
+	h := k8s.Health{Ready: true, Replicas: 3, ReadyReplicas: 3, DesiredReplicas: 3, HpaMaxReplicas: 3, HpaScaleLimited: true}
+	found := false
+	for _, s := range healthSegments(h, eventFilter{}) {
+		if s.text == "⇪3/3" {
+			found = true
+			if s.kind != segWarn {
+				t.Fatalf("⇪3/3 kind = %d, want segWarn", s.kind)
+			}
+		}
+	}
+	if !found {
+		t.Fatalf("segments = %v, want ⇪3/3 when the HPA is pinned at maxReplicas", healthSegments(h, eventFilter{}))
+	}
+	if got := formatHealth(serializeHealth(h), eventFilter{}); !strings.Contains(got, "⇪3/3") {
+		t.Fatalf("formatHealth round-trip = %q, want it to contain ⇪3/3", got)
+	}
+
+	// an HPA with headroom renders nothing
+	calm := k8s.Health{Ready: true, Replicas: 3, ReadyReplicas: 3, DesiredReplicas: 3, HpaMaxReplicas: 10}
+	for _, s := range healthSegments(calm, eventFilter{}) {
+		if strings.HasPrefix(s.text, "⇪") {
+			t.Fatalf("segments = %v, no ⇪ segment expected while within maxReplicas", healthSegments(calm, eventFilter{}))
+		}
+	}
+}
+
 func TestHealthRoundTripPreservesScaleTotals(t *testing.T) {
-	h := k8s.Health{Ready: true, Replicas: 2, ReadyReplicas: 2, DesiredReplicas: 4, ScaleUp: 7, ScaleDown: 3, NewReadyReplicas: 2, StuckPendingPods: 1}
+	h := k8s.Health{Ready: true, Replicas: 2, ReadyReplicas: 2, DesiredReplicas: 4, ScaleUp: 7, ScaleDown: 3, NewReadyReplicas: 2, StuckPendingPods: 1, HpaMaxReplicas: 10, HpaScaleLimited: true}
 	got := parseHealth(serializeHealth(h))
 	if got.ScaleUp != 7 || got.ScaleDown != 3 {
 		t.Fatalf("round-trip scale totals = %+v, want up 7 down 3", got)
@@ -556,12 +583,24 @@ func TestHealthRoundTripPreservesScaleTotals(t *testing.T) {
 	if got.NewReadyReplicas != 2 || got.StuckPendingPods != 1 {
 		t.Fatalf("round-trip = %+v, want NewReadyReplicas 2 StuckPendingPods 1", got)
 	}
+	if got.HpaMaxReplicas != 10 || !got.HpaScaleLimited {
+		t.Fatalf("round-trip = %+v, want HpaMaxReplicas 10 HpaScaleLimited true", got)
+	}
+
+	// pre-limit cache rows (last two fields stripped) keep parsing
+	s := serializeHealth(h)
+	s = s[:strings.LastIndex(s, "|")]
+	s = s[:strings.LastIndex(s, "|")]
+	stripped := parseHealth(s)
+	if stripped.HpaMaxReplicas != 0 || stripped.HpaScaleLimited || stripped.ScaleUp != 7 {
+		t.Fatalf("stripped-format = %+v, want zero limit info with scale totals kept", stripped)
+	}
 }
 
 func TestParseHealthOldFormatScaleZero(t *testing.T) {
 	h := k8s.Health{Ready: true, Replicas: 3, ReadyReplicas: 3, Restarts: 2, ScaleUp: 5, ScaleDown: 1, NewReadyReplicas: 2, StuckPendingPods: 1}
 	s := serializeHealth(h)
-	for range 6 {
+	for range 8 {
 		s = s[:strings.LastIndex(s, "|")]
 	}
 	got := parseHealth(s)
@@ -579,7 +618,7 @@ func TestParseHealthOldFormatScaleZero(t *testing.T) {
 func TestParseHealthPreviousVersionPreservesScaleButNotNewFields(t *testing.T) {
 	h := k8s.Health{Ready: true, Replicas: 3, ReadyReplicas: 3, Restarts: 2, ScaleUp: 5, ScaleDown: 1, NewReadyReplicas: 2, StuckPendingPods: 1}
 	s := serializeHealth(h)
-	for range 4 {
+	for range 6 {
 		s = s[:strings.LastIndex(s, "|")]
 	}
 	got := parseHealth(s)
