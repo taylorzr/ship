@@ -386,6 +386,9 @@ func runPRQueries(ctx context.Context, client *gh.Client, queries []string) erro
 			} else {
 				prs, err = client.SearchIssues(ctx, q)
 			}
+			if err == nil && len(prs) > 0 {
+				prs = client.FilterArchived(ctx, prs)
+			}
 			results[i] = prQueryResult{query: q, prs: prs, dur: time.Since(start), err: err}
 		}(i, q)
 	}

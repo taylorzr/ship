@@ -52,6 +52,12 @@ type Client struct {
 	ct   *countingTransport
 	user string
 
+	// archived caches repo → archived? so FilterArchived costs at most one
+	// core-API GET per distinct repo per process. Lookups fail open on any
+	// error, so a transient API problem never hides PRs.
+	archivedMu sync.Mutex
+	archived   map[string]bool
+
 	// baseURL is the GitHub REST API origin, overridable in tests.
 	baseURL string
 }
@@ -137,7 +143,7 @@ func NewClient(token string) *Client {
 		Timeout: 60 * time.Second,
 	}
 	gql := githubv4.NewClient(hc)
-	return &Client{gql: gql, hc: hc, ct: ct, baseURL: "https://api.github.com"}
+	return &Client{gql: gql, hc: hc, ct: ct, baseURL: "https://api.github.com", archived: map[string]bool{}}
 }
 
 // rateLimitResource mirrors a resource block in the REST /rate_limit body.
@@ -556,12 +562,84 @@ func (c *Client) ownerFilter(ctx context.Context, owners []string) string {
 	return b.String()
 }
 
+// repoArchived reports whether a repo is archived, via REST /repos. Results
+// are cached for the process lifetime; any fetch error (including 404 for
+// deleted repos) fails open as "not archived" so transient API problems never
+// hide PRs.
+func (c *Client) repoArchived(ctx context.Context, repo string) bool {
+	if repo == "" {
+		return false
+	}
+	c.archivedMu.Lock()
+	if cached, ok := c.archived[repo]; ok {
+		c.archivedMu.Unlock()
+		return cached
+	}
+	c.archivedMu.Unlock()
+
+	u := fmt.Sprintf("%s/repos/%s", c.baseURL, repo)
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, u, nil)
+	if err != nil {
+		return false
+	}
+	req.Header.Set("Accept", "application/vnd.github+json")
+	req.Header.Set("X-GitHub-Api-Version", "2022-11-28")
+	resp, err := c.hc.Do(req)
+	if err != nil {
+		return false
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil || resp.StatusCode >= 400 {
+		return false
+	}
+	var r struct {
+		Archived bool `json:"archived"`
+	}
+	if json.Unmarshal(body, &r) != nil {
+		return false
+	}
+	c.archivedMu.Lock()
+	c.archived[repo] = r.Archived
+	c.archivedMu.Unlock()
+	return r.Archived
+}
+
+// FilterArchived drops PRs against archived repositories — they can't accept
+// new commits, so their lingering open PRs are noise in every list. The
+// search queries deliberately avoid the archived:false qualifier (one of
+// GitHub's slowest search qualifiers and a documented source of search-backend
+// 502s), so this filters post-fetch instead.
+func (c *Client) FilterArchived(ctx context.Context, prs []PR) []PR {
+	dropped := false
+	for i := range prs {
+		if c.repoArchived(ctx, prs[i].Repo) {
+			dropped = true
+			break
+		}
+	}
+	if !dropped {
+		return prs
+	}
+	out := make([]PR, 0, len(prs))
+	for i := range prs {
+		if !c.repoArchived(ctx, prs[i].Repo) {
+			out = append(out, prs[i])
+		}
+	}
+	return out
+}
+
 func (c *Client) MyPRs(ctx context.Context, owners []string) ([]PR, error) {
 	q, err := c.MyPRsQuery(ctx, owners)
 	if err != nil {
 		return nil, err
 	}
-	return c.SearchIssues(ctx, q)
+	prs, err := c.SearchIssues(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	return c.FilterArchived(ctx, prs), nil
 }
 
 // MyPRsQuery builds the exact search query used for the My PRs section.
@@ -581,7 +659,11 @@ func (c *Client) ReviewRequested(ctx context.Context, owners []string) ([]PR, er
 	if err != nil {
 		return nil, err
 	}
-	return c.SearchIssues(ctx, q)
+	prs, err := c.SearchIssues(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	return c.FilterArchived(ctx, prs), nil
 }
 
 // ReviewRequestedQuery builds the exact search query used for the direct
@@ -599,7 +681,11 @@ func (c *Client) TeamReviewRequested(ctx context.Context, teams []string) ([]PR,
 	if err != nil {
 		return nil, err
 	}
-	return c.SearchIssues(ctx, q)
+	prs, err := c.SearchIssues(ctx, q)
+	if err != nil {
+		return nil, err
+	}
+	return c.FilterArchived(ctx, prs), nil
 }
 
 // TeamReviewRequestedQuery builds the exact search query used for the team
@@ -701,7 +787,7 @@ func (c *Client) DepPRs(ctx context.Context, repos, owners, teams, authors []str
 			}
 		}
 	}
-	return all, nil
+	return c.FilterArchived(ctx, all), nil
 }
 
 // DepQueries builds the exact list of search queries the Dependencies section

@@ -165,3 +165,62 @@ func TestRefreshRateLimitsErrorOnNon200(t *testing.T) {
 		t.Fatal("RefreshRateLimits with HTTP 429 returned nil error")
 	}
 }
+
+func TestFilterArchived(t *testing.T) {
+	var repoHits int
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		repoHits++
+		switch r.URL.Path {
+		case "/repos/org/archived":
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{"archived": true}`)
+		case "/repos/org/live":
+			w.Header().Set("Content-Type", "application/json")
+			io.WriteString(w, `{"archived": false}`)
+		default:
+			http.Error(w, "unexpected path "+r.URL.Path, http.StatusNotFound)
+		}
+	}))
+	defer srv.Close()
+
+	c := &Client{
+		hc:       &http.Client{Transport: http.DefaultTransport},
+		baseURL:  srv.URL,
+		archived: map[string]bool{},
+	}
+	ctx := context.Background()
+	prs := []PR{
+		{Repo: "org/live", Number: 1},
+		{Repo: "org/archived", Number: 2},
+	}
+	got := c.FilterArchived(ctx, prs)
+	if len(got) != 1 || got[0].Repo != "org/live" || got[0].Number != 1 {
+		t.Fatalf("FilterArchived = %+v, want only org/live#1", got)
+	}
+
+	// cached: a second pass makes no further /repos requests
+	before := repoHits
+	if got := c.FilterArchived(ctx, prs); len(got) != 1 {
+		t.Fatalf("second FilterArchived = %+v, want only org/live#1", got)
+	}
+	if repoHits != before {
+		t.Fatalf("/repos hits went from %d to %d on second pass; cache not used", before, repoHits)
+	}
+}
+
+func TestFilterArchivedFailsOpen(t *testing.T) {
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		http.Error(w, "boom", http.StatusInternalServerError)
+	}))
+	defer srv.Close()
+
+	c := &Client{
+		hc:       &http.Client{Transport: http.DefaultTransport},
+		baseURL:  srv.URL,
+		archived: map[string]bool{},
+	}
+	prs := []PR{{Repo: "org/anywhere", Number: 7}}
+	if got := c.FilterArchived(context.Background(), prs); len(got) != 1 {
+		t.Fatalf("repo lookup failure should fail open and keep PRs, got %+v", got)
+	}
+}
