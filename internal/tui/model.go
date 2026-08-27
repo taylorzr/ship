@@ -224,6 +224,10 @@ func (m Model) renderPaneRows(s *section, startGlobal, maxName, maxStat, maxCur,
 				sep,
 				padWidth(truncateWidth(renderDetails(r.health, r.contributors, ev), maxCon), maxCon))
 		} else {
+			pending := r.pending
+			if pending != "" {
+				pending = healthMuted.Render(pending)
+			}
 			details := r.contributors
 			if details != "" {
 				details = healthMuted.Render(details)
@@ -233,7 +237,7 @@ func (m Model) renderPaneRows(s *section, startGlobal, maxName, maxStat, maxCur,
 				sep,
 				padWidth("", maxStat),
 				sep,
-				padWidth(truncateWidth(r.pending, maxCur), maxCur),
+				padWidth(truncateWidth(pending, maxCur), maxCur),
 				sep,
 				padWidth(truncateWidth(details, maxCon), maxCon))
 		}
