@@ -2772,19 +2772,27 @@ func serializePendingTags(tags []gh.PendingTag) (pending string, contribs string
 }
 
 // serializeHealth turns service health into a compact on-disk string so the
-// Services column survives cache reloads.
+// Services column survives cache reloads. List fields (events, conditions,
+// waiting, restart causes) are separated with \x1f (US) rather than ',' because
+// a FailedScheduling detail message legitimately contains commas; the \x1f
+// sentinel keeps a single warning event from being shattered into bogus
+// "reasons" on round-trip.
 func serializeHealth(h k8s.Health) string {
 	if h.Replicas == 0 && h.DesiredReplicas == 0 && h.Restarts == 0 && len(h.RestartCauses) == 0 && len(h.Events) == 0 && len(h.RecentEvents) == 0 && len(h.OldEvents) == 0 && len(h.Waiting) == 0 && len(h.Conditions) == 0 && h.PendingPods == 0 && h.FailedPods == 0 && !h.Progressing && !h.Paused && h.ScaleUp == 0 && h.ScaleDown == 0 && h.StartupMax == 0 && h.DeployDuration == 0 && !h.HpaScaleLimited {
 		return ""
 	}
-	events := strings.Join(h.Events, ",")
-	conditions := strings.Join(h.Conditions, ",")
-	causes := strings.Join(h.RestartCauses, ",")
-	recent := strings.Join(h.RecentEvents, ",")
-	old := strings.Join(h.OldEvents, ",")
-	waiting := strings.Join(h.Waiting, ",")
+	events := strings.Join(h.Events, healthListSep)
+	conditions := strings.Join(h.Conditions, healthListSep)
+	causes := strings.Join(h.RestartCauses, healthListSep)
+	recent := strings.Join(h.RecentEvents, healthListSep)
+	old := strings.Join(h.OldEvents, healthListSep)
+	waiting := strings.Join(h.Waiting, healthListSep)
 	return fmt.Sprintf("%v|%d|%d|%d|%s|%s|%d|%d|%s|%s|%s|%s|%v|%v|%d|%d|%d|%d|%d|%d|%d|%d|%v", h.Ready, h.ReadyReplicas, h.Replicas, h.Restarts, events, conditions, h.PendingPods, h.FailedPods, causes, recent, old, waiting, h.Progressing, h.Paused, h.DesiredReplicas, h.ScaleUp, h.ScaleDown, h.NewReadyReplicas, h.StuckPendingPods, h.StartupMax.Nanoseconds(), h.DeployDuration.Nanoseconds(), h.HpaMaxReplicas, h.HpaScaleLimited)
 }
+
+// healthListSep separates list fields inside the serialized health string.
+// See serializeHealth for why ',' is unusable.
+const healthListSep = "\x1f"
 
 // parseHealth decodes a value produced by serializeHealth. Older cache rows
 // with fewer fields are still accepted.
@@ -2800,10 +2808,10 @@ func parseHealth(s string) k8s.Health {
 	fmt.Sscanf(parts[2], "%d", &h.Replicas)
 	fmt.Sscanf(parts[3], "%d", &h.Restarts)
 	if parts[4] != "" {
-		h.Events = strings.Split(parts[4], ",")
+		h.Events = strings.Split(parts[4], healthListSep)
 	}
 	if len(parts) > 5 && parts[5] != "" {
-		h.Conditions = strings.Split(parts[5], ",")
+		h.Conditions = strings.Split(parts[5], healthListSep)
 	}
 	if len(parts) > 6 {
 		fmt.Sscanf(parts[6], "%d", &h.PendingPods)
@@ -2812,16 +2820,16 @@ func parseHealth(s string) k8s.Health {
 		fmt.Sscanf(parts[7], "%d", &h.FailedPods)
 	}
 	if len(parts) > 8 && parts[8] != "" {
-		h.RestartCauses = strings.Split(parts[8], ",")
+		h.RestartCauses = strings.Split(parts[8], healthListSep)
 	}
 	if len(parts) > 9 && parts[9] != "" {
-		h.RecentEvents = strings.Split(parts[9], ",")
+		h.RecentEvents = strings.Split(parts[9], healthListSep)
 	}
 	if len(parts) > 10 && parts[10] != "" {
-		h.OldEvents = strings.Split(parts[10], ",")
+		h.OldEvents = strings.Split(parts[10], healthListSep)
 	}
 	if len(parts) > 11 && parts[11] != "" {
-		h.Waiting = strings.Split(parts[11], ",")
+		h.Waiting = strings.Split(parts[11], healthListSep)
 	}
 	if len(parts) > 12 {
 		fmt.Sscanf(parts[12], "%t", &h.Progressing)

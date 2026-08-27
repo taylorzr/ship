@@ -109,6 +109,24 @@ func TestFailedSchedulingRendersCompactedLongMessage(t *testing.T) {
 	}
 }
 
+func TestFailedSchedulingDetailSurvivesStoreRoundTrip(t *testing.T) {
+	// The scheduler message contains commas; they must not shatter the single
+	// event into bogus "⚠ 47 Insufficient memory" reasons after cache round-trip.
+	h := k8s.Health{Ready: true, Replicas: 1, ReadyReplicas: 1, DesiredReplicas: 1,
+		RecentEvents: []string{"FailedScheduling#0/69 nodes are available: 22 Insufficient cpu, 47 Insufficient memory, 5 node(s) had taint {gpu=true}"}}
+	rs := parseHealth(serializeHealth(h))
+	if len(rs.RecentEvents) != 1 {
+		t.Fatalf("round-trip RecentEvents = %d entries, want 1 (detail kept intact)", len(rs.RecentEvents))
+	}
+	got := stripANSI(renderDetails(serializeHealth(h), "", eventFilter{}))
+	if !strings.Contains(got, "∞FailedScheduling(0/69 nodes: 22 Insufficient cpu, 47 Insufficient memory, 5 taint {gpu=true})") {
+		t.Fatalf("renderDetails after round-trip = %q, want single compacted event, no shattered segments", got)
+	}
+	if strings.Contains(got, "⚠ 47") || strings.Contains(got, "⚠ 5") {
+		t.Fatalf("renderDetails after round-trip = %q, detail was shattered at commas", got)
+	}
+}
+
 func TestCompactSchedMsg(t *testing.T) {
 	cases := []struct {
 		name, in, want string
