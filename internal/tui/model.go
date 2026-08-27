@@ -213,7 +213,7 @@ func (m Model) renderPaneRows(s *section, startGlobal, maxName, maxStat, maxCur,
 		if r.depth == 0 {
 			current := r.title
 			if n := pendingAhead(r.pending); n > 0 {
-				current = current + " " + helpKey.Render(fmt.Sprintf("(< %d)", n))
+				current = current + " " + helpKey.Render(fmt.Sprintf("(<%d)", n))
 			}
 			rest = fmt.Sprintf("%s%s%s%s%s%s%s",
 				padWidth(truncateWidth(r.name, maxName), maxName),
@@ -2652,7 +2652,7 @@ func (m Model) View() string {
 						}
 						current := r.title
 						if n := pendingAhead(r.pending); n > 0 {
-							current += fmt.Sprintf(" (< %d)", n)
+							current += fmt.Sprintf(" (<%d)", n)
 						}
 						if w := lipgloss.Width(current); w > maxCur {
 							maxCur = w
