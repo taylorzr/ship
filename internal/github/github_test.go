@@ -224,3 +224,68 @@ func TestFilterArchivedFailsOpen(t *testing.T) {
 		t.Fatalf("repo lookup failure should fail open and keep PRs, got %+v", got)
 	}
 }
+
+func TestUntaggedWalkStopsAtTags(t *testing.T) {
+	// Compare commits are oldest-first; prod "p0000" sits just below c100.
+	commits := []CommitSummary{
+		{SHA: "c100", Parents: []string{"p0000"}}, // oldest
+		{SHA: "c200", Parents: []string{"c100"}},  // tagged → version boundary
+		{SHA: "c300", Parents: []string{"c200"}},
+		{SHA: "c400", Parents: []string{"c300"}}, // newest = head
+	}
+	tagged := map[string]bool{"c200": true}
+
+	got := untaggedWalk(commits, tagged, true)
+	if len(got) != 2 || got[0].SHA != "c400" || got[1].SHA != "c300" {
+		t.Fatalf("tag versioning walk = %+v, want c400,c300 (stop at tagged c200)", got)
+	}
+}
+
+func TestUntaggedWalkIgnoresTagsForSHA(t *testing.T) {
+	commits := []CommitSummary{
+		{SHA: "c100", Parents: []string{"p0000"}},
+		{SHA: "c200", Parents: []string{"c100"}}, // tagged, but irrelevant for sha
+		{SHA: "c300", Parents: []string{"c200"}},
+		{SHA: "c400", Parents: []string{"c300"}},
+	}
+	tagged := map[string]bool{"c200": true}
+
+	got := untaggedWalk(commits, tagged, false)
+	if len(got) != 4 {
+		t.Fatalf("sha versioning walk = %+v, want all 4 commits", got)
+	}
+	want := []string{"c400", "c300", "c200", "c100"}
+	for i, s := range want {
+		if got[i].SHA != s {
+			t.Fatalf("walk[%d] = %s, want %s", i, got[i].SHA, s)
+		}
+	}
+}
+
+func TestUntaggedWalkNilTaggedMap(t *testing.T) {
+	commits := []CommitSummary{
+		{SHA: "c100", Parents: []string{"p0000"}},
+		{SHA: "c200", Parents: []string{"c100"}},
+	}
+	// nil tagged map with stopAtTags true must not panic (treated as no tags).
+	if got := untaggedWalk(commits, nil, true); len(got) != 2 {
+		t.Fatalf("nil-tagged walk = %+v, want 2 commits", got)
+	}
+}
+
+func TestUntaggedWalkBoundaryAtProd(t *testing.T) {
+	commits := []CommitSummary{
+		{SHA: "c100", Parents: []string{"p0000"}}, // parent is prod, not in set
+		{SHA: "c200", Parents: []string{"c100"}},
+	}
+	got := untaggedWalk(commits, nil, false)
+	if len(got) != 2 {
+		t.Fatalf("walk = %+v, want both commits above prod", got)
+	}
+}
+
+func TestUntaggedWalkEmpty(t *testing.T) {
+	if got := untaggedWalk(nil, nil, false); got != nil {
+		t.Fatalf("untaggedWalk(empty) = %+v, want nil", got)
+	}
+}

@@ -80,7 +80,10 @@ func Resolve(ctx context.Context, k8sClient k8s.Client, ghClient *gh.Client, svc
 	}
 
 	if !svc.SkipUntagged {
-		untagged, err := ghClient.UntaggedFirstParent(ctx, svc.Repo, r.ProdSHA, branch, compare.Commits)
+		// SHA versioning has no release train: a tag on the default branch is
+		// not a version boundary, so don't stop the walk at tags.
+		stopAtTags := svc.VersionStrategy != "sha"
+		untagged, err := ghClient.UntaggedFirstParent(ctx, svc.Repo, r.ProdSHA, branch, compare.Commits, stopAtTags)
 		if err == nil {
 			r.UntaggedCommits = untagged
 		}

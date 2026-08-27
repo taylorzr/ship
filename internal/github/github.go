@@ -1223,21 +1223,49 @@ func (c *Client) pendingTagsFromGit(ctx context.Context, repo, prodSHA string) (
 	return pending, nil
 }
 
-func (c *Client) UntaggedFirstParent(ctx context.Context, repo, prodSHA, branch string, commits []CommitSummary) ([]CommitSummary, error) {
+func (c *Client) UntaggedFirstParent(ctx context.Context, repo, prodSHA, branch string, commits []CommitSummary, stopAtTags bool) ([]CommitSummary, error) {
 	if len(commits) == 0 {
 		return nil, nil
 	}
 
-	tags, err := c.ListTags(ctx, repo)
-	if err != nil {
-		return nil, err
+	var tagged map[string]bool
+	if stopAtTags {
+		tags, err := c.ListTags(ctx, repo)
+		if err != nil {
+			return nil, err
+		}
+		tagged = make(map[string]bool, len(tags))
+		for _, t := range tags {
+			tagged[t.SHA] = true
+		}
 	}
 
-	tagged := make(map[string]bool, len(tags))
-	for _, t := range tags {
-		tagged[t.SHA] = true
+	untagged := untaggedWalk(commits, tagged, stopAtTags)
+
+	// Attach contributors per commit: each merge/squash commit is its own
+	// version, spanning its ancestors down to the next untagged commit, the
+	// previous tag, or prod.
+	for i := range untagged {
+		stop := ""
+		if i+1 < len(untagged) {
+			stop = untagged[i+1].SHA
+		}
+		untagged[i].Contributors = c.VersionContributors(ctx, repo, untagged[i].SHA, stop, prodSHA, commits, tagged)
 	}
 
+	return untagged, nil
+}
+
+// untaggedWalk returns the first-parent commits ahead of prod from the given
+// compare commits (newest first). When stopAtTags is true (tag versioning) it
+// stops at the first tagged commit, since that tag covers everything below it.
+// When false (SHA versioning) tags are irrelevant — every merge is its own
+// deployable SHA — so it lists every first-parent commit all the way down to
+// prod. tagged may be nil; the tag check is then a no-op.
+func untaggedWalk(commits []CommitSummary, tagged map[string]bool, stopAtTags bool) []CommitSummary {
+	if len(commits) == 0 {
+		return nil
+	}
 	commitMap := make(map[string]CommitSummary, len(commits))
 	for _, cm := range commits {
 		commitMap[cm.SHA] = cm
@@ -1252,7 +1280,7 @@ func (c *Client) UntaggedFirstParent(ctx context.Context, repo, prodSHA, branch 
 		}
 		// Stop at a tagged commit: everything below it is an ancestor of the
 		// tag and already covered by it.
-		if tagged[cur] {
+		if stopAtTags && tagged[cur] {
 			break
 		}
 		untagged = append(untagged, cm)
@@ -1262,19 +1290,7 @@ func (c *Client) UntaggedFirstParent(ctx context.Context, repo, prodSHA, branch 
 			break
 		}
 	}
-
-	// Attach contributors per commit: each merge/squash commit is its own
-	// version, spanning its ancestors down to the next untagged commit, the
-	// previous tag, or prod.
-	for i := range untagged {
-		stop := ""
-		if i+1 < len(untagged) {
-			stop = untagged[i+1].SHA
-		}
-		untagged[i].Contributors = c.VersionContributors(ctx, repo, untagged[i].SHA, stop, prodSHA, commits, tagged)
-	}
-
-	return untagged, nil
+	return untagged
 }
 
 func (c *Client) MergePR(ctx context.Context, repo string, number int) error {
