@@ -7,6 +7,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/charmbracelet/bubbles/spinner"
 	tea "github.com/charmbracelet/bubbletea"
@@ -90,6 +91,48 @@ func TestFailedSchedulingRendersWithMessage(t *testing.T) {
 	}
 	if !found {
 		t.Fatalf("segments = %v, want FailedScheduling with detail in parens", segs)
+	}
+}
+
+func TestFailedSchedulingRendersCompactedLongMessage(t *testing.T) {
+	h := k8s.Health{Ready: true, Replicas: 1, ReadyReplicas: 1, DesiredReplicas: 1,
+		RecentEvents: []string{"FailedScheduling#0/69 nodes are available: 22 Insufficient cpu, 47 Insufficient memory, 5 node(s) had taint {gpu=true}"}}
+	segs := healthSegments(h, eventFilter{})
+	found := false
+	for _, s := range segs {
+		if s.text == "∞FailedScheduling(0/69 nodes: 22 Insufficient cpu, 47 Insufficient memory, 5 taint {gpu=true})" {
+			found = true
+		}
+	}
+	if !found {
+		t.Fatalf("segments = %v, want compacted FailedScheduling message", segs)
+	}
+}
+
+func TestCompactSchedMsg(t *testing.T) {
+	cases := []struct {
+		name, in, want string
+	}{
+		{"drops preamble", "0/69 nodes are available: 22 Insufficient cpu, 47 Insufficient memory", "0/69 nodes: 22 Insufficient cpu, 47 Insufficient memory"},
+		{"taint and selector", "0/5 nodes are available: 2 node(s) had taint {gpu=true}, 3 node(s) didn't match node selector", "0/5 nodes: 2 taint {gpu=true}, 3 node selector"},
+		{"unschedulable", "0/3 nodes are available: 3 node(s) were unschedulable", "0/3 nodes: 3 unschedulable"},
+		{"drops preemption sentence", "0/5 nodes are available: 5 node(s) didn't match Pod's node affinity/selector. preemption: 0/5 nodes are available: 5 Preemption is not helpful for scheduling.", "0/5 nodes: 5 Pod's node affinity/selector"},
+		{"short form unchanged", "0/3 nodes: 2 Insufficient cpu, 1 Insufficient memory", "0/3 nodes: 2 Insufficient cpu, 1 Insufficient memory"},
+		{"non-scheduler passthrough", "container failed: no such command", "container failed: no such command"},
+		{"caps length", "0/100 nodes are available: 22 Insufficient cpu, 22 Insufficient memory, 22 node(s) had taint {a=true}, 12 node(s) didn't match pod anti-affinity rules, 12 node(s) didn't match node selector, 10 node(s) were unschedulable", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			got := compactSchedMsg(c.in)
+			if c.want != "" && got != c.want {
+				t.Fatalf("compactSchedMsg(%q) = %q, want %q", c.in, got, c.want)
+			}
+			if c.want == "" {
+				if utf8.RuneCountInString(got) > 80 || !strings.HasSuffix(got, "…") {
+					t.Fatalf("compactSchedMsg(%q) = %q, want capped at 80 runs with ellipsis", c.in, got)
+				}
+			}
+		})
 	}
 }
 

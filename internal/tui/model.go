@@ -3085,7 +3085,7 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 			}
 			text := reasonPrefix(s) + s
 			if detail != "" {
-				text += "(" + detail + ")"
+				text += "(" + compactSchedMsg(detail) + ")"
 			}
 			events = append(events, healthSeg{text, kind, true})
 		}
@@ -3218,6 +3218,64 @@ func shortEvent(reason string) string {
 	default:
 		return reason
 	}
+}
+
+// compactSchedMsg condenses a k8s scheduler (FailedScheduling) message for the
+// Details column. The verbose node-availability breakdown ("0/69 nodes are
+// available: ...") otherwise gets jammed into (...) and chopped by the column
+// width into a garbled tail reading like "cpu) ⚠ 4 I…". The schedulable count
+// and each reason stay visible; boilerplate plumbing ("nodes are available:",
+// "node(s) had", "node(s) didn't match") is dropped. Non-scheduler messages
+// pass through unchanged.
+func compactSchedMsg(msg string) string {
+	if msg == "" {
+		return ""
+	}
+	// Only touch messages shaped like a scheduler result, "N/Total nodes ...
+	// : breakdown". Everything else is left verbatim.
+	colon := strings.Index(msg, ":")
+	if !strings.Contains(msg, " nodes") || colon < 0 {
+		return msg
+	}
+	count := strings.TrimSpace(msg[:colon])
+	count = strings.ReplaceAll(count, " nodes are available", " nodes")
+	rest := strings.TrimSpace(msg[colon+1:])
+	// Drop a trailing "preemption: ..." sentence; it restates the same nodes.
+	if i := strings.LastIndex(rest, " preemption:"); i >= 0 {
+		rest = rest[:i]
+	}
+	var parts []string
+	for _, p := range strings.Split(rest, ",") {
+		if s := compressSchedPart(p); s != "" {
+			parts = append(parts, s)
+		}
+	}
+	out := count + ": " + strings.Join(parts, ", ")
+	const maxSchedDetail = 80
+	runes := []rune(out)
+	if len(runes) > maxSchedDetail {
+		cut := maxSchedDetail - 1
+		for cut > 0 && runes[cut] != ' ' {
+			cut--
+		}
+		out = strings.TrimRight(string(runes[:cut]), " ,") + "…"
+	}
+	return out
+}
+
+// compressSchedPart trims the filler from one comma-separated scheduler reason,
+// e.g. "5 node(s) had taint {gpu=true}" -> "5 taint {gpu=true}".
+func compressSchedPart(p string) string {
+	p = strings.TrimSpace(p)
+	if p == "" {
+		return ""
+	}
+	p = strings.Replace(p, " node(s) had taint", " taint", 1)
+	p = strings.Replace(p, " node(s) didn't match", "", 1)
+	p = strings.Replace(p, " node(s) were unschedulable", " unschedulable", 1)
+	p = strings.Replace(p, " node(s) had volume node affinity conflict", " volume node affinity", 1)
+	p = strings.Replace(p, " node(s)", "", 1)
+	return strings.Trim(strings.TrimSpace(p), ".,")
 }
 
 // eventReasonAge splits an event entry into its reason, detail message, and how
