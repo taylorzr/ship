@@ -199,7 +199,7 @@ func (m Model) renderPRRows(s *section, startGlobal int, repoWidth, maxWidth int
 	return strings.TrimSuffix(bb.String(), "\n")
 }
 
-func (m Model) renderPaneRows(s *section, startGlobal, maxName, maxCur, maxPen, maxCon int, sep string, ev eventFilter) string {
+func (m Model) renderPaneRows(s *section, startGlobal, maxName, maxStat, maxCur, maxCon int, sep string, ev eventFilter) string {
 	var bb strings.Builder
 	for i := range s.rows {
 		r := s.rows[i]
@@ -211,16 +211,16 @@ func (m Model) renderPaneRows(s *section, startGlobal, maxName, maxCur, maxPen, 
 		}
 		var rest string
 		if r.depth == 0 {
-			pending := r.pending
-			if strings.HasPrefix(pending, "+") || pending == "-" {
-				pending = helpKey.Render(pending)
+			current := r.title
+			if n := pendingAhead(r.pending); n > 0 {
+				current = current + " " + helpKey.Render(fmt.Sprintf("(< %d)", n))
 			}
 			rest = fmt.Sprintf("%s%s%s%s%s%s%s",
 				padWidth(truncateWidth(r.name, maxName), maxName),
 				sep,
-				padWidth(truncateWidth(r.title, maxCur), maxCur),
+				padWidth(truncateWidth(renderStatusColored(r.health), maxStat), maxStat),
 				sep,
-				padWidth(truncateWidth(pending, maxPen), maxPen),
+				padWidth(truncateWidth(current, maxCur), maxCur),
 				sep,
 				padWidth(truncateWidth(renderDetails(r.health, r.contributors, ev), maxCon), maxCon))
 		} else {
@@ -231,9 +231,9 @@ func (m Model) renderPaneRows(s *section, startGlobal, maxName, maxCur, maxPen, 
 			rest = fmt.Sprintf("%s%s%s%s%s%s%s",
 				padWidth("", maxName),
 				sep,
-				padWidth("", maxCur),
+				padWidth("", maxStat),
 				sep,
-				padWidth(truncateWidth(r.pending, maxPen), maxPen),
+				padWidth(truncateWidth(r.pending, maxCur), maxCur),
 				sep,
 				padWidth(truncateWidth(details, maxCon), maxCon))
 		}
@@ -967,6 +967,20 @@ func parsePendingTagNames(pending string) []string {
 		}
 	}
 	return tags
+}
+
+// pendingAhead returns the pending tagged-release count for a depth-0 service
+// row, parsed from its "+N" pending value (see buildServicesRows, which sets
+// pending to "+N" or "-"). Returns 0 when nothing is behind.
+func pendingAhead(pending string) int {
+	if !strings.HasPrefix(pending, "+") {
+		return 0
+	}
+	n, err := strconv.Atoi(strings.TrimPrefix(pending, "+"))
+	if err != nil {
+		return 0
+	}
+	return n
 }
 
 // countUntagged returns the number of untagged commits ahead of prod from the
@@ -2624,8 +2638,8 @@ func (m Model) View() string {
 			} else {
 				// compute column widths
 				maxName := 4 // "Name"
+				maxStat := 6 // "Status"
 				maxCur := 7  // "Current"
-				maxPen := 7  // "Pending"
 				maxCon := 11 // "Details"
 				ev := m.eventFilter()
 				for _, r := range s.rows {
@@ -2633,12 +2647,16 @@ func (m Model) View() string {
 						if w := lipgloss.Width(r.name); w > maxName {
 							maxName = w
 						}
-						if w := lipgloss.Width(r.title); w > maxCur {
+						if w := lipgloss.Width(statusText(r.health)); w > maxStat {
+							maxStat = w
+						}
+						current := r.title
+						if n := pendingAhead(r.pending); n > 0 {
+							current += fmt.Sprintf(" (< %d)", n)
+						}
+						if w := lipgloss.Width(current); w > maxCur {
 							maxCur = w
 						}
-					}
-					if w := lipgloss.Width(r.pending); w > maxPen {
-						maxPen = w
 					}
 					if w := lipgloss.Width(detailsText(r.health, r.contributors, ev)); w > maxCon {
 						maxCon = w
@@ -2650,14 +2668,11 @@ func (m Model) View() string {
 				if maxCur > 40 {
 					maxCur = 40
 				}
-				if maxPen > 60 {
-					maxPen = 60
-				}
 				// Details keeps every column the other fields don't need so
 				// long health summaries (event history, probe failures) stay
 				// visible instead of being cut at a fixed cap.
 				if m.width > 0 {
-					avail := m.width - maxName - maxCur - maxPen - 10 // row prefix + separators + margin
+					avail := m.width - maxName - maxStat - maxCur - 8 // row prefix + separators + margin
 					if avail < 11 {
 						avail = 11
 					}
@@ -2670,15 +2685,15 @@ func (m Model) View() string {
 					"    ",
 					padWidth("Name", maxName),
 					sep,
-					padWidth("Current", maxCur),
+					padWidth("Status", maxStat),
 					sep,
-					padWidth("Pending", maxPen),
+					padWidth("Current", maxCur),
 					sep,
 					padWidth("Details", maxCon))
 				b.WriteString(headerStyle.Render(header))
 				b.WriteString("\n")
 
-				body := m.renderPaneRows(s, globalIdx, maxName, maxCur, maxPen, maxCon, sep, ev)
+				body := m.renderPaneRows(s, globalIdx, maxName, maxStat, maxCur, maxCon, sep, ev)
 				m.writeSectionPane(s, body, len(s.rows), &b)
 			}
 			globalIdx += len(s.rows)
@@ -2920,7 +2935,12 @@ func (m *Model) eventFilter() eventFilter {
 // behind a │ separator and marked dim so they read as past and ignorable while
 // keeping their hue. Restarts turn red only when the workload is currently in
 // trouble; a rollout in progress shows a blue ⟳ instead of the readiness check.
-func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
+// statusSegments computes the headline "status" segments for a workload: the
+// ✔/✖/⟳/⇑/⇓ switch output that healthSegments leads with. For a failing rollout
+// this is [✖, ⟳Progressing N/M]; the Status column shows only the first of
+// these (✖) and Details gets the rest. Returns empty when the workload has no
+// primary state (e.g. scaled to zero with only history).
+func statusSegments(h k8s.Health) []healthSeg {
 	up, down := scaleDirection(h)
 	scaling := up || down
 	problems := h.FailedPods > 0 || len(h.Waiting) > 0 || len(h.FailedReasons) > 0 || h.StuckPendingPods > 0 ||
@@ -2928,15 +2948,15 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 	if !h.Progressing {
 		problems = problems || h.PendingPods > 0
 	}
-	restartKind := segWarn
-	if problems {
-		restartKind = segBad
-	}
 	var segs []healthSeg
 	switch {
 	case h.Progressing:
 		if problems {
-			segs = append(segs, healthSeg{"✖", segBad, false})
+			s := "✖"
+			if h.DesiredReplicas > 0 && h.NewReadyReplicas >= 0 {
+				s = fmt.Sprintf("✖%d/%d", h.NewReadyReplicas, h.DesiredReplicas)
+			}
+			segs = append(segs, healthSeg{s, segBad, false})
 		}
 		icon := "⟳Progressing"
 		if h.DesiredReplicas > 0 && h.NewReadyReplicas >= 0 {
@@ -2962,6 +2982,25 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 	case h.Replicas > 0:
 		segs = append(segs, healthSeg{"✖", segBad, false})
 	}
+	return segs
+}
+
+// healthSegments computes all display segments for a health value, starting
+// with the status segments and continuing with timings, history, events, and
+// contributor-level details.
+func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
+	up, down := scaleDirection(h)
+	scaling := up || down
+	problems := h.FailedPods > 0 || len(h.Waiting) > 0 || len(h.FailedReasons) > 0 || h.StuckPendingPods > 0 ||
+		(!h.Ready && !h.Progressing && !scaling) || hasHardCondition(h.Conditions)
+	if !h.Progressing {
+		problems = problems || h.PendingPods > 0
+	}
+	restartKind := segWarn
+	if problems {
+		restartKind = segBad
+	}
+	segs := statusSegments(h)
 	if h.StartupMax > 0 {
 		segs = append(segs, healthSeg{fmt.Sprintf("⏱%s", shortDur(h.StartupMax)), segMuted, false})
 	}
@@ -3072,6 +3111,46 @@ func healthEmpty(h k8s.Health) bool {
 		len(h.Conditions) == 0 && len(h.FailedReasons) == 0 && h.PendingPods == 0 && h.FailedPods == 0 &&
 		!h.Progressing && !h.Paused && h.ScaleUp == 0 && h.ScaleDown == 0 && h.StartupMax == 0 && h.DeployDuration == 0 &&
 		!h.HpaScaleLimited
+}
+
+// statusText returns the plain-text Status column value: the first status
+// segment (✔N/N, ✔, ✖, ⟳Progressing N/M, ⇑N/M, ⇓). Empty when the workload has
+// no primary status (e.g. scaled to zero with only history).
+func statusText(health string) string {
+	h := parseHealth(health)
+	if healthEmpty(h) {
+		return ""
+	}
+	segs := statusSegments(h)
+	if len(segs) == 0 {
+		return ""
+	}
+	return segs[0].text
+}
+
+// renderStatusColored returns the styled Status column value.
+func renderStatusColored(health string) string {
+	h := parseHealth(health)
+	if healthEmpty(h) {
+		return ""
+	}
+	segs := statusSegments(h)
+	if len(segs) == 0 {
+		return ""
+	}
+	s := segs[0]
+	switch s.kind {
+	case segWarn:
+		return healthWarn.Render(s.text)
+	case segBad:
+		return healthBad.Render(s.text)
+	case segMuted:
+		return healthMuted.Render(s.text)
+	case segInfo:
+		return healthInfo.Render(s.text)
+	default:
+		return s.text
+	}
 }
 
 // formatHealth renders the cached health string as a compact plain-text column
@@ -3185,17 +3264,28 @@ func reasonPrefix(s string) string {
 	return "⚠"
 }
 
-// detailsText renders the plain (unstyled) Details column value: the health
-// summary plus any contributor names, used for width computation.
+// detailsText renders the plain (unstyled) Details column value: health segments
+// after the first status segment plus any contributor names, used for width
+// computation. For a failing rollout this keeps the ⟳Progressing N/M that the
+// Status column's ✖ replaces.
 func detailsText(health, contributors string, ev eventFilter) string {
+	h := parseHealth(health)
 	var parts []string
-	if h := formatHealth(health, ev); h != "" {
-		parts = append(parts, h)
+	if !healthEmpty(h) {
+		segs := healthSegments(h, ev)
+		if len(statusSegments(h)) > 0 && len(segs) > 1 {
+			segs = segs[1:]
+		} else if len(statusSegments(h)) > 0 {
+			segs = nil
+		}
+		for _, s := range segs {
+			parts = append(parts, s.text)
+		}
 	}
 	if contributors != "" {
 		parts = append(parts, contributors)
 	}
-	return strings.Join(parts, " · ")
+	return strings.Join(parts, " ")
 }
 
 // renderHealthColored styles each health segment individually: plain ✔ (or a
@@ -3243,18 +3333,53 @@ func renderHealthColored(health string, ev eventFilter) string {
 	return strings.Join(parts, " ")
 }
 
-// renderDetails styles the Details column. The health segments keep their
-// colors on the selected row too — the highlight lives in the left margin, so
-// the full-line reverse no longer applies here.
+// renderDetails styles the Details column: health segments after the first
+// status segment plus contributor names. The health segments keep their colors
+// on the selected row too — the highlight lives in the left margin, so the
+// full-line reverse no longer applies here.
 func renderDetails(health, contributors string, ev eventFilter) string {
-	if health == "" {
-		return contributors
+	h := parseHealth(health)
+	var parts []string
+	if !healthEmpty(h) {
+		segs := healthSegments(h, ev)
+		if len(statusSegments(h)) > 0 && len(segs) > 1 {
+			segs = segs[1:]
+		} else if len(statusSegments(h)) > 0 {
+			segs = nil
+		}
+		for _, s := range segs {
+			switch s.kind {
+			case segWarn:
+				style := healthWarn
+				if s.dim {
+					style = style.Faint(true)
+				}
+				parts = append(parts, style.Render(s.text))
+			case segBad:
+				style := healthBad
+				if s.dim {
+					style = style.Faint(true)
+				}
+				parts = append(parts, style.Render(s.text))
+			case segMuted:
+				style := healthMuted
+				if s.dim {
+					style = style.Faint(true)
+				}
+				parts = append(parts, style.Render(s.text))
+			case segInfo:
+				parts = append(parts, healthInfo.Render(s.text))
+			case segSep:
+				parts = append(parts, healthMuted.Render(s.text))
+			default:
+				parts = append(parts, s.text)
+			}
+		}
 	}
-	healthText := renderHealthColored(health, ev)
-	if contributors == "" {
-		return healthText
+	if contributors != "" {
+		parts = append(parts, contributors)
 	}
-	return healthText + " · " + contributors
+	return strings.Join(parts, " ")
 }
 
 // serializeUntaggedCommits turns the untagged commit list into the on-disk JSON

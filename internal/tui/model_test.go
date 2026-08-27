@@ -244,8 +244,8 @@ func TestHealthSegmentsRolloutFlagsRealProblems(t *testing.T) {
 func TestHealthSegmentsFailingRolloutXPrecedesFraction(t *testing.T) {
 	h := k8s.Health{Progressing: true, DesiredReplicas: 3, NewReadyReplicas: 1, PendingPods: 2, StuckPendingPods: 1}
 	segs := healthSegments(h, eventFilter{})
-	if len(segs) < 2 || segs[0].text != "✖" || segs[1].text != "⟳Progressing 1/3" {
-		t.Fatalf("segments = %v, want ✖ then ⟳Progressing 1/3", segs)
+	if len(segs) < 2 || segs[0].text != "✖1/3" || segs[1].text != "⟳Progressing 1/3" {
+		t.Fatalf("segments = %v, want ✖1/3 then ⟳Progressing 1/3", segs)
 	}
 }
 
@@ -1458,5 +1458,200 @@ func TestRateLimitStyle(t *testing.T) {
 	}
 	if got := frac(5, 100); got != 2 {
 		t.Fatalf("5%% remaining styled %d, want red", got)
+	}
+}
+
+func TestStatusTextReady(t *testing.T) {
+	h := k8s.Health{Ready: true, Replicas: 3, ReadyReplicas: 3, DesiredReplicas: 3}
+	if got := statusText(serializeHealth(h)); got != "✔3/3" {
+		t.Fatalf("statusText(ready) = %q, want ✔3/3", got)
+	}
+}
+
+func TestStatusTextReadyNoReplicas(t *testing.T) {
+	h := k8s.Health{Ready: true, Replicas: 1, ReadyReplicas: 1}
+	if got := statusText(serializeHealth(h)); got != "✔" {
+		t.Fatalf("statusText(ready no replicas) = %q, want ✔", got)
+	}
+}
+
+func TestStatusTextProgressing(t *testing.T) {
+	h := k8s.Health{Progressing: true, DesiredReplicas: 5, NewReadyReplicas: 2}
+	if got := statusText(serializeHealth(h)); got != "⟳Progressing 2/5" {
+		t.Fatalf("statusText(progressing) = %q, want ⟳Progressing 2/5", got)
+	}
+}
+
+func TestStatusTextFailingRolloutShowsFraction(t *testing.T) {
+	h := k8s.Health{Progressing: true, DesiredReplicas: 5, NewReadyReplicas: 1, StuckPendingPods: 1}
+	if got := statusText(serializeHealth(h)); got != "✖1/5" {
+		t.Fatalf("statusText(failing rollout) = %q, want ✖1/5", got)
+	}
+	// No replica data → fall back to the bare ✖.
+	h = k8s.Health{Progressing: true, NewReadyReplicas: -1, StuckPendingPods: 1}
+	if got := statusText(serializeHealth(h)); got != "✖" {
+		t.Fatalf("statusText(failing rollout no replicas) = %q, want ✖", got)
+	}
+}
+
+func TestStatusTextScalingUp(t *testing.T) {
+	// A ready, scaling workload shows the ✔ status; the ⇑ arrow is a
+	// secondary segment that stays in Details.
+	h := k8s.Health{Ready: true, Replicas: 3, ReadyReplicas: 3, DesiredReplicas: 12, ScaleUp: 9}
+	if got := statusText(serializeHealth(h)); got != "✔" {
+		t.Fatalf("statusText(upscaling ready) = %q, want ✔", got)
+	}
+	details := stripANSI(renderDetails(serializeHealth(h), "", eventFilter{}))
+	if !strings.Contains(details, "⇑3/12") {
+		t.Fatalf("renderDetails should contain ⇑3/12, got %q", details)
+	}
+}
+
+func TestStatusTextScalingDown(t *testing.T) {
+	h := k8s.Health{Ready: true, Replicas: 12, ReadyReplicas: 12, DesiredReplicas: 3}
+	if got := statusText(serializeHealth(h)); got != "✔" {
+		t.Fatalf("statusText(scaling down) = %q, want ✔", got)
+	}
+}
+
+func TestStatusTextProblems(t *testing.T) {
+	h := k8s.Health{Replicas: 4, ReadyReplicas: 2}
+	if got := statusText(serializeHealth(h)); got != "✖" {
+		t.Fatalf("statusText(problems) = %q, want ✖", got)
+	}
+}
+
+func TestStatusTextEmpty(t *testing.T) {
+	h := k8s.Health{ScaleDown: 6}
+	if got := statusText(serializeHealth(h)); got != "" {
+		t.Fatalf("statusText(scaled to zero history) = %q, want empty", got)
+	}
+}
+
+func TestRenderStatusColoredKind(t *testing.T) {
+	forceColor()
+	// segOK → plain (no ANSI)
+	h := k8s.Health{Ready: true, Replicas: 1, ReadyReplicas: 1, DesiredReplicas: 1}
+	got := renderStatusColored(serializeHealth(h))
+	if strings.Contains(got, "\x1b[") {
+		t.Fatalf("statusText(segOK) should be plain, got ANSI %q", got)
+	}
+	// segInfo → healthInfo color
+	h = k8s.Health{Progressing: true, DesiredReplicas: 5, NewReadyReplicas: 2}
+	got = renderStatusColored(serializeHealth(h))
+	if !strings.Contains(got, "\x1b[") {
+		t.Fatalf("statusText(segInfo) should be styled, got plain %q", got)
+	}
+	// segBad → healthBad color
+	h = k8s.Health{Replicas: 4, ReadyReplicas: 2}
+	got = renderStatusColored(serializeHealth(h))
+	if !strings.Contains(got, "\x1b[") {
+		t.Fatalf("statusText(segBad) should be styled, got plain %q", got)
+	}
+}
+
+func TestDetailsExcludesStatusSegment(t *testing.T) {
+	h := k8s.Health{Ready: true, Replicas: 3, ReadyReplicas: 3, DesiredReplicas: 3, Restarts: 2}
+	details := detailsText(serializeHealth(h), "", eventFilter{})
+	if strings.Contains(details, "✔3/3") {
+		t.Fatalf("detailsText should not contain status glyph, got %q", details)
+	}
+	if !strings.Contains(details, "↻2") {
+		t.Fatalf("detailsText should contain restart segment, got %q", details)
+	}
+}
+
+func TestDetailsIncludesContributors(t *testing.T) {
+	h := k8s.Health{Ready: true, Replicas: 1, ReadyReplicas: 1, DesiredReplicas: 1}
+	details := detailsText(serializeHealth(h), "alice, bob", eventFilter{})
+	if !strings.Contains(details, "alice, bob") {
+		t.Fatalf("detailsText should include contributors, got %q", details)
+	}
+	// Status glyph should not appear in details
+	if strings.Contains(details, "✔") {
+		t.Fatalf("detailsText should not contain status glyph, got %q", details)
+	}
+}
+
+func TestDetailsEmptyHealthShowsContributors(t *testing.T) {
+	details := detailsText("", "carol", eventFilter{})
+	if details != "carol" {
+		t.Fatalf("detailsText(empty health) = %q, want carol", details)
+	}
+}
+
+func TestRenderDetailsExcludesStatusSegment(t *testing.T) {
+	forceColor()
+	h := k8s.Health{Ready: true, Replicas: 3, ReadyReplicas: 3, DesiredReplicas: 3, Restarts: 2}
+	got := renderDetails(serializeHealth(h), "", eventFilter{})
+	plain := stripANSI(got)
+	if strings.Contains(plain, "✔3/3") {
+		t.Fatalf("renderDetails should not contain status glyph, got %q", got)
+	}
+	if !strings.Contains(plain, "↻2") {
+		t.Fatalf("renderDetails should contain restart segment, got %q", got)
+	}
+}
+
+func TestRenderDetailsFailingRolloutShowsProgressingInDetails(t *testing.T) {
+	forceColor()
+	h := k8s.Health{Progressing: true, DesiredReplicas: 5, NewReadyReplicas: 1, StuckPendingPods: 1}
+	status := statusText(serializeHealth(h))
+	details := stripANSI(renderDetails(serializeHealth(h), "", eventFilter{}))
+	if status != "✖1/5" {
+		t.Fatalf("statusText = %q, want ✖1/5", status)
+	}
+	if !strings.Contains(details, "⟳Progressing 1/5") {
+		t.Fatalf("renderDetails should contain ⟳Progressing 1/5, got %q", details)
+	}
+}
+
+func TestPaneRowStatusColumn(t *testing.T) {
+	forceColor()
+	h := serializeHealth(k8s.Health{Ready: true, Replicas: 3, ReadyReplicas: 3, DesiredReplicas: 3, Restarts: 1})
+	s := &section{
+		rows: []row{
+			{name: "auth-svc", title: "v10.1.0", pending: "+2", health: h, contributors: "alice"},
+			{name: "", pending: "v10.1.0-rc.1", depth: 1, contributors: "bob"},
+		},
+	}
+	m := Model{width: 120}
+	ev := eventFilter{}
+	statusW := lipgloss.Width(statusText(h))
+	body := m.renderPaneRows(s, 0, 10, statusW+2, 12, 40, "  ", ev)
+	lines := strings.Split(body, "\n")
+	if len(lines) < 2 {
+		t.Fatalf("renderPaneRows returned %d lines, want ≥2", len(lines))
+	}
+	// depth==0 line should have the status glyph separate from the details
+	plain0 := stripANSI(lines[0])
+	if !strings.Contains(plain0, "✔3/3") {
+		t.Fatalf("depth==0 line missing status glyph, got %q", plain0)
+	}
+	if !strings.Contains(plain0, "↻1") {
+		t.Fatalf("depth==0 line missing restart in details, got %q", plain0)
+	}
+	// depth==1 line should show the tag in the Current slot, not a separate Pending column
+	plain1 := stripANSI(lines[1])
+	if !strings.Contains(plain1, "v10.1.0-rc.1") {
+		t.Fatalf("depth==1 line missing tag in Current column, got %q", plain1)
+	}
+}
+
+func TestPendingAhead(t *testing.T) {
+	if got := pendingAhead("+2"); got != 2 {
+		t.Fatalf("pendingAhead(+2) = %d, want 2", got)
+	}
+	if got := pendingAhead("+12"); got != 12 {
+		t.Fatalf("pendingAhead(+12) = %d, want 12", got)
+	}
+	if got := pendingAhead("-"); got != 0 {
+		t.Fatalf("pendingAhead(-) = %d, want 0", got)
+	}
+	if got := pendingAhead(""); got != 0 {
+		t.Fatalf("pendingAhead(empty) = %d, want 0", got)
+	}
+	if got := pendingAhead("abc"); got != 0 {
+		t.Fatalf("pendingAhead(abc) = %d, want 0", got)
 	}
 }
