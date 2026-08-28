@@ -612,18 +612,21 @@ func TestHpaScaleLimitSegment(t *testing.T) {
 	h := k8s.Health{Ready: true, Replicas: 3, ReadyReplicas: 3, DesiredReplicas: 3, HpaMaxReplicas: 3, HpaScaleLimited: true}
 	found := false
 	for _, s := range healthSegments(h, eventFilter{}) {
-		if s.text == "⇪3/3" {
+		if s.text == "⚠HPA:ScalingLimited" {
 			found = true
 			if s.kind != segWarn {
-				t.Fatalf("⇪3/3 kind = %d, want segWarn", s.kind)
+				t.Fatalf("⚠HPA:ScalingLimited kind = %d, want segWarn", s.kind)
 			}
+		}
+		if strings.HasPrefix(s.text, "⇪") {
+			t.Fatalf("segments = %v, old ⇪ maxReplicas glyph should be gone", healthSegments(h, eventFilter{}))
 		}
 	}
 	if !found {
-		t.Fatalf("segments = %v, want ⇪3/3 when the HPA is pinned at maxReplicas", healthSegments(h, eventFilter{}))
+		t.Fatalf("segments = %v, want ⚠HPA:ScalingLimited when the HPA is pinned at maxReplicas", healthSegments(h, eventFilter{}))
 	}
-	if got := formatHealth(serializeHealth(h), eventFilter{}); !strings.Contains(got, "⇪3/3") {
-		t.Fatalf("formatHealth round-trip = %q, want it to contain ⇪3/3", got)
+	if got := formatHealth(serializeHealth(h), eventFilter{}); !strings.Contains(got, "⚠HPA:ScalingLimited") {
+		t.Fatalf("formatHealth round-trip = %q, want it to contain ⚠HPA:ScalingLimited", got)
 	}
 
 	// an HPA with headroom renders nothing
@@ -752,13 +755,13 @@ func TestRenderRowMarginOnlyHighlight(t *testing.T) {
 		padWidth(truncateWidth("fix the thing", titleWidth), titleWidth), padWidth(ts, 6))
 
 	margin := padWidth("    ✓  ·", 10)
-	unselected := renderRow(r, false, false, "⠁", repoWidth, maxWidth)
+	unselected := renderRow(r, false, false, "⠁", repoWidth, maxWidth, 0)
 	expected := margin + rest
 	if unselected != expected {
 		t.Fatalf("unselected row:\n got %q\nwant %q", unselected, expected)
 	}
 
-	selected := renderRow(r, true, false, "⠁", repoWidth, maxWidth)
+	selected := renderRow(r, true, false, "⠁", repoWidth, maxWidth, 0)
 	wantSelected := selectedStyle.Render(margin) + rest
 	if selected != wantSelected {
 		t.Fatalf("selected row:\n got %q\nwant %q", selected, wantSelected)
@@ -791,7 +794,7 @@ func TestRenderRowSelectedRefreshIconNotMangled(t *testing.T) {
 	margin := padWidth(padWidth(icon, 4)+"✓  ·", 10)
 	want := selectedStyle.Render(margin) + rest
 
-	got := renderRow(r, true, true, icon, repoWidth, maxWidth)
+	got := renderRow(r, true, true, icon, repoWidth, maxWidth, 0)
 	if got != want {
 		t.Fatalf("selected refreshing row:\n got %q\nwant %q", got, want)
 	}
@@ -848,11 +851,37 @@ func TestRenderRowCiIconFailure(t *testing.T) {
 				padWidth(tt.wantSync, 5), padWidth("org/app", repoWidth), 123,
 				padWidth(truncateWidth("fix the thing", titleWidth), titleWidth), padWidth(ts, 6))
 			margin := padWidth("    "+tt.wantIcon+"  ·", 10)
-			got := renderRow(r, false, false, "⠁", repoWidth, maxWidth)
+			got := renderRow(r, false, false, "⠁", repoWidth, maxWidth, 0)
 			if want := margin + rest; got != want {
 				t.Fatalf("%s row:\n got %q\nwant %q", tt.name, got, want)
 			}
 		})
+	}
+}
+
+func TestRenderRowAuthorColumn(t *testing.T) {
+	forceColor()
+	r := row{
+		title:     "fix the thing",
+		repo:      "org/app",
+		num:       123,
+		updatedAt: "2026-08-05T12:00:00Z",
+		author:    "taylorzr",
+	}
+	ts := relativeTime(r.updatedAt)
+	got := stripANSI(renderRow(r, false, false, "⠁", 30, 120, 16))
+	if !strings.Contains(got, "taylorzr") {
+		t.Fatalf("author not rendered, got %q", got)
+	}
+	authIdx := strings.Index(got, "taylorzr")
+	ageIdx := strings.Index(got, ts)
+	if ageIdx < authIdx {
+		t.Fatalf("author should precede age (%q), got %q", ts, got)
+	}
+
+	gotNo := stripANSI(renderRow(row{title: "x", repo: "org/app", num: 1, updatedAt: "2026-08-05T12:00:00Z", author: "taylorzr"}, false, false, "⠁", 30, 120, 0))
+	if strings.Contains(gotNo, "taylorzr") {
+		t.Fatalf("author should be hidden when authorWidth==0, got %q", gotNo)
 	}
 }
 
@@ -880,7 +909,7 @@ func TestRangeDur(t *testing.T) {
 func TestRenderRowTitleOnlyStillHighlights(t *testing.T) {
 	forceColor()
 	r := row{title: "some plain section row"}
-	got := renderRow(r, true, false, "⠁", 30, 120)
+	got := renderRow(r, true, false, "⠁", 30, 120, 0)
 	if got != selectedStyle.Render("some plain section row") {
 		t.Fatalf("title-only selected row:\n got %q", got)
 	}
@@ -1579,6 +1608,13 @@ func TestStatusTextProblems(t *testing.T) {
 	h := k8s.Health{Replicas: 4, ReadyReplicas: 2}
 	if got := statusText(serializeHealth(h)); got != "✖" {
 		t.Fatalf("statusText(problems) = %q, want ✖", got)
+	}
+}
+
+func TestStatusTextNotReadyShowsCounts(t *testing.T) {
+	h := k8s.Health{Replicas: 4, ReadyReplicas: 2, DesiredReplicas: 3, PendingPods: 1}
+	if got := statusText(serializeHealth(h)); got != "✖2/3" {
+		t.Fatalf("statusText(not ready with desired) = %q, want ✖2/3", got)
 	}
 }
 

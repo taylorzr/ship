@@ -184,7 +184,7 @@ func (m Model) writeSectionPane(s *section, body string, total int, b *strings.B
 	}
 }
 
-func (m Model) renderPRRows(s *section, startGlobal int, repoWidth, maxWidth int) string {
+func (m Model) renderPRRows(s *section, startGlobal int, repoWidth, maxWidth, authorWidth int) string {
 	var bb strings.Builder
 	for i := range s.rows {
 		r := s.rows[i]
@@ -192,7 +192,7 @@ func (m Model) renderPRRows(s *section, startGlobal int, repoWidth, maxWidth int
 		// selected in the sections behind it.
 		line := renderRow(r, startGlobal+i == m.cursor && !m.cmdMode,
 			m.refreshingItem.repo == r.repo && m.refreshingItem.num == r.num,
-			m.spin.View(), repoWidth, maxWidth)
+			m.spin.View(), repoWidth, maxWidth, authorWidth)
 		bb.WriteString(line)
 		bb.WriteString("\n")
 	}
@@ -276,6 +276,7 @@ type row struct {
 	contributors string // version contributors (releases section)
 	mergeState   string // PR merge state; "BEHIND" = needs backmerge
 	health       string // service deployment health summary
+	author       string // PR author (shown for To Review / Dependencies)
 }
 
 type section struct {
@@ -710,6 +711,7 @@ func (m *Model) loadFromCache() {
 			mergeable:  p.Mergeable,
 			mergeState: p.MergeState,
 			role:       "review-direct",
+			author:     p.Author,
 			headSha:    p.HeadSHA,
 		}
 		m.loadReviewState(&r)
@@ -734,6 +736,7 @@ func (m *Model) loadFromCache() {
 			mergeable:  p.Mergeable,
 			mergeState: p.MergeState,
 			role:       "review-team",
+			author:     p.Author,
 			headSha:    p.HeadSHA,
 		}
 		m.loadReviewState(&r)
@@ -758,6 +761,7 @@ func (m *Model) loadFromCache() {
 			mergeable:  p.Mergeable,
 			mergeState: p.MergeState,
 			headSha:    p.HeadSHA,
+			author:     p.Author,
 		}
 		m.loadReviewState(&r)
 		s4.allRows = append(s4.allRows, r)
@@ -2655,20 +2659,28 @@ func (m Model) View() string {
 					}
 				}
 				titleWidth := m.width - repoWidth - 33
+				authorWidth := 0
+				if s.name == "To Review" || s.name == "Dependencies" {
+					authorWidth = 16
+					titleWidth -= authorWidth + 2
+				}
 				if titleWidth < 1 {
 					titleWidth = 1
 				}
-				header := fmt.Sprintf("%s%s%s  %s  %s  %s",
+				header := fmt.Sprintf("%s%s%s  %s  %s",
 					"    CI Re ",
 					padWidth("Up", 5),
 					padWidth("Repo", repoWidth),
 					padWidth("#", 6),
-					padWidth("Title", titleWidth),
-					padWidth("Age", ageWidth))
+					padWidth("Title", titleWidth))
+				if authorWidth > 0 {
+					header += "  " + padWidth("Author", authorWidth)
+				}
+				header += "  " + padWidth("Age", ageWidth)
 				b.WriteString(headerStyle.Render(header))
 				b.WriteString("\n")
 
-				body := m.renderPRRows(s, globalIdx, repoWidth, m.width)
+				body := m.renderPRRows(s, globalIdx, repoWidth, m.width, authorWidth)
 				m.writeSectionPane(s, body, len(s.rows), &b)
 			} else {
 				// compute column widths
@@ -3023,7 +3035,11 @@ func statusSegments(h k8s.Health) []healthSeg {
 			segs = append(segs, healthSeg{fmt.Sprintf("%s", dir), segInfo, false})
 		}
 	case h.Replicas > 0:
-		segs = append(segs, healthSeg{"✖", segBad, false})
+		s := "✖"
+		if h.DesiredReplicas > 0 {
+			s = fmt.Sprintf("✖%d/%d", h.ReadyReplicas, h.DesiredReplicas)
+		}
+		segs = append(segs, healthSeg{s, segBad, false})
 	}
 	return segs
 }
@@ -3099,7 +3115,7 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 	// HPA pinned at maxReplicas: a current capacity state, so it sits with the
 	// status segments rather than behind the past-events │ separator.
 	if h.HpaScaleLimited && h.HpaMaxReplicas > 0 {
-		segs = append(segs, healthSeg{fmt.Sprintf("⇪%d/%d", h.ReadyReplicas, h.HpaMaxReplicas), segWarn, false})
+		segs = append(segs, healthSeg{"⚠HPA:ScalingLimited", segWarn, false})
 	}
 	var events []healthSeg
 	// HPA rescale totals share the muted │ section with past events, sitting
@@ -3203,7 +3219,7 @@ func renderStatusColored(health string) string {
 // ⏸DeploymentPaused paused,
 // ↻N restarts, ↻OOMKilled restart causes, ⚠ error events (colored by age in
 // the TUI), ∞ waiting/retrying, ⌛N pending, 💀N failed, ⚠ conditions.
-// ⇪N/max (yellow) marks an HPA pinned at maxReplicas that wanted to scale
+// ⚠HPA:ScalingLimited (yellow) marks an HPA pinned at maxReplicas that wanted to scale
 // higher. HPA rescale totals from the last hour (HPA ↑N ↓N) are grouped with
 // past events behind a │ separator.
 func formatHealth(health string, ev eventFilter) string {
@@ -3637,7 +3653,7 @@ func relativeDur(d time.Duration) string {
 	}
 }
 
-func renderRow(r row, selected bool, refreshing bool, refreshIcon string, repoWidth, maxWidth int) string {
+func renderRow(r row, selected bool, refreshing bool, refreshIcon string, repoWidth, maxWidth, authorWidth int) string {
 	aiIcon := ""
 	if refreshing {
 		aiIcon = refreshIcon
@@ -3680,11 +3696,22 @@ func renderRow(r row, selected bool, refreshing bool, refreshIcon string, repoWi
 		ts := relativeTime(r.updatedAt)
 		repo := truncateWidth(r.repo, repoWidth)
 		titleWidth := maxWidth - repoWidth - 33
+		if authorWidth > 0 {
+			titleWidth -= authorWidth + 2
+		}
 		if titleWidth < 1 {
 			titleWidth = 1
 		}
-		rest := fmt.Sprintf("%s%s  #%-5d  %s  %s",
-			padWidth(sync, 5), padWidth(repo, repoWidth), r.num, padWidth(truncateWidth(title, titleWidth), titleWidth), padWidth(ts, ageWidth))
+		rest := fmt.Sprintf("%s%s  #%-5d  %s",
+			padWidth(sync, 5), padWidth(repo, repoWidth), r.num, padWidth(truncateWidth(title, titleWidth), titleWidth))
+		if authorWidth > 0 {
+			author := ""
+			if r.author != "" {
+				author = healthMuted.Render(truncateWidth(r.author, authorWidth))
+			}
+			rest += "  " + padWidth(author, authorWidth)
+		}
+		rest += "  " + padWidth(ts, ageWidth)
 		if selected {
 			return selectedStyle.Render(margin) + rest
 		}
@@ -3979,7 +4006,7 @@ func (m Model) renderHelpOverlay() string {
 				{"⟳Progressing 2/5", "rolling out · new pods ready / desired"},
 				{"⇑3/4 / ⇓3/1", "scaling to target replicas (current/desired)"},
 				{"HPA↑4↓2", "HPA rescaled pods (last hour)"},
-				{"⇪10/10", "HPA at maxReplicas · wanted more"},
+				{"⚠HPA:ScalingLimited", "HPA at maxReplicas · wanted more"},
 				{"⏱30s", "startup · max app-start→ready (probe sizing)"},
 				{"⧗5m30s", "last deploy · rollout duration (start→healthy, incl. image pull)"},
 				{"↻N", "restarts"},
