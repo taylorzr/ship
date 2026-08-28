@@ -3081,12 +3081,19 @@ func healthSegments(h k8s.Health, ev eventFilter) []healthSeg {
 		}
 	}
 	if h.Restarts > 0 {
-		segs = append(segs, healthSeg{fmt.Sprintf("↻%d", h.Restarts), restartKind, false})
-	}
-	for _, c := range h.RestartCauses {
-		if s := shortEvent(c); s != "" {
-			segs = append(segs, healthSeg{"↻" + s, restartKind, false})
+		text := fmt.Sprintf("↻%d", h.Restarts)
+		if len(h.RestartCauses) > 0 {
+			var causes []string
+			for _, c := range h.RestartCauses {
+				if s := shortEvent(c); s != "" {
+					causes = append(causes, s)
+				}
+			}
+			if len(causes) > 0 {
+				text += "(" + strings.Join(causes, ",") + ")"
+			}
 		}
+		segs = append(segs, healthSeg{text, restartKind, false})
 	}
 	for _, c := range h.Conditions {
 		if (h.Progressing || scaling) && c == "Unavailable" {

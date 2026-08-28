@@ -375,6 +375,44 @@ func TestHealthSegmentsSeparatesAndDimsEvents(t *testing.T) {
 	}
 }
 
+func TestRestartCausesFoldedIntoCount(t *testing.T) {
+	segs := healthSegments(k8s.Health{Restarts: 1, RestartCauses: []string{"Completed"}}, eventFilter{})
+	foundParent := false
+	for _, s := range segs {
+		if s.text == "↻1(Completed)" {
+			foundParent = true
+		}
+		if s.text == "↻Completed" {
+			t.Fatalf("segments = %v, separate ↻Completed segment should be folded into the count", segs)
+		}
+	}
+	if !foundParent {
+		t.Fatalf("segments = %v, want ↻1(Completed)", segs)
+	}
+
+	segs = healthSegments(k8s.Health{Restarts: 1, RestartCauses: []string{"Completed", "OOMKilled"}}, eventFilter{})
+	foundMulti := false
+	for _, s := range segs {
+		if s.text == "↻1(Completed,OOMKilled)" {
+			foundMulti = true
+		}
+	}
+	if !foundMulti {
+		t.Fatalf("segments = %v, want ↻1(Completed,OOMKilled)", segs)
+	}
+
+	segs = healthSegments(k8s.Health{Restarts: 2}, eventFilter{})
+	foundBare := false
+	for _, s := range segs {
+		if s.text == "↻2" {
+			foundBare = true
+		}
+	}
+	if !foundBare {
+		t.Fatalf("segments = %v, want ↻2 with no causes", segs)
+	}
+}
+
 func TestHealthSegmentsNoSeparatorWithoutEvents(t *testing.T) {
 	segs := healthSegments(k8s.Health{Restarts: 2}, eventFilter{})
 	for _, s := range segs {
