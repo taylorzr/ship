@@ -1305,7 +1305,20 @@ func (c *Client) MergePR(ctx context.Context, repo string, number int) error {
 	return nil
 }
 
-func (c *Client) ClosePR(ctx context.Context, repo string, number int) error {
+// ClosePR closes a PR. When msg is non-empty it first posts it as a comment on
+// the PR's issue (the mechanism GitHub's "close with comment" uses), then closes
+// the PR.
+func (c *Client) ClosePR(ctx context.Context, repo string, number int, msg string) error {
+	if msg != "" {
+		out, err := exec.CommandContext(ctx, "gh", "api",
+			fmt.Sprintf("repos/%s/issues/%d/comments", repo, number),
+			"-X", "POST",
+			"-f", "body="+msg,
+		).CombinedOutput()
+		if err != nil {
+			return fmt.Errorf("comment on PR #%d: %s: %w", number, strings.TrimSpace(string(out)), err)
+		}
+	}
 	out, err := exec.CommandContext(ctx, "gh", "api",
 		fmt.Sprintf("repos/%s/pulls/%d", repo, number),
 		"-X", "PATCH",

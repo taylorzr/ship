@@ -1716,3 +1716,24 @@ func TestPendingAhead(t *testing.T) {
 		t.Fatalf("pendingAhead(abc) = %d, want 0", got)
 	}
 }
+
+func TestRenderConfirmCloseMessage(t *testing.T) {
+	forceColor()
+	m := Model{confirm: &confirmAction{action: "close", repo: "zach/ship", num: 7, title: "fix: things", msg: "superseded by #8"}}
+	body := stripANSI(m.renderConfirm())
+	if !strings.Contains(body, "Close PR?") {
+		t.Fatalf("close dialog missing title, got %q", body)
+	}
+	if !strings.Contains(body, "superseded by #8") {
+		t.Fatalf("close dialog missing typed message, got %q", body)
+	}
+	if !strings.Contains(body, "enter to close") {
+		t.Fatalf("close dialog missing close help line, got %q", body)
+	}
+
+	m2 := Model{confirm: &confirmAction{action: "close", repo: "zach/ship", num: 7, title: "fix: things"}}
+	body2 := stripANSI(m2.renderConfirm())
+	if !strings.Contains(body2, "message:") {
+		t.Fatalf("close dialog with empty message missing message label, got %q", body2)
+	}
+}

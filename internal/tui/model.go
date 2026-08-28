@@ -360,6 +360,7 @@ type confirmAction struct {
 	title    string
 	draft    bool
 	warnings []string
+	msg      string // optional close-comment message; only used for "close"
 }
 
 type actionDoneMsg struct {
@@ -382,6 +383,7 @@ type Model struct {
 	loading        map[string]bool
 	sectionErrs    map[string]string
 	confirm        *confirmAction
+	msgCursorOn    bool
 	lastRefreshed  time.Time
 	sectionIdx     int
 	searching      bool
@@ -1787,6 +1789,12 @@ func (m Model) rateLimitRefreshCmd() tea.Cmd {
 
 type rateLimitDoneMsg struct{}
 
+type cursorBlinkMsg struct{}
+
+func cursorBlinkCmd() tea.Cmd {
+	return tea.Tick(500*time.Millisecond, func(time.Time) tea.Msg { return cursorBlinkMsg{} })
+}
+
 func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	switch msg := msg.(type) {
 	case tea.WindowSizeMsg:
@@ -1799,6 +1807,13 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		var cmd tea.Cmd
 		m.spin, cmd = m.spin.Update(msg)
 		return m, cmd
+
+	case cursorBlinkMsg:
+		m.msgCursorOn = !m.msgCursorOn
+		if m.confirm != nil && m.confirm.action == "close" {
+			return m, cursorBlinkCmd()
+		}
+		return m, nil
 
 	case tea.KeyMsg:
 		if m.confirm != nil {
@@ -1817,8 +1832,22 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				repo := m.confirm.repo
 				num := m.confirm.num
 				draft := m.confirm.draft
+				msg := m.confirm.msg
 				m.confirm = nil
-				return m, m.execAction(action, repo, num, draft)
+				return m, m.execAction(action, repo, num, draft, msg)
+			case key.Matches(msg, key.NewBinding(key.WithKeys("backspace"))):
+				if m.confirm.action == "close" && len(m.confirm.msg) > 0 {
+					m.confirm.msg = m.confirm.msg[:len(m.confirm.msg)-1]
+					m.msgCursorOn = true
+				}
+			default:
+				if m.confirm.action == "close" {
+					r := []rune(msg.String())
+					if len(r) == 1 && r[0] >= 32 && r[0] <= 126 {
+						m.confirm.msg += string(r[0])
+						m.msgCursorOn = true
+					}
+				}
 			}
 			return m, nil
 		}
@@ -2139,6 +2168,8 @@ func (m Model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 				r := m.currentRow()
 				if r != nil && r.num > 0 {
 					m.confirm = &confirmAction{action: "close", repo: r.repo, num: r.num, title: r.title}
+					m.msgCursorOn = true
+					return m, cursorBlinkCmd()
 				}
 			}
 		case key.Matches(msg, keys.AIReview):
@@ -4165,7 +4196,7 @@ func (m Model) fullRefreshCmd() tea.Cmd {
 	return tea.Batch(cmds...)
 }
 
-func (m Model) execAction(action, repo string, num int, draft bool) tea.Cmd {
+func (m Model) execAction(action, repo string, num int, draft bool, msg string) tea.Cmd {
 	return func() tea.Msg {
 		ctx := context.Background()
 		var err error
@@ -4173,7 +4204,7 @@ func (m Model) execAction(action, repo string, num int, draft bool) tea.Cmd {
 		case "merge":
 			err = m.gh.MergePR(ctx, repo, num)
 		case "close":
-			err = m.gh.ClosePR(ctx, repo, num)
+			err = m.gh.ClosePR(ctx, repo, num, msg)
 		case "draft-toggle":
 			err = m.gh.ToggleDraft(ctx, repo, num, draft)
 		}
@@ -4521,7 +4552,19 @@ func (m Model) renderConfirm() string {
 			b.WriteString("\n")
 		}
 	}
+	if c.action == "close" {
+		cursor := " "
+		if m.msgCursorOn {
+			cursor = "█"
+		}
+		b.WriteString("\n\n")
+		b.WriteString(dialogHelp.Render("message: ") + inputStyle.Render(c.msg+cursor))
+	}
 	b.WriteString("\n")
-	b.WriteString(dialogHelp.Render("enter to confirm · esc to cancel"))
+	if c.action == "close" {
+		b.WriteString(dialogHelp.Render("type a message (leave blank to just close) · enter to close · esc to cancel"))
+	} else {
+		b.WriteString(dialogHelp.Render("enter to confirm · esc to cancel"))
+	}
 	return dialogStyle.Render(b.String())
 }
