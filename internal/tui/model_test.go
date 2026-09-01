@@ -1079,6 +1079,56 @@ func TestServicesForRepo(t *testing.T) {
 	}
 }
 
+func TestServicesSectionShowsSameRepoServices(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "cache.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer st.Close()
+
+	m := testModel(100, 30)
+	m.store = st
+	m.cfg.Services = []config.ServiceConfig{
+		{Name: "api", Repo: "org/app", Context: "ctx-a"},
+		{Name: "worker", Repo: "org/app", Context: "ctx-b"},
+	}
+	for _, v := range []store.CachedVersion{
+		{Name: "api", Repo: "org/app", ProdRef: "v1.0.0"},
+		{Name: "worker", Repo: "org/app", ProdRef: "v1.0.0"},
+	} {
+		if err := st.SaveVersion(v); err != nil {
+			t.Fatalf("SaveVersion(%s): %v", v.Name, err)
+		}
+	}
+
+	m.loadFromCache()
+
+	var services *section
+	for i := range m.sections {
+		if m.sections[i].name == "Services" {
+			services = &m.sections[i]
+		}
+	}
+	if services == nil {
+		t.Fatal("no Services section built")
+	}
+	var top []row
+	for _, r := range services.allRows {
+		if r.depth == 0 {
+			top = append(top, r)
+		}
+	}
+	if len(top) != 2 {
+		t.Fatalf("Services has %d depth-0 rows, want 2 (api + worker)", len(top))
+	}
+	if top[0].name != "api" || top[1].name != "worker" {
+		t.Fatalf("Services depth-0 rows = %q and %q, want api and worker", top[0].name, top[1].name)
+	}
+	if top[0].repo != "org/app" || top[1].repo != "org/app" {
+		t.Fatalf("Services rows not both org/app: %q, %q", top[0].repo, top[1].repo)
+	}
+}
+
 func TestActionDoneRefreshesMatchingServices(t *testing.T) {
 	forceColor()
 	st, err := store.Open(filepath.Join(t.TempDir(), "cache.db"))

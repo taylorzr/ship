@@ -578,37 +578,37 @@ func (m *Model) loadFromCache() {
 	}
 
 	versions, _ := m.store.CachedVersions()
-	svcNames := make(map[string]string, len(m.cfg.Services))
-	svcRepos := make(map[string]bool, len(m.cfg.Services))
-	for _, svc := range m.cfg.Services {
-		svcNames[svc.Repo] = svc.Name
-		svcRepos[svc.Repo] = true
+	byName := make(map[string]store.CachedVersion, len(versions))
+	for i := range versions {
+		v := versions[i]
+		if v.Name == "" {
+			continue
+		}
+		byName[v.Name] = v
 	}
 	so, df, ss, sn, _, _ = m.sectionProp("Services")
 	s3 := section{name: "Services", scrollOffset: so, draftFilter: df, showStarred: ss, sortNewest: sn}
-	for _, v := range versions {
-		if !svcRepos[v.Repo] {
-			continue
-		}
-		title := k8s.ShortRef(v.ProdRef)
-		if title == "" {
-			title = "-"
-		}
-		name := v.Repo
-		if n, ok := svcNames[v.Repo]; ok && n != "" {
-			name = n
+	addServiceRow := func(name, repo string, v store.CachedVersion, found bool) {
+		title := "-"
+		if found {
+			title = k8s.ShortRef(v.ProdRef)
+			if title == "" {
+				title = "-"
+			}
 		}
 		r := row{
 			name:    name,
 			title:   title,
-			repo:    v.Repo,
+			repo:    repo,
 			prodRef: v.ProdRef,
 			sha:     v.ProdSHA,
-			url:     serviceRowURL(v.Repo, v.ProdRef),
+			url:     serviceRowURL(repo, v.ProdRef),
 			depth:   0,
 			health:  v.Health,
 		}
-		if v.Error != "" {
+		if !found {
+			r.title = "✗ not refreshed yet"
+		} else if v.Error != "" {
 			r.title = "✗ " + v.Error
 		} else if v.PendingTags == "" {
 			r.pending = "-"
@@ -618,43 +618,44 @@ func (m *Model) loadFromCache() {
 		}
 		s3.allRows = append(s3.allRows, r)
 		s3.rows = append(s3.rows, r)
-		if v.PendingTags != "" && v.Error == "" {
-			contribs := map[string]struct {
-				ReleaseAuthor string   `json:"release_author"`
-				Contributors  []string `json:"contributors"`
-			}{}
-			if v.PendingContribs != "" {
-				json.Unmarshal([]byte(v.PendingContribs), &contribs)
-			}
-			for _, entry := range strings.Split(v.PendingTags, ", ") {
-				if entry == "" {
-					continue
-				}
-				tag, title := entry, ""
-				if parts := strings.SplitN(entry, "|", 2); len(parts) == 2 {
-					tag, title = parts[0], parts[1]
-				}
-				details := m.formatContributors(contribs[tag].ReleaseAuthor, contribs[tag].Contributors)
-				if title != "" {
-					if details != "" {
-						details = title + " · " + details
-					} else {
-						details = title
-					}
-				}
-				pr := row{
-					pending:      tag,
-					repo:         v.Repo,
-					prodRef:      v.ProdRef,
-					url:          fmt.Sprintf("https://github.com/%s/releases/tag/%s", v.Repo, tag),
-					depth:        1,
-					contributors: details,
-				}
-				s3.allRows = append(s3.allRows, pr)
-				s3.rows = append(s3.rows, pr)
-			}
+		if !found || v.PendingTags == "" || v.Error != "" {
+			return
 		}
-		if v.UntaggedCommits != "" && v.Error == "" {
+		contribs := map[string]struct {
+			ReleaseAuthor string   `json:"release_author"`
+			Contributors  []string `json:"contributors"`
+		}{}
+		if v.PendingContribs != "" {
+			json.Unmarshal([]byte(v.PendingContribs), &contribs)
+		}
+		for _, entry := range strings.Split(v.PendingTags, ", ") {
+			if entry == "" {
+				continue
+			}
+			tag, title := entry, ""
+			if parts := strings.SplitN(entry, "|", 2); len(parts) == 2 {
+				tag, title = parts[0], parts[1]
+			}
+			details := m.formatContributors(contribs[tag].ReleaseAuthor, contribs[tag].Contributors)
+			if title != "" {
+				if details != "" {
+					details = title + " · " + details
+				} else {
+					details = title
+				}
+			}
+			pr := row{
+				pending:      tag,
+				repo:         repo,
+				prodRef:      v.ProdRef,
+				url:          fmt.Sprintf("https://github.com/%s/releases/tag/%s", repo, tag),
+				depth:        1,
+				contributors: details,
+			}
+			s3.allRows = append(s3.allRows, pr)
+			s3.rows = append(s3.rows, pr)
+		}
+		if v.UntaggedCommits != "" {
 			var commits []struct {
 				SHA          string   `json:"sha"`
 				Message      string   `json:"message"`
@@ -674,7 +675,7 @@ func (m *Model) loadFromCache() {
 					pr := row{
 						sha:          c.SHA,
 						pending:      c.SHA[:7],
-						repo:         v.Repo,
+						repo:         repo,
 						prodRef:      v.ProdRef,
 						depth:        1,
 						contributors: details,
@@ -684,6 +685,13 @@ func (m *Model) loadFromCache() {
 				}
 			}
 		}
+	}
+	for _, svc := range m.cfg.Services {
+		v, found := byName[svc.Name]
+		if !found {
+			v = store.CachedVersion{Repo: svc.Repo}
+		}
+		addServiceRow(svc.Name, svc.Repo, v, found)
 	}
 	sections = append(sections, s3)
 	sections = append(sections, s)
@@ -1464,6 +1472,7 @@ func (m Model) resolveServiceVersion(svcCtx context.Context, svc config.ServiceC
 	untagged := serializeUntaggedCommits(v.UntaggedCommits)
 	return store.CachedVersion{
 		Repo:            v.Service.Repo,
+		Name:            svc.Name,
 		ProdRef:         v.ProdRef,
 		ProdSHA:         v.ProdSHA,
 		AheadBy:         v.AheadBy,
@@ -1577,6 +1586,7 @@ func (m Model) refreshItemCmd(ctx context.Context) tea.Cmd {
 			}
 			m.store.SaveVersion(store.CachedVersion{
 				Repo:            v.Service.Repo,
+				Name:            svc.Name,
 				ProdRef:         v.ProdRef,
 				ProdSHA:         v.ProdSHA,
 				AheadBy:         v.AheadBy,
@@ -1628,6 +1638,7 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 		loginBefore := k8s.LastLogin()
 
 		type svcResult struct {
+			Name            string
 			Repo            string
 			ProdRef         string
 			ProdSHA         string
@@ -1684,6 +1695,7 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 					}
 				}
 				results <- svcResult{
+					Name:            svc.Name,
 					Repo:            svc.Repo,
 					ProdRef:         r.ProdRef,
 					ProdSHA:         r.ProdSHA,
@@ -1703,6 +1715,7 @@ func (m Model) refreshReleases(ctx context.Context) tea.Cmd {
 		var lastErr error
 		for res := range results {
 			m.store.SaveVersion(store.CachedVersion{
+				Name:            res.Name,
 				Repo:            res.Repo,
 				ProdRef:         res.ProdRef,
 				ProdSHA:         res.ProdSHA,
